@@ -38,6 +38,22 @@ const { accountLoginState } = require('./login-state.js');
 
 function _readJson(f) { try { return JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { return null; } }
 function _writeAtomic(f, text) { fs.writeFileSync(f + '.tmp', text); fs.renameSync(f + '.tmp', f); }
+// THE ONE WRITE PATH, in its REPLACE mode (src/usage-cache-write.js). This
+// migration is the single writer allowed to replace a cache's limits instead of
+// merging into them: its whole job is to remove a bucket that is provably not
+// this account's, and a merge would resurrect what it just archived. Routing it
+// here anyway keeps the directory owned by one module (the census) and gives the
+// repaired file the same canonical `limits` every other writer produces —
+// otherwise the very files the repair touched would be the ones that still
+// carried a hand-shaped snapshot.
+const _usageWrite = require('./usage-cache-write.js');
+const { familyOfScopedBucket: _familyOf } = require('./model-family.js');
+function _writeCacheAtomic(cacheDir, key, obj) {
+  delete obj.limits; // the repaired object states the whole truth about this file
+  const r = _usageWrite.writeCacheObject({ cacheDir, key, obj, replace: true, familyOf: _familyOf, source: obj.source || null });
+  if (!r.ok) _writeAtomic(_usageWrite.cacheFileFor(cacheDir, key), JSON.stringify(obj)); // a repair that cannot write is worse than one that writes a legacy shape
+  return r.ok;
+}
 function _appendArchive(archiveDir, name, rows) {
   if (!rows.length) return;
   fs.mkdirSync(archiveDir, { recursive: true });
@@ -224,13 +240,13 @@ function repairUsageCaches({ cacheDir, archiveDir, markers, anchorFiles, id }) {
         if (!best || r.fetchedAt > best.fetchedAt) best = r;
       }
     }
-    if (best) { _writeAtomic(fp, JSON.stringify(_cacheFromAnchor(best, cur))); res.restored++; }
+    if (best) { _writeCacheAtomic(cacheDir, key, _cacheFromAnchor(best, cur)); res.restored++; }
     else {
       // identity only: no bucket, no fetchedAt ⇒ nothing claims to be a reading
       const remnant = {};
       for (const k of IDENTITY_FIELDS) if (cur[k] !== undefined) remnant[k] = cur[k];
       remnant.repairedBy = id; remnant.staleSince = marker.since;
-      _writeAtomic(fp, JSON.stringify(remnant)); res.blanked++;
+      _writeCacheAtomic(cacheDir, key, remnant); res.blanked++;
     }
   }
   return res;
@@ -986,7 +1002,7 @@ function repairCachesByWindow({ cacheDir, archiveDir, windows, accounts = null, 
     delete next.ownWindow;
     _writeAtomic(path.join(cacheDir, windowSidecarName(acct)), JSON.stringify({ ...w.window, at: now, source: 'on-demand', seededBy: id }));
     res.seeded++;
-    _writeAtomic(fp, JSON.stringify(next));
+    _writeCacheAtomic(cacheDir, acct, next);
   }
   return res;
 }

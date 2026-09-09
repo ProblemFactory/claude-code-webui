@@ -514,7 +514,21 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
     ok('PIN: onWalledTurn demotes BEFORE the verdict, and the verdict is session-aware', /function onWalledTurn\(session, sigs\) \{[\s\S]{0,900}demoteWalledAccount\(session, sigs\)[\s\S]{0,900}quotaVerdictFor\(scope, \{ model, session \}\)/.test(eng2));
     ok("PIN: the walled turn's pool evaluation runs AFTER the arm (finally) so fireNow finds the session armed", /ar\.armIfEnabled\(id, session, Date\.now\(\) \+ 45000[\s\S]{0,2000}\} finally \{[\s\S]{0,700}maybePoolAutoSwitch\(session\);\s*\n\s*\}\s*\n\}/.test(eng2));
     ok('PIN: noteTurnEnd evaluates the pool only on the NORMAL branch (the walled branch owns its own, after the arm)', /if \(sigs\.length && workAfter <= 1\) \{[\s\S]{0,600}return;\s*\n\s*\}\s*\n\s*maybePoolAutoSwitch\(session\);/.test(eng2) && !/session\._turnWallSigs = \[\]; session\._turnWorkAfterSig = 0;\s*\n\s*maybePoolAutoSwitch\(session\);/.test(eng2));
-    ok("PIN: the demotion rides captureRateLimitEvent with source 'wall' (ONE write path, no twin)", /captureRateLimitEvent\(\{ cacheDir: USAGE_CACHE_DIR, key: member\.id, identityIds: usageIdentityAccountIds\(member\.id\), ev, now, source: 'wall' \}\)/.test(eng2) && /source = 'rate-limit-event', corroborated = undefined \}\)/.test(read('src/rate-limit-capture.js')));
+    // THE MECHANISM, NOT THE LITERAL. This pin exists to stop the demotion
+    // growing a SECOND writer; it used to spell the call byte-for-byte, which
+    // also froze WHICH member is written — and inc-mttbrtc0-6049 is precisely
+    // that key being wrong (the turn pin, while the link had moved mid-turn).
+    // So it now asserts what it is for: exactly ONE `source:'wall'` write in the
+    // module, and its `key` and `identityIds` naming the SAME subject (a key
+    // that disagrees with its identity group is the anchor-poison class).
+    const wallWrites = eng2.match(/captureRateLimitEvent\(\{[^}]*source: 'wall'[^}]*\}\)/g) || [];
+    const wallWrite = wallWrites[0] || '';
+    const wallSubject = /key: (\w+)\.id, identityIds: usageIdentityAccountIds\((\w+)\.id\)/.exec(wallWrite);
+    ok("PIN: the demotion rides captureRateLimitEvent with source 'wall' (ONE write path, no twin)", wallWrites.length === 1 && /cacheDir: USAGE_CACHE_DIR/.test(wallWrite) && !!wallSubject && wallSubject[1] === wallSubject[2] && /source = 'rate-limit-event', corroborated = undefined/.test(read('src/rate-limit-capture.js'))
+    // …and that capture module still has exactly ONE way to reach disk: it
+    // routes through src/usage-cache-write.js (B-9213) rather than owning a
+    // second read-modify-write beside the one the panel and the pool read.
+    && /usageWrite\.writeCacheObject\(\{/.test(read('src/rate-limit-capture.js')));
     ok('PIN: the guard constants (≥2 walls inside a 120s ring, 10min observation recency, 10min session-wall memory) and the ladder itself', /WALL_RING_MS = 120e3/.test(eng2) && /OBSERVED_ORG_RECENT_MS = 10 \* 60e3/.test(eng2) && /SESSION_WALL_MS = 10 \* 60e3/.test(eng2) && /if \(!slotMatch && walls < 2 && !observedMatch\)/.test(eng2));
     ok('PIN: the per-session pool pass decides from sessionBillingMember (the credential slot), not from the observation', /const cm = sessionBillingMember\(s2, poolId\);\s*\n\s*const curFor = cm\.id \|\| linkCur;/.test(eng2) && /decidePoolSwitch\(\{ currentId: curFor, members, readCache: projected/.test(eng2));
     ok('PIN: resolveUsageKey resolves the CREDENTIAL SLOT for pooled sessions (live odometer, probe matching, derived cache keys) — the observation routes nothing', /function resolveUsageKey\(session\)[\s\S]{0,1200}sessionBillingMember\(session, acct\)\.id/.test(eng2) && !/sessionReadingMember/.test(eng2.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')));

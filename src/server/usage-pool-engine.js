@@ -184,6 +184,12 @@ app.locals.slotTransitions = slotTransitions;
 // credentials produced it, and that answer outranks our bookkeeping.
 // PURE rule + the statusline's verbatim mirror: src/reading-lag.js.
 const readingLag = require('../reading-lag.js');
+// THE ONE WRITE PATH (src/usage-cache-write.js): every usage-cache write in
+// this file goes through it, so a reading merges into the file's typed
+// `limits` PER limitId instead of replacing whatever the last producer left.
+const usageWrite = require('../usage-cache-write.js');
+const quotaModel = require('../quota-model.js');
+const { familyOfScopedBucket } = require('../model-family.js');
 const READING_ARCHIVE = path.join(rootDir, 'data', 'archive', 'readings-window-mismatch.ndjson');
 // Which caches map to which identity (org-merge aware) — shared by the sweep
 // and the estimator's per-account resolution. Reads roster + cache files only.
@@ -617,9 +623,8 @@ function writeUsageCacheForKey(key, parsed) {
       merged.scopedWeekly = prev.scopedWeekly; merged.scopedFetchedAt = prev.scopedFetchedAt;
     }
     for (const k of ['orgUuid', 'orgName', 'orgEmail', 'email', 'name']) if (prev[k] !== undefined && merged[k] === undefined) merged[k] = prev[k];
-    fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-    fs.writeFileSync(f + '.tmp', JSON.stringify(merged)); fs.renameSync(f + '.tmp', f);
-    return true;
+    delete merged.limits; // the canonical half is the write path's to compute, never inherited whole from `prev`
+    return usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: merged, source: parsed.source || null, familyOf: familyOfScopedBucket, backend: 'claude' }).ok;
   } catch { return false; }
 }
 // Ask a LIVE LOCAL claude chat session's CLI for usage over its control
@@ -1417,6 +1422,111 @@ const BUCKET_LABEL = { fiveHour: '5h', sevenDay: '7d' };
  *  the old corroboration: ≥2 walled turns inside WALL_RING_MS (any session)
  *  OR the account IS the session's OTel-observed org. Every outcome returns a
  *  named reason. */
+/** WHOSE WALL IS THIS? (inc-mttbrtc0-6049, 2026-09-08 23:47Z.)
+ *
+ *  THE INCIDENT. The pool re-pointed one session's credential link twice
+ *  inside a single turn (23:44:48 → 23:46:00 → 23:46:36; all three rows are in
+ *  data/slot-transitions.jsonl, per session, with timestamps). The CLI re-read
+ *  the credentials — 2.1.257's `rpe()` re-reads on mtime, which is exactly what
+ *  a re-point bumps — and its NEXT request, made with the member we had just
+ *  moved TO, came back rejected with that member's own 5h window ('resets
+ *  8:30pm'). `rejectionSlotFor` answers with the TURN PIN, so the wall landed
+ *  on the member the turn had STARTED on: its panel read "resets 8:30pm" until
+ *  the owner refreshed by hand, and it was demoted for three hours on somebody
+ *  else's wall. The pin's justification — "a re-point cannot reach a running
+ *  CLI" — is refuted by the readings-by-slot essay itself, and the 2.369.73
+ *  rule that a WINDOW outranks our bookkeeping was only ever applied to VALUE
+ *  readings. A rejection is a reading too.
+ *
+ *  THE PIN IS NOT WRONG, IT IS INCOMPLETE, and it stays the default. It exists
+ *  because ONE wall reaches us through up to three producers (the
+ *  `rate_limit_event`, the assistant banner and the task_notification banner)
+ *  and each producer's write re-runs `maybePoolAutoSwitch` — so resolving per
+ *  RECORD split one wall across the members our own re-points were moving to.
+ *  That is still true. This only asks a further question when there is
+ *  something to ask it with.
+ *
+ *  TWO WITNESSES, AND ONLY THEIR AGREEMENT MOVES A BYTE:
+ *    · the LEDGER identifies — `slotAt(webuiId, <when the rejection arrived>)`,
+ *      our own first-class record of which member held that link at that
+ *      instant. This is the evidence the turn pin throws away.
+ *    · the WINDOW refutes — a RUNNING window cannot change its reset before it
+ *      ends, so a stated reset that contradicts the pin's own still-future
+ *      window proves the wall is not the pin's. It proves nothing about WHOSE
+ *      it is (2.369.73 r2 measured a 5h reset names a time, not an account),
+ *      which is why identification is left to the ledger.
+ *  Either witness silent ⇒ the pin stands. They disagree ⇒ we write NOTHING and
+ *  say why; refusing can never write a foreign window onto a member, which is
+ *  the harm.
+ *
+ *  ONLY A VENDOR-STATED RESET COUNTS. `parseLimitBanner` returns `{kind}` and
+ *  no time, so the banner path carries `resetsAtMs: 0` and is untouched here —
+ *  which is the load-bearing half of `guardReadingTarget`'s own reason for
+ *  exempting walls ("the wall's resetsAt is often a bounded GUESS"). A guess
+ *  compared against a real window differs every time; reading one as evidence
+ *  would archive every exhaustion mark on the instance.
+ *
+ *  Returns `{member, why}`; `member: null` = archived with a reason. */
+function wallTargetFor(session, poolId, b, pinned) {
+  const atMs = Number(b.atMs) || 0;
+  const statedSec = b.resetsAtMs > 0 ? Math.floor(b.resetsAtMs / 1000) : null;
+  if (!statedSec || !atMs) return { member: pinned, why: null };   // banner path: nothing to ask with
+  const atSec = Math.floor(atMs / 1000);
+  const kindKey = b.kind === 'scoped' ? null : b.kind === 'fiveHour' ? 'fiveHour' : 'sevenDay';
+  const ownOf = (key) => {
+    try {
+      const w = establishedWindows()[key];
+      if (!w) return null;
+      if (b.kind === 'scoped') return (w.scoped && w.scoped[String(b.scopedName || '').toLowerCase()]) || null;
+      return w[kindKey] || null;
+    } catch { return null; }
+  };
+  let led = null;
+  try { led = slotTransitions.slotAt(session._webuiId, atMs, { poolId }); } catch { }
+  const ledId = led && led.id && !led.ownLinkUnknown && led.scope === 'session' ? led.id : null;
+  const d = quotaModel.wallAttribution({
+    statedResetsAt: statedSec,
+    pinnedKey: pinned.id,
+    ledgerKey: ledId,
+    ledgerIsSessionScoped: !!ledId,
+    pinnedOwnResetsAt: ownOf(pinned.id),
+    ledgerOwnResetsAt: ledId ? ownOf(ledId) : null,
+    atSec,
+  });
+  if (d.action === 'write') return { member: pinned, why: null };
+  const label = b.kind === 'scoped' ? b.scopedName : BUCKET_LABEL[b.kind] || b.kind;
+  if (d.action === 'refile') {
+    const to = (accounts.poolMembers(poolId) || []).find((m) => m.id === d.key);
+    // The ledger may name a member this pool no longer holds (it was removed
+    // between the rejection and now). We can prove the pin is wrong but have
+    // nowhere sound to put it, so we do the smaller thing.
+    if (!to) return archiveWall(session, pinned, b, d, `${d.reason}; the ledger's member is no longer in this pool`);
+    console.log(`[wall] ${session._webuiId}: ${label} wall states ${nameOf(d.key)}'s window, not ${nameOf(pinned.id)}'s — re-filed (the link moved mid-turn)`);
+    global.__vsEvent?.('wall-refiled', `${pinned.id}→${d.key}:${label}`);
+    return { member: to, why: 'ledger+window' };
+  }
+  return archiveWall(session, pinned, b, d, d.reason);
+}
+
+/** A wall we refuse to write is ARCHIVED, never dropped: the same
+ *  archive-never-destroy store the window guard uses, so one grep answers
+ *  "what did we refuse and why" for readings and rejections alike. */
+function archiveWall(session, pinned, b, d, reason) {
+  const label = b.kind === 'scoped' ? b.scopedName : BUCKET_LABEL[b.kind] || b.kind;
+  console.log(`[wall] ${session._webuiId}: refusing to mark ${nameOf(pinned.id)} ${label} — ${reason}`);
+  global.__vsEvent?.('wall-archived', `${pinned.id}:${label}`);
+  try {
+    fs.mkdirSync(path.dirname(READING_ARCHIVE), { recursive: true });
+    fs.appendFileSync(READING_ARCHIVE, JSON.stringify({
+      at: Date.now(), store: 'usage-cache', key: pinned.id, sid: session._webuiId || '-',
+      what: 'wall:' + label, reason, matched: d.key || null,
+      ownWindow: (() => { try { return establishedWindows()[pinned.id] || null; } catch { return null; } })(),
+      entry: { kind: b.kind, scopedName: b.scopedName, resetsAtMs: b.resetsAtMs, atMs: b.atMs },
+    }) + '\n');
+  } catch { }
+  return { member: null, why: null };
+}
+
 function demoteWalledAccount(session, sigs) {
   const poolId = session._accountId;
   const a = poolId && accounts.get(poolId);
@@ -1450,31 +1560,55 @@ function demoteWalledAccount(session, sigs) {
   // the buckets this turn's signals named for the account (a bucket-less
   // signal = fiveHour, the banner's shortest-self-heal rule); the signal's
   // resetsAt wins when it is in the future
+  //
+  // ATTRIBUTE FIRST, THEN AGGREGATE (inc-mttbrtc0-6049). Merging by kind and
+  // keeping `Math.max(resetsAtMs)` IS the incident's mechanism: two rejections
+  // arriving in one turn from two DIFFERENT members — because the pool moved
+  // the link between them — collapsed into one bucket that then carried the
+  // later member's window and was written onto the earlier one. Measured on
+  // this instance, that is exactly the pair (a legitimate 00:20 wall at 23:46
+  // and a foreign 03:30 one at 23:48, one bucket, one write). So each SIGNAL is
+  // attributed on its own evidence and only then folded together; two members'
+  // walls now stay two walls.
   const buckets = new Map();
   for (const s of sigs) {
     if (s.key && !ids.has(s.key)) continue;
     const kind = s.bucket || 'fiveHour';
     if (kind === 'scoped' && !s.scopedName) continue;
-    const k = kind === 'scoped' ? 'scoped:' + String(s.scopedName).toLowerCase() : kind;
-    const b = buckets.get(k) || { kind, scopedName: kind === 'scoped' ? String(s.scopedName).toLowerCase() : null, resetsAtMs: 0 };
-    b.resetsAtMs = Math.max(b.resetsAtMs, Number(s.resetsAtMs) || 0);
+    const one = {
+      kind, scopedName: kind === 'scoped' ? String(s.scopedName).toLowerCase() : null,
+      resetsAtMs: Number(s.resetsAtMs) || 0, atMs: Number(s.at) || 0,
+    };
+    const tgt = wallTargetFor(session, poolId, one, member);
+    if (!tgt.member) continue;                       // archived, with a reason, inside
+    const k = (tgt.member.id === member.id ? '' : tgt.member.id + '|')
+      + (kind === 'scoped' ? 'scoped:' + one.scopedName : kind);
+    const b = buckets.get(k) || { ...one, resetsAtMs: 0, atMs: 0, dest: tgt.member, why: tgt.why };
+    b.resetsAtMs = Math.max(b.resetsAtMs, one.resetsAtMs);
+    b.atMs = Math.max(b.atMs, one.atMs);
     buckets.set(k, b);
   }
   const done = [];
   for (const b of buckets.values()) {
+    const dest = b.dest;
     const ev = { kind: b.kind, scopedName: b.scopedName, status: 'rejected', utilization: null, resetsAt: b.resetsAtMs > now ? Math.floor(b.resetsAtMs / 1000) : null, overage: {} };
-    const r = captureRateLimitEvent({ cacheDir: USAGE_CACHE_DIR, key: member.id, identityIds: usageIdentityAccountIds(member.id), ev, now, source: 'wall' });
-    if (!r.ok) { console.warn(`[wall] demotion write failed for ${member.name}: ${r.error || 'unknown'}`); continue; }
+    const r = captureRateLimitEvent({ cacheDir: USAGE_CACHE_DIR, key: dest.id, identityIds: usageIdentityAccountIds(dest.id), ev, now, source: 'wall' });
+    if (!r.ok) { console.warn(`[wall] demotion write failed for ${dest.name}: ${r.error || 'unknown'}`); continue; }
+    // THE DEMOTION FOLLOWS THE WRITE. The incident's money half was this: the
+    // pinned member was held out of the pool for three hours on somebody
+    // else's wall, so re-filing the numbers while leaving the demotion behind
+    // would fix the panel and keep the cost.
+    if (dest.id !== member.id) noteSessionWall(session._webuiId, dest.id, now);
     const label = b.kind === 'scoped' ? b.scopedName : BUCKET_LABEL[b.kind] || b.kind;
     let until = 0;
     try {
-      const c = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, String(member.id).replace(/[^\w.-]/g, '_') + '.json'), 'utf-8'));
+      const c = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, String(dest.id).replace(/[^\w.-]/g, '_') + '.json'), 'utf-8'));
       const bk = b.kind === 'scoped' ? (c.scopedWeekly || []).find((x) => String(x?.name || '').toLowerCase() === b.scopedName) : c[b.kind];
       until = (Number(bk?.resetsAt) || 0) * 1000;
     } catch { }
-    const why = slotMatch ? 'credential slot' : observedMatch ? 'observed-org' : walls + '-walls';
-    console.log(`[wall] demoted ${member.name} ${label} until ${until ? new Date(until).toISOString() : 'unknown'} (${walls} walls / ${why})`);
-    global.__vsEvent?.('wall-demote', `${member.id}:${label}:${why}`);
+    const why = b.why || (slotMatch ? 'credential slot' : observedMatch ? 'observed-org' : walls + '-walls');
+    console.log(`[wall] demoted ${dest.name} ${label} until ${until ? new Date(until).toISOString() : 'unknown'} (${walls} walls / ${why})`);
+    global.__vsEvent?.('wall-demote', `${dest.id}:${label}:${why}`);
     done.push({ label, until });
   }
   // (the write's fresh fetchedAt busts the estimator memo by itself — estimateFor re-anchors on a newer rawCache)
@@ -1828,13 +1962,18 @@ function recordCodexQuotaSignal(session, payload) {
       // reading" about the one codex producer that exists.
       snap.source = source;
       try {
-        fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-        const f = path.join(USAGE_CACHE_DIR, String(key).replace(/[^\w.-]/g, '_') + '.json');
-        let cur = null; try { cur = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { }
+        const cur = usageWrite.readCacheObject(USAGE_CACHE_DIR, key);
         if (!cur || (Number(cur.fetchedAt) || 0) < (Number(snap.fetchedAt) || 0)) {
           // codex has no OTel channel, so there is nothing to corroborate WITH:
-          // the label is deliberately absent rather than a fabricated `true`
-          fs.writeFileSync(f + '.tmp', JSON.stringify(snap)); fs.renameSync(f + '.tmp', f);
+          // the label is deliberately absent rather than a fabricated `true`.
+          // ONE limit per push (B-9213): this snapshot names its own limitId
+          // and the write path merges it under that id, so a Spark push can no
+          // longer erase the plan limit this account is actually spending.
+          usageWrite.writeCacheObject({
+            cacheDir: USAGE_CACHE_DIR, key, obj: snap,
+            set: quotaSourceFor(session.backend).limitSetFromSnapshot?.(snap, { identity: key, source }) || null,
+            source, backend: 'codex',
+          });
         }
       } catch { }
       return { key, snap };
@@ -2023,7 +2162,7 @@ function markLimitBanner(session, text) {
       }
       return cache;
     };
-    const fileFor = (id) => path.join(USAGE_CACHE_DIR, String(id).replace(/[^\w.-]/g, '_') + '.json');
+    const fileFor = (id) => usageWrite.cacheFileFor(USAGE_CACHE_DIR, id);
     // IDENTITY-GROUP write (2.267.0, anchor-poison root cause): an org-merged
     // login keeps several cache files, and stamping fetchedAt=now onto ONE of
     // them used to PROMOTE that file — week-stale sibling buckets and all —
@@ -2045,17 +2184,16 @@ function markLimitBanner(session, text) {
     // writes, so there is nothing here to preserve and nothing to forget.
     cache.fetchedAt = Date.now(); cache.source = 'limit-banner';
     if (corr) cache.corroborated = !!corr.agree; else delete cache.corroborated;
-    fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-    const f = fileFor(key);
-    fs.writeFileSync(f + '.tmp', JSON.stringify(cache)); fs.renameSync(f + '.tmp', f);
+    delete cache.limits; // the freshest SIBLING's limits describe another file's windows — never carry them here
+    usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: cache, measuredAt: cache.fetchedAt, source: 'limit-banner', familyOf: familyOfScopedBucket, backend: 'claude' });
     for (const id of ids) {
       if (id === key) continue;
       try {
-        const f2 = fileFor(id);
-        let c2; try { c2 = JSON.parse(fs.readFileSync(f2, 'utf-8')) || null; } catch { c2 = null; }
+        let c2; try { c2 = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || null; } catch { c2 = null; }
         if (!c2) continue; // never CREATE a sibling file here
         applyHit(c2); // fetchedAt deliberately untouched
-        fs.writeFileSync(f2 + '.tmp', JSON.stringify(c2)); fs.renameSync(f2 + '.tmp', f2);
+        delete c2.limits;
+        usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key: id, obj: c2, measuredAt: cache.fetchedAt, familyOf: familyOfScopedBucket, backend: 'claude' });
       } catch {}
     }
     global.__vsEvent?.('usage-limit-banner-marked', `${key}:${hit.kind}`);

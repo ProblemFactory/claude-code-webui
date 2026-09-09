@@ -262,13 +262,24 @@ function windowOf(x) {
     else if (x.kind === 'scoped' && x.scopedName && r) out.scoped[String(x.scopedName).toLowerCase()] = r;
     return out;
   }
+  // AN EMPTY WINDOW IS NOT IDENTITY EVIDENCE (B-8b12). A window that has not
+  // started answers `resetsAt = now + windowDuration` on every read — measured
+  // on this instance, 144 distinct values over 149 consecutive reads of one
+  // bucket. Its "phase" is therefore a reading of OUR clock, not of the
+  // account, and feeding it to `compareWindows` produces a fresh disagreement
+  // every few seconds against a member's own established window. The producers
+  // stamp `state` on the bucket (the derived usage-cache view does it for
+  // every writer at once); an unstamped bucket is pre-model data and counts,
+  // which is the conservative direction — this rule may only ever REMOVE
+  // evidence, never invent it.
+  const counts = (b) => !b || typeof b !== 'object' || b.state === undefined || b.state === 'running';
   const b7 = x.sevenDay || x.seven_day;
   const b5 = x.fiveHour || x.five_hour;
-  out.sevenDay = pos(b7 && typeof b7 === 'object' ? (b7.resetsAt ?? b7.resets_at) : b7);
-  out.fiveHour = pos(b5 && typeof b5 === 'object' ? (b5.resetsAt ?? b5.resets_at) : b5);
+  if (counts(b7)) out.sevenDay = pos(b7 && typeof b7 === 'object' ? (b7.resetsAt ?? b7.resets_at) : b7);
+  if (counts(b5)) out.fiveHour = pos(b5 && typeof b5 === 'object' ? (b5.resetsAt ?? b5.resets_at) : b5);
   const sw = Array.isArray(x.scopedWeekly) ? x.scopedWeekly : [];
   for (const s of sw) {
-    if (!s || !s.name) continue;
+    if (!s || !s.name || !counts(s)) continue;
     const r = pos(s.resetsAt ?? s.resets_at);
     if (r) out.scoped[String(s.name).toLowerCase()] = r;
   }

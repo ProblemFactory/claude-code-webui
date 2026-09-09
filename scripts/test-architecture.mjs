@@ -76,7 +76,15 @@ const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src
   'src/turn-state.js', // authoritative turn state: the live consumer and the attach reconciliation must decide identically
   'src/opencode-remote.js', // S9 remainder: the OpenCode-serve OP TABLE + runOpencodeOp — one definition the local rung, the agentd op and the shipped ssh script all obey
   'src/permission-rules.js', // READ-ONLY permission-rule model + DOM-free tree renderer (owner ruling 10) — shared server (readers) + browser (the view)
-  'src/local-oracles.js']); // the human-triggered zero-network CLI oracle registry + its measured proofs and REJECTED candidates (ruling 6) — server runs them, the menu mirrors them
+  'src/local-oracles.js', // the human-triggered zero-network CLI oracle registry + its measured proofs and REJECTED candidates (ruling 6) — server runs them, the menu mirrors them
+  // THE TYPED QUOTA MODEL (B-9213/B-8b12): what a LIMIT SET is, which limit
+  // governs a model, and whether a window has started. Three consumers need the
+  // identical rules and only one has a checkout — the orchestrator's write path
+  // + pool, the browser bundle's three quota panels, and (like reading-lag) the
+  // shipped statusline tool. A rule with an import is a rule that cannot be
+  // mirrored, and a second spelling of "does this bucket count" is the twin
+  // class this file exists to fail.
+  'src/quota-model.js']);
 const SHARED = new Set(['src/discovery-facts.js', 'src/sysinfo.js', 'src/machine-probes.js', 'src/usage-walker.js',
   'src/transcript-service.js', 'src/ctx-sync.js', 'src/writer-sweep.js', 'src/remote-shell.js', 'src/account-material.js',
   // THE agent-CLI process identity, one rule in two spellings (B-3185 r3): the JS twin
@@ -119,6 +127,7 @@ const EXCEPTIONS = new Map([
   // client bundles PURE modules directly (CJS pulled into esbuild) — by design
   ['src/lib/utils.js->src/task-color-seq.js', 'pure module, shared server+browser by design (re-exported)'],
   ['src/lib/sidebar-mounts.js->src/ssh-key-format.js', 'pure module, shared server+browser by design'],
+  ['src/lib/usage-meter.js->src/quota-model.js', 'pure module, shared server+browser by design — the quota panels ask the SAME accessor the pool and the write path do (B-9213: an account holds several limits and the panel used to show whichever pushed last)'],
 ]);
 
 // 1) PURE modules: zero requires of ANY kind beyond other PURE modules.

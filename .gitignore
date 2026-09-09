@@ -58,6 +58,11 @@ src/lib/build-version.js
 src/server/vs-wake-mut-*.js
 src/server/vs-wake-master-ar-*.js
 src/vs-wake-mut-*.js
+# §18 of scripts/test-readings-attribution.mjs writes a PATCHED COPY of
+# src/server/usage-pool-engine.js beside the real one (same reason: relative
+# requires). Unlinked on exit, swept by PID at start; a SIGKILL must never be
+# able to dirty the tree and block the release gate.
+src/server/vs-readattr-mut-*.js
 # scripts/test-auto-resume.mjs §12a writes PATCHED COPIES of
 # src/server/auto-resume.js beside the real one (they must be SIBLINGS or their
 # relative requires do not resolve). Unlinked on exit and swept at start, but a

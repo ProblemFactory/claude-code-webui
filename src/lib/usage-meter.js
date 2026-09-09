@@ -7,10 +7,17 @@ import { backendFeatureCaps } from './agent-meta.js';
 // panel's latest number, and — for a member that can no longer produce one at
 // all — how old the last REAL reading is. DOM-free so scripts/test-readings-
 // attribution.mjs pins it in node.
-import { corroborationNote, overageChip, readingSource, spendControlChip, stampText, staleSince } from './usage-source.js';
+import { corroborationNote, overageChip, readingSource, spendControlChip, stampText, staleSince, windowNotStarted, windowNote, limitRows } from './usage-source.js';
 // The ONE overage verdict (PURE, CJS — the same function the spend
 // authorizer and the pool's voluntary-target rule read).
 import { overageState, spendControlState } from '../spend-authorizer.js';
+// THE TYPED LIMIT SET (src/quota-model.js) — PURE, bundled directly like
+// task-color-seq/ssh-key-format. An account can hold SEVERAL limits at once and
+// the panel used to show whichever pushed last (B-9213): measured on this
+// instance, one codex conversation pushed `codex` (the plan), the
+// GPT-5.3-Codex-Spark model cap and `premium`, and the file on disk held the
+// Spark limit at 0 % while the plan limit — the one at 5 % — was gone.
+import * as quotaModel from '../quota-model.js';
 
 export function installUsageMeter(App, ctx = {}) {
   Object.assign(App.prototype, {
@@ -300,6 +307,33 @@ export function installUsageMeter(App, ctx = {}) {
       return `${warn}<div class="usage-updated">${parts.join(' · ')}</div>`;
     };
     const usageColor = (pct) => (pct > 80 ? 'var(--red)' : pct > 50 ? 'var(--yellow)' : 'var(--green)');
+    // EVERY LIMIT THE ACCOUNT HOLDS, not just the plan one (B-9213). The two
+    // rows above are the PLAN limit's projection; anything else the vendor
+    // named — a model-scoped cap, a limit it reported no window for — gets its
+    // own row here, with the producer and age of THAT limit's own reading
+    // (three limits on one account are three readings, and the header's
+    // "Updated 3min ago" describes only the newest). A window that has not
+    // started says so instead of printing a reset that slides on every read.
+    const extraLimitRows = (snap, backendId) => {
+      if (!snap || !Array.isArray(snap.limits) || !snap.limits.length) return '';
+      const set = quotaModel.makeLimitSet({ identity: null, fetchedAt: snap.fetchedAt, source: snap.source, limits: snap.limits });
+      const rows2 = limitRows(quotaModel, set, { t }).filter((r) => r.limitId !== quotaModel.planLimit(set)?.limitId);
+      if (!rows2.length) return '';
+      return rows2.map((r) => {
+        const wins = r.windows.length ? r.windows.map((w) => {
+          const pct = w.usedPct == null ? null : Math.round(w.usedPct);
+          const when = w.note ? escHtml(w.note) : fmtReset(w.resetsAt, (w.usedPct || 0) / 100);
+          return `<span class="usage-stat">${escHtml(w.kind)} ${pct == null ? escHtml(t('no data')) : escHtml(t('{pct}% used', { pct }))}</span>`
+            + `<span class="usage-stat"><span class="usage-stat-label">${t('Resets')}</span> ${when}</span>`;
+        }).join('') : `<span class="usage-stat">${escHtml(t('no window reported'))}</span>`;
+        const prov = r.sourceLabel ? `<span class="usage-src">${escHtml(t('via {source}', { source: r.sourceLabel }))}</span>` : '';
+        const age = r.fetchedAt ? `<span class="usage-stat">${escHtml(t('Updated {ago}', { ago: agoText(r.fetchedAt) }))}</span>` : '';
+        return `<div class="usage-session" data-limit-id="${escHtml(r.limitId)}" data-be="${escHtml(backendId)}">
+        <div class="usage-session-name">${escHtml(r.label)}</div>
+        <div class="usage-session-stats">${wins}${age}${prov}</div>
+      </div>`;
+      }).join('');
+    };
     // Donut with the window label in the hole — 5h vs 7d distinguishable at a
     // glance instead of two identical pies. With a dead-reckoning pair the
     // CONFIRMED reading fills solid and the ESTIMATED delta fills LIGHT (same
@@ -404,10 +438,16 @@ export function installUsageMeter(App, ctx = {}) {
         const scEst = (estSel?.scopedWeekly || []).find((x) => String(x?.name || '').toLowerCase() === String(sc.name || '').toLowerCase()) || null;
         const pSc = estDisplayPair(sc, scEst);
         const pctSc = pSc.estPct != null ? pSc.darkPct : Math.round((sc.utilization || 0) * 100);
+        // A LIMIT WHOSE WINDOW HAS NOT STARTED (B-8b12): it is shown (the
+        // vendor named it, and hiding a limit is its own kind of lie) but it
+        // states no reset — its `resetsAt` is `now + duration` on every read —
+        // and it is not a candidate for "worst bucket", which is a claim about
+        // something being spent.
+        const scNotStarted = windowNotStarted(sc);
         // the mobile chip claims "worst across all shown buckets" — the
         // scoped weeklies (the bucket that actually exhausts first under
         // Fable-heavy load) were missing from it (2.267.1, mobile parity)
-        chipWorst = Math.max(chipWorst, pSc.estPct ?? pctSc);
+        if (!scNotStarted) chipWorst = Math.max(chipWorst, pSc.estPct ?? pctSc);
         const colorSc = usageColor(pctSc);
         // Scoped buckets only arrive via on-demand refresh (⟳) — show THEIR
         // age, which can lag the passively-updated 5h/7d above.
@@ -419,8 +459,8 @@ export function installUsageMeter(App, ctx = {}) {
         <div class="usage-session-stats">
           <span class="usage-stat">${t('{pct}% used', { pct: pctSc })}</span>
           ${estStat(pSc)}
-          <span class="usage-stat"><span class="usage-stat-label">${t('Resets')}</span> ${fmtReset(sc.resetsAt, sc.utilization, sc.resetsAtEstimated)}</span>
-          ${scAge}
+          <span class="usage-stat"><span class="usage-stat-label">${t('Resets')}</span> ${scNotStarted ? escHtml(windowNote(sc, { t })) : fmtReset(sc.resetsAt, sc.utilization, sc.resetsAtEstimated)}</span>
+          ${scNotStarted ? '' : scAge}
         </div>
       </div>`);
       }
@@ -490,8 +530,17 @@ export function installUsageMeter(App, ctx = {}) {
         cSwitcher = `<div class="usage-acct-switch">${cEntries.map(en =>
           `<button class="usage-acct-chip${en.key === cActive ? ' active' : ''}" data-key="${escHtml(en.key)}" data-be="codex" title="${escHtml(en.tip || '')}">${escHtml(en.label)}</button>`).join('')}</div>`;
       }
+      // "NO DATA" MEANS NO LIMITS, NOT "NO PLAN WINDOWS" (B-9213). An account
+      // can have been read and still have nothing to show HERE: the codex
+      // app-server pushes one snapshot per limit, so a file whose only reading
+      // is the model-scoped one carries real numbers that simply are not the
+      // plan limit's. Saying "run a session on it" about that is wrong twice —
+      // a session HAS run, and the rows below prove it.
+      const cOtherLimits = extraLimitRows(codex, 'codex');
       const cBody = cNoData
-        ? `<div class="usage-note">${t('No usage captured yet for this account — run a session on it.')}</div>`
+        ? (cOtherLimits
+          ? `<div class="usage-note">${t('No reading for the plan limit yet — the limits below are what this account has reported.')}</div>${cOtherLimits}`
+          : `<div class="usage-note">${t('No usage captured yet for this account — run a session on it.')}</div>`)
         : `<div class="usage-session">
         <div class="usage-session-name">${t('5-hour limit')}</div>
         <div class="usage-bar" style="width:100%;margin:4px 0"><div class="usage-bar-fill" style="width:${pct5h}%;background:${color5h}"></div>${estBar(cp5)}</div>
@@ -512,6 +561,7 @@ export function installUsageMeter(App, ctx = {}) {
           ${codex.resetCredits ? `<span class="usage-stat" title="${escHtml(t('Stored rate-limit reset credits — one can be consumed when a limit is hit (Settings → Codex, or automatically when enabled)'))}"><span class="usage-stat-label">${escHtml(t('Reset credits'))}</span> ${Number(codex.resetCredits.availableCount) || 0}</span>` : ''}
         </div>
       </div>
+      ${cOtherLimits}
       ${sourceLine(codex, null)}`;
       const cxRefreshBtn = backendFeatureCaps('codex').quotaRefresh === 'session-rpc'
         ? `<button class="usage-refresh-btn usage-refresh-codex-btn" title="${escHtml(t('Read current limits + stored reset credits from a running Codex session (its own app-server makes the call)'))}"><span class="uref-glyph">⟳</span></button>` : '';

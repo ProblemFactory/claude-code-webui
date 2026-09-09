@@ -345,13 +345,20 @@ function estimateBuckets({ anchor, rates, costFn, nowMs, lagS = 20 }) {
 function overlayCache(rawCache, est) {
   if (!est) return rawCache;
   const out = { ...(rawCache || {}) };
-  if (est.fiveHour) out.fiveHour = est.fiveHour;
-  if (est.sevenDay) out.sevenDay = est.sevenDay;
+  // AN ESTIMATE MAY NOT OVERWRITE "THIS WINDOW HAS NOT STARTED" (B-8b12). The
+  // raw bucket's `empty` is a measurement taken NOW; every anchor an estimate
+  // is built from is older, and extrapolating cost into a window the vendor
+  // says nobody has opened would hand the pool a fabricated utilization AND a
+  // sliding reset dressed up as a deadline. The estimator abstains here rather
+  // than the raw reading losing.
+  const emptyRaw = (b) => b && typeof b === 'object' && b.state === 'empty';
+  if (est.fiveHour && !emptyRaw(out.fiveHour)) out.fiveHour = est.fiveHour;
+  if (est.sevenDay && !emptyRaw(out.sevenDay)) out.sevenDay = est.sevenDay;
   if (est.scopedWeekly?.length) {
     const raw = Array.isArray(out.scopedWeekly) ? [...out.scopedWeekly] : [];
     for (const e of est.scopedWeekly) {
       const i = raw.findIndex((x) => scopedKey(x?.name) === scopedKey(e.name));
-      if (i >= 0) raw[i] = e; else raw.push(e);
+      if (i >= 0) { if (!emptyRaw(raw[i])) raw[i] = e; } else raw.push(e);
     }
     out.scopedWeekly = raw;
   }

@@ -13,6 +13,7 @@
 // account id as last resort. Files: data/usage-anchors/anchors-<slug>.ndjson.
 const fs = require('fs');
 const path = require('path');
+const { bucketCounts } = require('./quota-model.js');
 
 // THE ANCHOR-FILE SLUG. Exported because the repair has to walk this the OTHER
 // way — from a stream file name back to the identity it stands for, and from a
@@ -66,12 +67,19 @@ class UsageAnchors {
         // absent from the payload) — anchoring it once and pairing with the
         // next real reading forged a du=+full pair that inflated the learned
         // rate ~6× (verifier repro). Record as no-bucket instead.
-        fiveHour: cache.fiveHour && cache.fiveHour.status !== 'unknown' ? { u: cache.fiveHour.utilization, resetsAt: cache.fiveHour.resetsAt } : null,
-        sevenDay: cache.sevenDay && cache.sevenDay.status !== 'unknown' ? { u: cache.sevenDay.utilization, resetsAt: cache.sevenDay.resetsAt } : null,
+        // AN EMPTY WINDOW IS THE SAME CLASS (B-8b12): a window that has not
+        // started reports `resetsAt = now + duration` at every read, so
+        // anchoring it records a "reset time" that was never a deadline — and
+        // the by-window repair FINGERPRINTS on exactly these resets, where a
+        // number that moves on every read is the worst possible evidence.
+        // `bucketCounts` is quota-model's one predicate (the derived cache view
+        // stamps `state` on the bucket for it).
+        fiveHour: cache.fiveHour && cache.fiveHour.status !== 'unknown' && bucketCounts(cache.fiveHour) ? { u: cache.fiveHour.utilization, resetsAt: cache.fiveHour.resetsAt } : null,
+        sevenDay: cache.sevenDay && cache.sevenDay.status !== 'unknown' && bucketCounts(cache.sevenDay) ? { u: cache.sevenDay.utilization, resetsAt: cache.sevenDay.resetsAt } : null,
         // asOf: scoped readings only refresh via ⟳ (preserve-merged into
         // fresher caches) — record WHEN the reading was true so estimation
         // starts its cost window there, not at the anchor write.
-        scopedWeekly: (cache.scopedWeekly || []).map((s) => ({ name: s.name, u: s.utilization, resetsAt: s.resetsAt, asOf: cache.scopedFetchedAt || undefined })),
+        scopedWeekly: (cache.scopedWeekly || []).filter(bucketCounts).map((s) => ({ name: s.name, u: s.utilization, resetsAt: s.resetsAt, asOf: cache.scopedFetchedAt || undefined })),
       },
       prevFetchedAt: prev?.fetchedAt || null,
       elapsedSec: prev ? Math.round((cache.fetchedAt - prev.fetchedAt) / 1000) : null,

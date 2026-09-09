@@ -18,9 +18,21 @@ const { execFileSync } = require('child_process');
 // functions this file used to define (moved verbatim) — re-exported at the
 // bottom for current callers (tests, the engine) so nothing drifts.
 const harnesses = require('./harnesses');
+// THE ONE WRITE PATH (src/usage-cache-write.js, design-account-hardening §4.2):
+// every producer in this file reaches data/usage-cache/*.json through it. It
+// merges each reading into the file's typed `limits` PER limitId and rewrites
+// the legacy bucket fields as a projection of the merged set — which is what
+// stops codex's three concurrent limits collapsing into whichever pushed last
+// (B-9213) and what stamps `state:'empty'` on a window that has not started
+// (B-8b12). A grep-derived census (scripts/test-quota-model.mjs §⑩) fails the
+// build if any other module writes a file in that directory.
+const usageWrite = require('./usage-cache-write.js');
+const { familyOfScopedBucket } = require('./model-family.js');
 const claudeQuota = harnesses.get('claude').quota;
 const parseCliUsageText = claudeQuota.parseCliUsageText;      // `claude -p /usage` panel text
-const normalizeCodexRateLimit = harnesses.get('codex').quota.normalize; // codex rate_limits (rollout / live push / rateLimits/read)
+const codexQuota = harnesses.get('codex').quota;
+const normalizeCodexRateLimit = codexQuota.normalize; // codex rate_limits (rollout / live push / rateLimits/read)
+const quotaModel = require('./quota-model.js');
 
 function setupUsage({ app, accounts, hosts, usageHistory, activeSessions, serverSetting, ensureDir, USAGE_CACHE_FILE, USAGE_CACHE_DIR, CODEX_SESSIONS_DIR, META_DIR, AVAILABLE_MODELS, BUFFERS_DIR, probeUsageForAccountKey, onMemberReadingFresh, CLAUDE_CMD }) {
 const https = require('https');
@@ -533,12 +545,12 @@ async function refreshViaCliPanel(key) {
       const { windowOf, windowSidecarName } = require('./reading-lag.js');
       const w = windowOf(merged);
       if (w.sevenDay || w.fiveHour || Object.keys(w.scoped).length) {
-        const wf = path.join(USAGE_CACHE_DIR, windowSidecarName(key));
-        fs.writeFileSync(wf + '.tmp', JSON.stringify({ ...w, at: Date.now(), source: 'on-demand' }));
-        fs.renameSync(wf + '.tmp', wf);
+        usageWrite.writeSidecar(USAGE_CACHE_DIR, windowSidecarName(key), { ...w, at: Date.now(), source: 'on-demand' });
       }
     } catch { }
-    fs.writeFileSync(f + '.tmp', JSON.stringify(merged)); fs.renameSync(f + '.tmp', f);
+    delete merged.limits; // the canonical half is the write path's to compute, never inherited from `prev`
+    const wrote = usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: merged, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude' });
+    if (wrote.ok) Object.assign(merged, wrote.object);
     if (isGlobal) { _rateLimitCache = merged; writeUsageCache(); }
     else _accountUsage[key] = { ...merged, name: acctMeta.name, email: acctMeta.email };
     try { ingestPassiveUsage(); } catch { }
@@ -616,11 +628,10 @@ app.post('/api/usage/refresh', async (req, res) => {
         u.source = 'on-demand';
         u.scopedFetchedAt = Date.now();
         _hostAcctUsage[hid + ':' + aid] = { ...u, name: acctMeta2.name, email: acctMeta2.email };
-        try {
-          fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-          const f = path.join(USAGE_CACHE_DIR, 'host-' + hid.replace(/[^\w-]/g, '_') + '-' + aid + '.json');
-          fs.writeFileSync(f + '.tmp', JSON.stringify(_hostAcctUsage[hid + ':' + aid])); fs.renameSync(f + '.tmp', f);
-        } catch {}
+        usageWrite.writeCacheObject({
+          cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_') + '-' + aid,
+          obj: _hostAcctUsage[hid + ':' + aid], source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+        });
         res.json({ success: true, origin: 'device' });
       }).catch(() => hosts.readRemoteSubOAuth(hid, aid).then((token) => {
         _onDemandUsageAt[tkey] = Date.now();
@@ -632,11 +643,10 @@ app.post('/api/usage/refresh', async (req, res) => {
           _fetchOAuthRoles(token, (org) => {
             if (org) Object.assign(u, org);
             _hostAcctUsage[hid + ':' + aid] = { ...u, name: acctMeta2.name, email: acctMeta2.email };
-            try {
-              fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-              const f = path.join(USAGE_CACHE_DIR, 'host-' + hid.replace(/[^\w-]/g, '_') + '-' + aid + '.json');
-              fs.writeFileSync(f + '.tmp', JSON.stringify(_hostAcctUsage[hid + ':' + aid])); fs.renameSync(f + '.tmp', f);
-            } catch {}
+        usageWrite.writeCacheObject({
+          cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_') + '-' + aid,
+          obj: _hostAcctUsage[hid + ':' + aid], source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude',
+        });
             res.json({ success: true });
           });
         });
@@ -666,12 +676,13 @@ app.post('/api/usage/refresh', async (req, res) => {
               ? 'host-' + hid.replace(/[^\w-]/g, '_') + '.json'
               : /^sub-[\w-]{1,40}$/.test(k) ? `host-${hid.replace(/[^\w-]/g, '_')}-${k}.json` : null;
             if (!fname) continue;
-            const f = path.join(USAGE_CACHE_DIR, fname);
-            let prev = null; try { prev = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch { }
+            const hkey = fname.slice(0, -5);
+            const prev = usageWrite.readCacheObject(USAGE_CACHE_DIR, hkey);
             if (prev?.fetchedAt && prev.fetchedAt >= j.fetchedAt) continue;
             const merged = { ...(prev || {}), ...j, source: 'remote-statusline' };
+            delete merged.limits; // rebuilt from the merged view by the write path — never inherited from `prev` wholesale
             if (j.corroborated === undefined) delete merged.corroborated; // provenance belongs to the write that made it — the host's own label, if it sent one, describes THIS reading
-            fs.writeFileSync(f + '.tmp', JSON.stringify(merged)); fs.renameSync(f + '.tmp', f);
+            usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key: hkey, obj: merged, measuredAt: j.fetchedAt, source: 'remote-statusline', familyOf: familyOfScopedBucket, backend: 'claude' });
           }
         } catch { }
       }
@@ -684,11 +695,10 @@ app.post('/api/usage/refresh', async (req, res) => {
       u.source = 'on-demand-remote';
       u.scopedFetchedAt = Date.now();
       _hostUsage[hid] = { ...u, name: hMeta.name };
-      try {
-        fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-        const f = path.join(USAGE_CACHE_DIR, 'host-' + hid.replace(/[^\w-]/g, '_') + '.json');
-        fs.writeFileSync(f + '.tmp', JSON.stringify(_hostUsage[hid])); fs.renameSync(f + '.tmp', f);
-      } catch {}
+      usageWrite.writeCacheObject({
+        cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_'),
+        obj: _hostUsage[hid], source: 'on-demand-remote', familyOf: familyOfScopedBucket, backend: 'claude',
+      });
       res.json({ success: true, origin: 'device' });
     }).catch(() => hosts.readRemoteOAuth(hid).then((token) => {
       _onDemandUsageAt['host:' + hid] = Date.now(); // stamp only after the probe reached the host
@@ -700,11 +710,10 @@ app.post('/api/usage/refresh', async (req, res) => {
         _fetchOAuthRoles(token, (org) => {
           if (org) Object.assign(u, org);
           _hostUsage[hid] = { ...u, name: hMeta.name };
-          try {
-            fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-            const f = path.join(USAGE_CACHE_DIR, 'host-' + hid.replace(/[^\w-]/g, '_') + '.json');
-            fs.writeFileSync(f + '.tmp', JSON.stringify(_hostUsage[hid])); fs.renameSync(f + '.tmp', f);
-          } catch {}
+      usageWrite.writeCacheObject({
+        cacheDir: USAGE_CACHE_DIR, key: 'host-' + hid.replace(/[^\w-]/g, '_'),
+        obj: _hostUsage[hid], source: 'on-demand-remote', familyOf: familyOfScopedBucket, backend: 'claude',
+      });
           res.json({ success: true });
         });
       });
@@ -800,11 +809,10 @@ app.post('/api/usage/refresh', async (req, res) => {
       // Persist to the same per-account cache file the statusline hook writes:
       // survives restarts, and the hook's preserve-merge keeps scopedWeekly and
       // the org identity alive through subsequent passive (5h/7d-only) writes.
-      try {
-        fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-        const f = path.join(USAGE_CACHE_DIR, key.replace(/[^\w.-]/g, '_') + '.json');
-        fs.writeFileSync(f + '.tmp', JSON.stringify(u)); fs.renameSync(f + '.tmp', f);
-      } catch {}
+      {
+        const w = usageWrite.writeCacheObject({ cacheDir: USAGE_CACHE_DIR, key, obj: u, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude' });
+        if (w.ok) Object.assign(u, w.object);
+      }
       if (isGlobal) { _rateLimitCache = u; writeUsageCache(); }
       else _accountUsage[key] = { ...u, name: acctMeta.name, email: acctMeta.email };
       try { ingestPassiveUsage(); } catch {} // re-run the global↔named same-account merge
@@ -944,9 +952,26 @@ function summarizeCodexRateLimits() {
   if (now - _codexRateLimitCacheAt < 30000) return _codexRateLimitCache || { overall: null, byAccount: {} };
 
   const byAccount = {};
-  const keep = (key, snapshot) => {
+  // PER-LIMIT ACCUMULATION, NOT FRESHEST-WINS (B-9213). The app-server pushes a
+  // SEPARATE snapshot per limit and every rung below feeds them in here:
+  // measured on this instance, one conversation produced 208 pushes across
+  // `codex` (the plan), `codex_bengalfox`/"GPT-5.3-Codex-Spark" and `premium`.
+  // The old `keep` took the freshest WHOLE snapshot, so the plan limit was
+  // erased by the next Spark push and the panel read 0 % on an account at 5 %.
+  // Now each snapshot merges into the key's typed set under its OWN limitId,
+  // and `byAccount[key]` is the projection of the merged set — which is what
+  // every existing reader of this map already expects to receive.
+  const setOf = {};
+  const keep = (key, snapshot, source) => {
     if (!snapshot) return;
-    if (!byAccount[key] || (snapshot.fetchedAt || 0) > (byAccount[key].fetchedAt || 0)) byAccount[key] = snapshot;
+    const next = codexQuota.limitSetFromSnapshot(snapshot, { identity: key, source: source || snapshot.source || null });
+    if (!next) return;
+    setOf[key] = quotaModel.mergeLimitSets(setOf[key] || quotaModel.makeLimitSet({ identity: key }), next);
+    const view = quotaModel.toLegacyView(setOf[key]);
+    // Non-bucket fields (planType, resetCredits, the limit ids) come from the
+    // NEWEST snapshot; the buckets come from the merged set.
+    const base = (!byAccount[key] || (snapshot.fetchedAt || 0) >= (byAccount[key].fetchedAt || 0)) ? snapshot : byAccount[key];
+    byAccount[key] = { ...base, ...view, limits: setOf[key].limits, fetchedAt: setOf[key].fetchedAt || base.fetchedAt };
   };
   // SEED FROM DISK first (P1, design-backend-parity.md §1): snapshots used to
   // be re-derived from rollout tails only (24 files / 14 days) — an idle
@@ -956,12 +981,22 @@ function summarizeCodexRateLimits() {
     for (const fn of fs.readdirSync(USAGE_CACHE_DIR)) {
       const m = /^(cxs-[\w-]+|__global_codex__)\.json$/.exec(fn);
       if (!m) continue;
-      try { keep(m[1], JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, fn), 'utf-8'))); } catch {}
+      try {
+        const stored = JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, fn), 'utf-8'));
+        // A stored file may ALREADY carry the typed limits (everything written
+        // since this model shipped); seed from those rather than from its
+        // projected buckets, so a limit the projection cannot show is not lost
+        // on the way back in.
+        if (Array.isArray(stored?.limits) && stored.limits.length) {
+          setOf[m[1]] = quotaModel.makeLimitSet({ identity: m[1], fetchedAt: stored.fetchedAt, source: stored.source, limits: stored.limits });
+          byAccount[m[1]] = stored;
+        } else keep(m[1], stored, stored?.source);
+      } catch {}
     }
   } catch {}
   for (const [id, session] of activeSessions) {
     if (session.backend !== 'codex' || session.mode !== 'chat') continue;
-    keep(session._accountId || '__global_codex__', readCodexWrapperRateLimit(id));
+    keep(session._accountId || '__global_codex__', readCodexWrapperRateLimit(id), 'codex-rate-limits');
   }
   {
     const threadAcct = codexThreadAccountMap();
@@ -972,7 +1007,7 @@ function summarizeCodexRateLimits() {
       const snapshot = readLatestCodexRateLimitFromJsonl(entry.path);
       if (!snapshot) continue;
       const acct = tm ? (threadAcct[tm[1].toLowerCase()] || null) : null;
-      keep(acct || '__global_codex__', snapshot);
+      keep(acct || '__global_codex__', snapshot, 'codex-rollout');
       if (snapshot.fetchedAt && (now - snapshot.fetchedAt) < 5 * 60 * 1000 && ++freshEnough >= 3) break;
     }
   }
@@ -985,19 +1020,22 @@ function summarizeCodexRateLimits() {
     const newest = (a && (!g || (a.fetchedAt || 0) > (g.fetchedAt || 0))) ? a : g;
     if (newest) { byAccount[gid] = newest; byAccount['__global_codex__'] = newest; }
   }
+  // The freshness guard below still decides whether this write PROMOTES the
+  // file; it no longer decides the BUCKETS — those go through the one write
+  // path, which merges per limitId (B-9213), so a rung that knows about one
+  // limit updates one limit either way.
   // WRITE-THROUGH (P1): freshest-wins persistence, same anti-poison rule as
   // the claude device read-back — never let an older snapshot overwrite a
   // newer file (fetchedAt-guarded by `keep` above, which already merged disk).
-  try {
-    fs.mkdirSync(USAGE_CACHE_DIR, { recursive: true });
-    for (const [key, snap] of Object.entries(byAccount)) {
-      if (!/^(cxs-[\w-]+|__global_codex__)$/.test(key)) continue;
-      const f = path.join(USAGE_CACHE_DIR, key + '.json');
-      let cur = null; try { cur = JSON.parse(fs.readFileSync(f, 'utf-8')); } catch {}
-      if (cur && (Number(cur.fetchedAt) || 0) >= (Number(snap.fetchedAt) || 0)) continue;
-      fs.writeFileSync(f + '.tmp', JSON.stringify(snap)); fs.renameSync(f + '.tmp', f);
-    }
-  } catch {}
+  for (const [key, snap] of Object.entries(byAccount)) {
+    if (!/^(cxs-[\w-]+|__global_codex__)$/.test(key)) continue;
+    const cur = usageWrite.readCacheObject(USAGE_CACHE_DIR, key);
+    if (cur && (Number(cur.fetchedAt) || 0) >= (Number(snap.fetchedAt) || 0)) continue;
+    usageWrite.writeCacheObject({
+      cacheDir: USAGE_CACHE_DIR, key, obj: snap, set: setOf[key] || null,
+      source: snap.source || 'codex-rate-limits', backend: 'codex',
+    });
+  }
   _codexRateLimitCache = { overall, byAccount };
   _codexRateLimitCacheAt = now;
   return _codexRateLimitCache;

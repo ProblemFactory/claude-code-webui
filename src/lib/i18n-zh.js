@@ -3249,4 +3249,7 @@ export default {
   "This account has reached its spend control, so its requests are rejected — automatic turns on it are refused.": "该账号已达到自己的支出上限, 请求会被拒绝——因此不会在它上面发起自动回合。",
   "paid overage in use": "正在使用付费溢出额度",
   "Automatic turns are refused on this account while it bills paid overage (Settings → Spending).": "该账号正在按量付费期间, 自动 turn 一律被拒绝(设置 → 花费)。",
+  "starts on first use": "首次使用时开始",
+  "no window reported": "未报告任何窗口",
+  "No reading for the plan limit yet — the limits below are what this account has reported.": "尚未读到套餐额度的数据 —— 下面这些是该账号已上报的限额。",
 };

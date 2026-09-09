@@ -57,6 +57,7 @@ const { SlotTransitions } = require(path.join(REPO, 'src/slot-transitions.js'));
 const { loginState, accountLoginState, OAT_TTL_MS } = require(path.join(REPO, 'src/login-state.js'));
 const repair = require(path.join(REPO, 'src/reading-repair.js'));
 const readingLag = require(path.join(REPO, 'src/reading-lag.js'));
+const quotaModel = require(path.join(REPO, 'src/quota-model.js'));
 /** The established window lives in a SIDECAR beside the cache (r2), because the
  *  snapshot is rebuilt wholesale by every reading producer — including the
  *  shipped statusline hook, whose ordinary 8 s write used to delete it. Every
@@ -66,7 +67,22 @@ const stampWindow = (cacheDir, id, win) =>
 const readWindow = (cacheDir, id) => { try { return JSON.parse(fs.readFileSync(path.join(cacheDir, readingLag.windowSidecarName(id)), 'utf8')); } catch { return null; } };
 
 const cleanup = [];
-process.on('exit', () => { for (const d of cleanup) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } } });
+/** §18's negative control writes a patched copy of the engine BESIDE the real
+ *  one (relative requires). Swept at start for the strand a SIGKILL leaves —
+ *  by PID, so a concurrent run's live mutant is never deleted. */
+const mutants = [];
+try {
+  for (const f of fs.readdirSync(path.join(REPO, 'src/server'))) {
+    const m = /^vs-readattr-mut-(\d+)\.js$/.exec(f);
+    if (!m || Number(m[1]) === process.pid) continue;
+    try { process.kill(Number(m[1]), 0); continue; } catch { }
+    try { fs.unlinkSync(path.join(REPO, 'src/server', f)); } catch { }
+  }
+} catch { }
+process.on('exit', () => {
+  for (const d of cleanup) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } }
+  for (const f of mutants) { try { fs.unlinkSync(f); } catch { } }
+});
 
 /** Write a PATCHED COPY of a real src/ module somewhere else and require it.
  *  EVERY relative require is re-pointed at the repo, not a hand-kept list of
@@ -534,7 +550,14 @@ if (!probe) {
   const panelBody = ur.slice(ur.indexOf('async function refreshViaCliPanel'), ur.indexOf("app.post('/api/usage/refresh'"));
   const subDirRefs = (panelBody.match(/accounts\.subDir\(/g) || []).length;
   ok('§7 …exactly ONE derivation of the creds dir in the whole function (a second one is how the two could ever disagree)', subDirRefs === 1, 'subDir( refs in refreshViaCliPanel: ' + subDirRefs);
-  ok('§7 …and writes the panel back under that same key', /const f = path\.join\(USAGE_CACHE_DIR, key\.replace\(\/\[\^\\w\.-\]\/g, '_'\) \+ '\.json'\);[\s\S]{0,900}fs\.renameSync\(f \+ '\.tmp', f\);/.test(ur));
+  // …and the WRITE names that same `key`. The pin moved with the mechanism
+  // (2026-09-08): the panel no longer builds a path and renames a temp file —
+  // every usage-cache write in the product goes through src/usage-cache-write.js
+  // so a reading merges into the file's typed `limits` per limitId. What must
+  // stay true is what it always was: the object goes to the file for `key`, and
+  // nothing in this function writes that directory behind the choke point.
+  ok('§7 …and writes the panel back under that same key', /usageWrite\.writeCacheObject\(\{ cacheDir: USAGE_CACHE_DIR, key, obj: merged/.test(panelBody), 'panel write site');
+  ok('§7 …and nothing in the panel refresh writes the cache directory directly', !/fs\.writeFileSync\([^)]*USAGE_CACHE_DIR/.test(panelBody) && !/fs\.renameSync/.test(panelBody), 'raw writes inside refreshViaCliPanel');
   ok('§7 …and says WHY (a reading with no session is keyed by the credentials its process was handed)', /its identity IS the config dir the spawn was given/.test(ur));
 }
 
@@ -551,11 +574,15 @@ if (!probe) {
   ok('§8 …while a reading from before the death is simply old, not suspect', S.staleSince({ state: 'wiped', usable: false, since: 5000 }, 1000).suspect === false);
   ok('§8 the stamp is absolute (a "5 days ago" for something that will never move again is the wrong unit)', /\d/.test(S.stampText(Date.parse('2026-09-03T05:55:00Z'))) && S.stampText(null) === '—');
   const um = read('src/lib/usage-meter.js');
-  // The list is asserted by MEMBERSHIP, not verbatim: this module gained
-  // `overageChip` with the spend ceiling (design-account-hardening §1.4), and a
-  // pin on the exact import list fails for a rule that was ADDED beside the
-  // ones it exists to protect.
-  ok('§8 WIRING: the meter imports the pure rules and renders ONE provenance line for both panels', /import \{[^}]*\bcorroborationNote\b[^}]*\breadingSource\b[^}]*\bstampText\b[^}]*\bstaleSince\b[^}]*\} from '\.\/usage-source\.js';/.test(um) && (um.match(/\$\{sourceLine\(/g) || []).length === 2);
+  // The import list GREW with the limit-aware helpers (B-9213/B-8b12), so the
+  // pin asserts the four provenance rules are still imported FROM THE PURE
+  // MODULE and that there is still exactly ONE provenance line per panel —
+  // the mechanism — instead of pinning the literal line, which would go red
+  // for every future helper and green for a second hand-written line.
+  const imp = (um.match(/import \{([^}]*)\} from '\.\/usage-source\.js';/) || [, ''])[1];
+  ok('§8 WIRING: the meter imports the pure rules and renders ONE provenance line for both panels',
+    ['corroborationNote', 'readingSource', 'stampText', 'staleSince'].every((n) => imp.includes(n)) && (um.match(/\$\{sourceLine\(/g) || []).length === 2,
+    'usage-source import: ' + imp.trim());
   ok('§8 WIRING: it reads the per-account credential state /api/usage now carries', /this\._usageLogins = data\?\.logins \|\| \{\}/.test(um) && /logins: \(\(\) => \{/.test(read('src/usage-routes.js')));
   ok('§8 WIRING: every interpolated value goes through escHtml (the panel renders peer-controlled account names)', /escHtml\(src\.tip\)/.test(um) && /escHtml\(t\('via \{source\}'/.test(um));
 }
@@ -3343,12 +3370,213 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
         ok('§10 the CODEX panel names its producer instead of "via unknown"', /class="usage-src"/.test(Hcx) && /own session/.test(Hcx) && !/unknown/.test(Hcx) && !/No producer recorded/.test(Hcx), Hcx.replace(/\s+/g, ' ').slice(-280));
         const HcxOld = await renderCodex(cxSnap);   // the PRE-FIX snapshot: no `source` at all
         ok('§10 NEGATIVE CONTROL: the pre-fix codex snapshot (no `source`) renders exactly the sentence the fix removes', /unknown/.test(HcxOld) && /No producer recorded/.test(HcxOld), HcxOld.replace(/\s+/g, ' ').slice(-280));
+        // ── §17 THREE LIMITS ON ONE ACCOUNT, IN THE REAL PANEL (B-9213) ──
+        // The codex app-server pushes one snapshot PER LIMIT and they were
+        // collapsed into one cache file, so the panel showed whichever spoke
+        // last. Measured on this instance's own buffers (sess-13, 208 pushes in
+        // one conversation): `codex` (the plan, 5 %), `codex_bengalfox` /
+        // "GPT-5.3-Codex-Spark" (0 %/0 %, its reset sliding on every read) and
+        // `premium` (no windows at all). This feeds the panel what the ONE
+        // write path now produces and asserts the user can see all three.
+        const T0 = 1788900000000;
+        const nowS = Math.round(T0 / 1000);
+        const cxMulti = {
+          limitId: 'codex', limitName: '', planType: 'pro',
+          fiveHour: null,
+          sevenDay: { utilization: 0.05, usedPercent: 5, windowMinutes: 10080, resetsAt: 1789509325 },
+          scopedWeekly: [{ name: 'GPT-5.3-Codex-Spark', utilization: 0, resetsAt: nowS + 10080 * 60 - 40, state: 'empty' }],
+          fetchedAt: T0, source: 'codex-rate-limits',
+          limits: [
+            { limitId: 'codex', name: null, scope: 'plan', model: null, family: null, source: 'codex-rate-limits', fetchedAt: T0, flags: {},
+              windows: [{ kind: '7d', minutes: 10080, minutesStated: true, usedPct: 5, resetsAt: 1789509325, measuredAt: T0, state: 'running' }] },
+            { limitId: 'codex_bengalfox', name: 'GPT-5.3-Codex-Spark', scope: 'model', model: 'GPT-5.3-Codex-Spark', family: null, source: 'codex-rate-limits', fetchedAt: T0 + 1000, flags: {},
+              windows: [
+                { kind: '5h', minutes: 300, minutesStated: true, usedPct: 0, resetsAt: nowS + 300 * 60 - 40, measuredAt: T0 + 1000, state: 'empty' },
+                { kind: '7d', minutes: 10080, minutesStated: true, usedPct: 0, resetsAt: nowS + 10080 * 60 - 40, measuredAt: T0 + 1000, state: 'empty' }] },
+            { limitId: 'premium', name: null, scope: 'plan', model: null, family: null, source: 'codex-rate-limits', fetchedAt: T0, flags: {}, windows: [] },
+          ],
+        };
+        const Hm = await renderCodex(cxMulti);
+        ok('§17 the panel names the model-scoped limit the vendor reported', /GPT-5\.3-Codex-Spark/.test(Hm), Hm.replace(/\s+/g, ' ').slice(0, 400));
+        ok('§17 …and the OTHER limit the same account holds (`premium`, which reports no window at all)', /premium/.test(Hm) && /no window reported/.test(Hm), Hm.replace(/\s+/g, ' ').slice(-400));
+        ok('§17 the plan limit still reads 5 % — a Spark push is not news about it (the collapse showed 0 %)', /5% used/.test(Hm) && !/0% used[\s\S]{0,120}7-day limit/.test(Hm), Hm.replace(/\s+/g, ' ').slice(0, 300));
+        ok('§17 a window that has NOT STARTED says so instead of printing a reset that slides on every read', /starts on first use/.test(Hm), Hm.replace(/\s+/g, ' ').slice(-400));
+        const rows17 = await ev("(() => Array.from(document.querySelectorAll('#usage-popup .usage-session[data-limit-id]')).map((e) => ({ id: e.dataset.limitId, w: Math.round(e.getBoundingClientRect().width), inView: e.getBoundingClientRect().left >= -1 && e.getBoundingClientRect().right <= innerWidth + 1, vis: getComputedStyle(e).display !== 'none' })))()");
+        ok('§17 every extra limit RENDERS inside a 375px viewport (a limit nobody can read is a limit nobody has)',
+          Array.isArray(rows17) && rows17.length === 2 && rows17.every((r) => r.vis && r.w > 0 && r.inView), JSON.stringify(rows17));
+        ok('§17 …and each of the two is the limit it claims to be', Array.isArray(rows17) && rows17.map((r) => r.id).sort().join(',') === 'codex_bengalfox,premium', JSON.stringify(rows17));
+        // NEGATIVE CONTROL: the PRE-FIX collapse — one file, the Spark
+        // snapshot, no `limits`. The panel can only show 0 % and a reset that
+        // is not one, and the plan limit is nowhere.
+        const cxCollapsed = {
+          limitId: 'codex_bengalfox', limitName: 'GPT-5.3-Codex-Spark', planType: 'pro',
+          fiveHour: { utilization: 0, usedPercent: 0, windowMinutes: 300, resetsAt: nowS + 300 * 60 - 40 },
+          sevenDay: { utilization: 0, usedPercent: 0, windowMinutes: 10080, resetsAt: nowS + 10080 * 60 - 40 },
+          fetchedAt: T0, source: 'codex-rate-limits',
+        };
+        const Hc = await renderCodex(cxCollapsed);
+        ok('§17 NEGATIVE CONTROL: the collapsed pre-fix snapshot shows 0 % and names no other limit', /0% used/.test(Hc) && !/GPT-5\.3-Codex-Spark/.test(Hc) && !/starts on first use/.test(Hc), Hc.replace(/\s+/g, ' ').slice(0, 300));
         cws.close();
       }
     } catch (e) {
       ok('§10 the browser leg ran', false, String(e && e.message).slice(0, 300));
     } finally { kill(); }
   }
+}
+
+// ── §18 THE WALL IS A READING TOO (inc-mttbrtc0-6049) ───────────────────────
+// 2026-09-08 23:47Z, production. The pool re-pointed one session's credential
+// link twice inside ONE turn (23:44:48 → 23:46:00 → 23:46:36 — every row is in
+// data/slot-transitions.jsonl, per session, with timestamps). The CLI re-read
+// the credentials (2.1.257 `rpe()`, mtime-gated — a re-point bumps exactly that
+// mtime) and its NEXT request, made with the member we had just moved TO, was
+// rejected carrying THAT member's 5h window. `rejectionSlotFor` answers with
+// the TURN PIN, so the mark landed on the member the turn had started on.
+//
+// The anchor streams recorded it, and this fixture is built to their shape
+// (identities anonymised; the two members' own windows 3h10m apart, as measured):
+//   victim   23:43 on-demand        5h u=0.91 resets 00:19   ← its own
+//            23:46 rate-limit-event 5h u=1    resets 00:20   ← its own wall
+//            23:48 WALL             5h u=1    resets 03:30   ← FOREIGN
+//            23:53 on-demand        5h u=1    resets 00:20   ← owner restored by hand
+//   true owner 23:42 on-demand      5h u=0.84 resets 03:30   ← ITS own window
+//
+// Both halves are asserted, because both were real harm: the PANEL (a foreign
+// reset shown as this member's) and the MONEY (three hours of demotion on
+// somebody else's wall — a usable member excluded from the pool).
+{
+  const mkIncident = () => {
+    const w = mkWorld();
+    if (!w) return null;
+    const nowMs = Date.now();
+    // the two members' OWN established 5h windows, 3h10m apart and BOTH still
+    // in the future — "a running window cannot move before it ends" is the
+    // whole physical claim, so an expired one must not be used (leg d).
+    const OWN_VICTIM = Math.floor(nowMs / 1000) + 33 * 60;      // ~00:20Z
+    const OWN_TRUE = Math.floor(nowMs / 1000) + 3 * 3600 + 43 * 60; // ~03:30Z
+    w.stampWindow(w.LINK, { sevenDay: null, fiveHour: OWN_VICTIM, scoped: {} });
+    w.stampWindow(w.FISH, { sevenDay: null, fiveHour: OWN_TRUE, scoped: {} });
+    return { w, OWN_VICTIM, OWN_TRUE, nowMs };
+  };
+
+  // Drive the REAL producer twice, moving the link in between exactly as the
+  // pool did — never by injecting a signal, so the turn pin is set the way
+  // production sets it.
+  const runTurn = (w, OWN_VICTIM, OWN_TRUE) => {
+    const rej = (resetsAtSec) => w.eng.recordRateLimitEvent(w.session, {
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', utilization: 1, resets_at: resetsAtSec, resetsAt: resetsAtSec },
+    });
+    rej(OWN_VICTIM);                       // ① the victim's OWN wall — pins the turn on it
+    w.am.ensureSessionPoolLink(w.P, w.SID, w.FISH, { why: 'per-session-switch' }); // ② the pool moves the link mid-turn
+    rej(OWN_TRUE);                         // ③ the rejection the NEW member's credentials earned
+    w.eng.noteTurnEnd(w.session);          // the demotion runs here
+  };
+
+  const I = mkIncident();
+  if (!I) { ok('§18 SKIP — pool not supported here', true); }
+  else {
+    const { w, OWN_VICTIM, OWN_TRUE } = I;
+    const cap = quiet();
+    runTurn(w, OWN_VICTIM, OWN_TRUE);
+    const lines = cap.done();
+
+    const victim = w.readCache(w.LINK) || {};
+    const trueOwner = w.readCache(w.FISH) || {};
+    const v5 = Number(victim.fiveHour && victim.fiveHour.resetsAt) || 0;
+    const t5 = Number(trueOwner.fiveHour && trueOwner.fiveHour.resetsAt) || 0;
+
+    ok('§18 the victim keeps ITS OWN 5h window — the foreign reset never lands on it',
+      v5 === OWN_VICTIM, `victim 5h resetsAt=${v5} own=${OWN_VICTIM} foreign=${OWN_TRUE}`);
+    ok('§18 …and the foreign wall is filed on the member the link had moved to',
+      t5 === OWN_TRUE, `true owner 5h resetsAt=${t5} expected=${OWN_TRUE}`);
+    ok('§18 …the re-file SPEAKS (a write that moves money may never be silent)',
+      lines.some((l) => /re-filed \(the link moved mid-turn\)/.test(l)), lines.filter((l) => /\[wall\]/.test(l)).join(' | ').slice(0, 300));
+
+    // THE MONEY HALF. The victim legitimately walled on its OWN 5h at ①, so it
+    // IS walled — what must NOT happen is the true owner going unmarked while
+    // the victim absorbs a second, foreign wall.
+    const walled = w.eng.sessionWalledMembers(w.SID);
+    ok('§18 the member the link moved to is marked walled — the wall it actually served',
+      walled.has(w.FISH), `walled: ${JSON.stringify([...walled])}`);
+
+    // ── NEGATIVE CONTROL: the pre-fix rule, on the SAME world ───────────────
+    // A PATCHED COPY OF THE PRODUCT MODULE (the r4/§8 pattern), not my idea of
+    // what the old code did: `wallTargetFor` is neutered to "always the pin",
+    // which is exactly what demoteWalledAccount did before this change.
+    {
+      // A PATCHED COPY OF THE REAL ENGINE, written as a SIBLING of the original
+      // (src/server/) because its relative requires — `./lazy.js`,
+      // `./spend-guard.js`, `../account-pool-auto.js` — only resolve there; the
+      // generic `patchedModule` helper re-points `./x` at src/, which is right
+      // for a module that LIVES in src/ and wrong for this one. Swept at start
+      // and unlinked on exit, and gitignored: a SIGKILL may never leave the
+      // tree dirty, because a dirty tree is what the release gate refuses on.
+      const src = fs.readFileSync(path.join(REPO, 'src/server/usage-pool-engine.js'), 'utf8');
+      const marker = 'function wallTargetFor(session, poolId, b, pinned) {';
+      const patched = src.replace(marker, marker + '\n  return { member: pinned, why: null };  // PRE-FIX: the turn pin, unconditionally');
+      ok('§18 NEGATIVE CONTROL: the patch hit the product source', patched !== src && patched.includes('PRE-FIX: the turn pin'));
+      const I2 = mkIncident();
+      const w2 = I2.w;
+      const mutFile = path.join(REPO, 'src/server/vs-readattr-mut-' + process.pid + '.js');
+      fs.writeFileSync(mutFile, patched);
+      mutants.push(mutFile);
+      const prefixMod = require(mutFile);
+      const eng2 = prefixMod.create({
+        app: { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} },
+        rootDir: w2.root, USAGE_CACHE_DIR: w2.cacheDir, activeSessions: w2.sessions,
+        wss: { clients: new Set() }, WS_OPEN: 1, broadcastToSession() { }, serverNotice() { },
+        serverSetting: () => undefined, getAccounts: () => w2.am, getHosts: () => null, getUsageHistory: () => null,
+        recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
+        getAutoResume: () => null, getOtelIngest: () => ({ observedOrgFor: () => null }), getQuotaProbe: () => null,
+      });
+      const cap2 = quiet();
+      const rej2 = (r) => eng2.recordRateLimitEvent(w2.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', utilization: 1, resets_at: r, resetsAt: r } });
+      rej2(I2.OWN_VICTIM);
+      w2.am.ensureSessionPoolLink(w2.P, w2.SID, w2.FISH, { why: 'per-session-switch' });
+      rej2(I2.OWN_TRUE);
+      eng2.noteTurnEnd(w2.session);
+      cap2.done();
+      const v2 = Number((w2.readCache(w2.LINK) || {}).fiveHour?.resetsAt) || 0;
+      ok('§18 NEGATIVE CONTROL: without the rule the FOREIGN window really does land on the victim (the incident)',
+        v2 === I2.OWN_TRUE, `pre-fix victim 5h resetsAt=${v2} own=${I2.OWN_VICTIM} foreign=${I2.OWN_TRUE}`);
+    }
+  }
+}
+
+// ── §18b THE RULE'S OWN BOUNDARIES, on the real engine ──────────────────────
+// Each leg removes ONE input and asserts the rule falls back rather than
+// guessing — an over-eager version of this fix would archive every exhaustion
+// mark on the instance, which is what `guardReadingTarget` warned about when it
+// exempted walls in the first place.
+{
+  const nowS = Math.floor(Date.now() / 1000);
+  const cases = [
+    ['a banner states no reset ⇒ the pin stands (parseLimitBanner returns {kind} only)',
+      { statedResetsAt: null, pinnedKey: 'A', pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
+    ['the pin\'s own window does not contradict ⇒ the pin stands',
+      { statedResetsAt: nowS + 1800, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
+    ['the pin has NO established window ⇒ no evidence, no refusal',
+      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: null, atSec: nowS }, 'write', 'A'],
+    ['the pin\'s window had already ENDED ⇒ it may legitimately have moved',
+      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS - 10, atSec: nowS }, 'write', 'A'],
+    ['refuted but the ledger is silent ⇒ write NOWHERE (refusing never mis-files)',
+      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: null, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
+    ['refuted but the ledger only answers for the POOL DEFAULT ⇒ not an answer about this conversation',
+      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: false, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
+    ['the two witnesses disagree (ledger names the pin) ⇒ write NOWHERE',
+      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'A', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
+    ['the candidate\'s OWN window contradicts it too ⇒ write NOWHERE',
+      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, ledgerOwnResetsAt: nowS + 1200, atSec: nowS }, 'archive', null],
+    ['±120 s is the same window, not a contradiction (the panel-vs-event wobble)',
+      { statedResetsAt: nowS + 1800 + 60, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
+  ];
+  for (const [what, args, action, key] of cases) {
+    const d = quotaModel.wallAttribution(args);
+    ok(`§18b ${what}`, d.action === action && (d.key || null) === key, JSON.stringify(d));
+  }
+  ok('§18b the wall tolerance IS reading-lag\'s, not a second opinion',
+    quotaModel.WINDOW_JITTER_SEC === 120, String(quotaModel.WINDOW_JITTER_SEC));
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

@@ -209,11 +209,101 @@ function projectReset(prevResetsAt, periodSec, nowSec) {
 }
 const WEEK_SEC = 7 * 86400;
 
+// ── THE TYPED LIMIT SET (src/quota-model.js) ────────────────────────────────
+// Every claude reading shape becomes ONE typed set, so the write path and every
+// reader see the same object no matter which of the four channels produced it.
+// The claude account holds:
+//   • ONE plan limit (`plan`) with a '5h' and a '7d' window,
+//   • ONE model-scoped limit PER `scopedWeekly` entry — measured on this
+//     instance, exactly one exists (Fable; owner: "除了 fable，没有模型 specific
+//     的用量限制的"), but the shape is a LIST because the vendor's payload is,
+//   • an `overage` limit when the account carries extra usage (`spend`, from
+//     `extra_usage`) or an overage state (`rate_limit_event`'s overage fields).
+// `familyOf` is injected by the caller (src/model-family.js) — this file is in
+// the SHARED tier and quota-model is PURE, so neither may reach for it.
+const quotaModel = require('../quota-model.js');
+
+const CLAUDE_EXTRA_KEYS = ['orgUuid', 'orgName', 'orgEmail', 'email', 'name', 'planType', 'overallStatus', 'scopedFetchedAt', 'spend', 'corroborated'];
+
+/** One claude reading (any of the four shapes) → a typed LimitSet.
+ *  `raw` is either a raw payload `normalize()` understands, or an already
+ *  normalized snapshot (the historical cache shape). Returns null when the
+ *  payload is not a claude quota reading at all — never a fabricated set. */
+function toLimitSet(raw, { identity = null, source = null, nowMs = null, familyOf = null } = {}) {
+  const at = Number(nowMs) || Date.now();
+  const snap = (raw && typeof raw === 'object' && (raw.fiveHour || raw.sevenDay || Array.isArray(raw.scopedWeekly)))
+    ? raw : normalize(raw, at);
+  if (!snap) return null;
+  const set = quotaModel.fromLegacy(snap, {
+    identity, source: source || snap.source || null, fetchedAt: snap.fetchedAt || at,
+    limitId: 'plan', familyOf, extraKeys: CLAUDE_EXTRA_KEYS,
+  });
+  // EXTRA USAGE IS ITS OWN LIMIT, not a footnote on the plan. `spend` is REAL
+  // DOLLARS past the subscription allowance: with overage on, utilization stays
+  // under 1 while every token is billed, so an account ranked on utilization
+  // alone looks like the member with the MOST headroom (design §1.4). Modelling
+  // it as a limit is what lets a reader ask about it at all.
+  const sp = snap.spend;
+  if (sp && typeof sp === 'object' && (Number.isFinite(Number(sp.used)) || Number.isFinite(Number(sp.pct)))) {
+    const pct = Number(sp.pct);
+    const win = quotaModel.makeWindow({
+      kind: 'monthly', minutes: 0,
+      usedPct: Number.isFinite(pct) ? Math.max(0, Math.min(100, pct <= 1 ? pct * 100 : pct)) : null,
+      resetsAt: sp.resetsAt, measuredAt: at,
+    });
+    const i = set.limits.findIndex((l) => l.limitId === 'overage');
+    const flags = { ...(i >= 0 ? set.limits[i].flags : {}), used: Number(sp.used), limit: sp.limit == null ? null : Number(sp.limit), currency: sp.currency || 'USD' };
+    const lim = quotaModel.makeLimit({ limitId: 'overage', scope: 'overage', name: 'Extra usage', windows: [win], flags, source: set.source, fetchedAt: at });
+    if (i >= 0) set.limits[i] = quotaModel.mergeLimit(set.limits[i], lim); else set.limits.push(lim);
+  }
+  return set;
+}
+
+/** ONE parsed `rate_limit_event` → a typed set carrying exactly ONE limit with
+ *  exactly ONE window. That is the honest shape: the record names one bucket,
+ *  and `mergeLimitSets` is what puts it back beside the others without
+ *  disturbing them (the per-bucket `applyTo` this replaces had to hand-preserve
+ *  every field it was not writing — five fields have been lost that way). */
+function limitSetFromEvent(ev, { identity = null, source = 'rate-limit-event', nowMs = null, familyOf = null } = {}) {
+  if (!ev || (ev.kind !== 'fiveHour' && ev.kind !== 'sevenDay' && ev.kind !== 'scoped')) return null;
+  const at = Number(nowMs) || Date.now();
+  const dead = ev.status === 'rejected';
+  // A REJECTION IS A READING OF 100 %, and its window is whatever the record
+  // stated — never a guess here. (The bounded `now + 5h/24h` guess the cache
+  // writer makes when a rejection states no reset stays in the write path,
+  // where the previous value is in hand to prefer first.)
+  const usedPct = dead ? 100 : (ev.utilization != null ? Math.max(0, Math.min(1, ev.utilization)) * 100 : null);
+  const status = dead ? 'limited' : (ev.status || null);
+  const kind = ev.kind === 'fiveHour' ? '5h' : '7d';
+  const win = quotaModel.makeWindow({ kind, usedPct, resetsAt: ev.resetsAt, measuredAt: at, status });
+  const limits = [];
+  if (ev.kind === 'scoped') {
+    const name = String(ev.scopedName || '');
+    limits.push(quotaModel.makeLimit({
+      limitId: 'model:' + name.toLowerCase().replace(/\s+/g, '-'), name, scope: 'model',
+      model: name, family: familyOf ? familyOf(name) : null,
+      windows: [win], flags: { asOf: at }, source, fetchedAt: at,
+    }));
+  } else {
+    limits.push(quotaModel.makeLimit({ limitId: 'plan', scope: 'plan', windows: [win], source, fetchedAt: at }));
+  }
+  if (ev.overage && Object.values(ev.overage).some((v) => v !== undefined)) {
+    limits.push(quotaModel.makeLimit({ limitId: 'overage', scope: 'overage', name: 'Extra usage', windows: [], flags: { ...ev.overage, asOf: at }, source, fetchedAt: at }));
+  }
+  return quotaModel.makeLimitSet({ identity, fetchedAt: at, source, limits });
+}
+
 module.exports = { projectReset, WEEK_SEC,
   normalize,
   signalFromStream,
   probe: capsOf('claude').quotaProbe, // 'cli-usage': the `claude -p /usage` auto-cli rung (usage-routes refreshViaCliPanel)
   classifyAuthFailure,               // account-pool-auto's Anthropic-wording classifier, verbatim
+  // THE TYPED PRODUCERS (src/quota-model.js) — the write path takes these.
+  // `limitSetFromSnapshot` is the HARNESS-NEUTRAL name the engine dispatches on
+  // (`quotaSourceFor(backend).limitSetFromSnapshot`), never a backend-id branch:
+  // for claude a normalized snapshot IS one of the shapes toLimitSet accepts.
+  toLimitSet, limitSetFromEvent, CLAUDE_EXTRA_KEYS,
+  limitSetFromSnapshot: (snap, opts) => toLimitSet(snap, opts),
   // named helpers for current callers / tests
   parseCliUsageText, parseOAuthUsage, LIMIT_BANNER_RE,
 };

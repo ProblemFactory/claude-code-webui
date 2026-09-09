@@ -30,6 +30,16 @@
 // existed. That is deliberate: a harness that cannot read a login deadline
 // must not have its members quietly demoted.
 const { loginUsable, loginSwitchTarget, loginRank, loginWallPhrase, loginBlockedText } = require('./login-expiry.js');
+// AN EMPTY WINDOW IS NOT A CONSTRAINT AND NOT A DEADLINE (B-8b12, PURE→PURE).
+// A window that has not started answers `resetsAt = now + windowDuration` on
+// EVERY read — measured on this instance, 144 distinct "reset times" across 149
+// consecutive reads of one codex bucket. Counting it as a bucket says the
+// account has full headroom in a window nobody is spending in (harmless), but
+// ranking on its reset makes it the earliest deadline forever, which is EDF's
+// entire input. `src/quota-model.js` decides what an empty window is; this file
+// only asks. The stamp rides the bucket because the derived legacy view puts it
+// there — see toLegacyView.
+const { bucketCounts } = require('./quota-model.js');
 
 const SWITCH_THRESHOLD_PCT = 5;
 // PER-BUCKET-KIND thresholds (2.268.2, user-designed: what matters is
@@ -61,6 +71,11 @@ const MIN_GAIN_PCT = 3;
 // so week-old readings are normal, not an error).
 function bucketRemaining(b, nowSec) {
   if (!b || typeof b !== 'object') return null;
+  // An EMPTY window makes no claim: nothing has been spent in it, and its
+  // "reset" is a sliding number. Reporting 100 % free would be true but
+  // useless; reporting it as a KNOWN bucket is what let one always-0 % limit
+  // decide an account's remaining. `known:false` is the honest answer.
+  if (!bucketCounts(b)) return null;
   const reset = Number(b.resetsAt) || 0;
   if (reset && reset < nowSec) return 100;
   const u = Number(b.utilization);
@@ -88,7 +103,10 @@ function accountRemaining(cache, nowSec) {
 function weeklyDeadline(cache, nowSec) {
   if (!cache || typeof cache !== 'object') return null;
   const cands = [];
-  const push = (b) => { const r = Number(b?.resetsAt) || 0; if (r > nowSec) cands.push(r); };
+  // Empty windows are skipped HERE too, and this is the site that mattered: a
+  // sliding reset is always ~one window away, so it wins every min() and
+  // becomes the account's EDF deadline on every single evaluation.
+  const push = (b) => { if (!bucketCounts(b)) return; const r = Number(b?.resetsAt) || 0; if (r > nowSec) cands.push(r); };
   push(cache.sevenDay);
   for (const b of Array.isArray(cache.scopedWeekly) ? cache.scopedWeekly : []) push(b);
   return cands.length ? Math.min(...cands) : null;

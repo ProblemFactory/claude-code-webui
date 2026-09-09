@@ -272,11 +272,149 @@ function signalFromStream(record, now = Date.now()) {
   return null;
 }
 
+// ── THE TYPED LIMIT SET (src/quota-model.js) — B-9213 ───────────────────────
+// THE MEASUREMENT THIS EXISTS FOR. The codex app-server pushes ONE
+// `rate_limits_updated` PER LIMIT, interleaved on a single session. Counted on
+// this instance's own buffers (sess-13, one conversation, 208 pushes):
+//
+//   limitId            limitName               windows                 pushes
+//   codex              (null)                  primary 10080min        32   5 %…100 %
+//   codex_bengalfox    GPT-5.3-Codex-Spark     primary 300 + sec 10080 149  0 %/0 %
+//   premium            (null)                  NONE (both null)        27
+//
+// `normalizeCodexRateLimit` keeps `limitId` on the snapshot, but the snapshot
+// is written to ONE cache file per account key, so the last push wins: the file
+// on disk while this was written held the Spark limit at 0 %/0 % and the plan
+// limit — the one at 5 % — had been overwritten out of existence. The panel
+// flips between renders; a pool reading it sees headroom that does not exist.
+//
+// The typed set fixes it structurally: each limitId is its OWN limit, and
+// `mergeLimitSets` merges per limitId, so a Spark push is not news about the
+// plan. What each limit BECOMES:
+//   • a limit whose `limitName` names a model  → scope 'model'  (Spark)
+//   • anything else                            → scope 'plan'   (codex, premium)
+//   • `credits`                                → its own 'credits' limit
+//   • `spendControlReached`                    → a flag on the plan limit
+// `premium` reports no windows at all in all 27 measured pushes; it is KEPT
+// (a limit the vendor named is a fact) and `planLimit()` prefers a plan limit
+// that actually carries a window, so it can never displace `codex`.
+const quotaModel = require('../quota-model.js');
+
+const CODEX_EXTRA_KEYS = ['limitId', 'limitName', 'planType', 'rateLimitReachedType', 'spendControlReached', 'credits', 'resetCredits'];
+
+/** Which window kind is a codex window of `windowMinutes` minutes? The same
+ *  LENGTH rule normalizeCodexRateLimit uses (never primary/secondary position —
+ *  0.149.x moved the weekly window into `primary`), spelled once. */
+function codexWindowKind(minutes) {
+  const m = Number(minutes) || 0;
+  if (!m) return 'other';
+  return m <= 480 ? '5h' : '7d';
+}
+
+/** ONE `rate_limits_updated` payload's `rateLimits` object → a typed LimitSet
+ *  carrying exactly ONE limit. `identity` is the account key; `source` names
+ *  the producer (`codex-rate-limits` for the live app-server push,
+ *  `limit-banner` for the task_failed rejection, `codex-rollout` for a
+ *  transcript tail read) — a producer we ship always stamps its own name. */
+function toLimitSet(raw, { identity = null, source = null, fetchedAt = null } = {}) {
+  if (!raw || typeof raw !== 'object') return null;
+  const at = Number(fetchedAt) || Date.now();
+  const limitId = String(raw.limit_id || raw.limitId || 'codex');
+  const name = raw.limit_name || raw.limitName || null;
+  const reached = raw.rate_limit_reached_type ?? raw.rateLimitReachedType ?? null;
+  const windows = [];
+  for (const [pos, entry, fallback] of [['primary', raw.primary, 300], ['secondary', raw.secondary, 10080]]) {
+    if (!entry || typeof entry !== 'object') continue;
+    const minutes = Number(entry.window_minutes ?? entry.windowMinutes ?? entry.windowDurationMins ?? entry.window_duration_mins) || fallback;
+    const rawPct = Number(entry.used_percent ?? entry.usedPercent);
+    let usedPct = Number.isFinite(rawPct) ? Math.max(0, Math.min(100, rawPct)) : null;
+    let status = null;
+    // The tripped window reads as DEAD whatever its percentage says — the
+    // exhaustion marker names WHICH raw position hit the wall, and dropping it
+    // is what the pool auto-switch gates on (2.368.18 P0, kept verbatim).
+    if (reached === pos) { usedPct = 100; status = 'limited'; }
+    const kind = codexWindowKind(minutes);
+    if (windows.some((w) => w.kind === kind)) continue; // one window per kind, first wins (the normalizer's own rule)
+    windows.push(quotaModel.makeWindow({ kind, minutes, usedPct, resetsAt: entry.resets_at ?? entry.resetsAt, measuredAt: at, status }));
+  }
+  const flags = {};
+  if (reached != null) flags.reached = reached;
+  const spend = raw.spend_control_reached ?? raw.spendControlReached ?? null;
+  if (spend != null) flags.spendControl = spend;
+  const limits = [quotaModel.makeLimit({
+    limitId,
+    name: name || null,
+    // A limit that NAMES a model is scoped to that model; everything else is a
+    // plan limit. Never a guess from the id string — `codex_bengalfox` means
+    // nothing, `GPT-5.3-Codex-Spark` is the vendor telling us what it governs.
+    scope: name ? 'model' : 'plan',
+    model: name || null,
+    windows, flags, source, fetchedAt: at,
+  })];
+  const c = raw.credits;
+  if (c && typeof c === 'object') {
+    limits.push(quotaModel.makeLimit({
+      limitId: 'credits', scope: 'credits', name: 'Credits', windows: [],
+      flags: {
+        hasCredits: !!(c.has_credits ?? c.hasCredits),
+        unlimited: !!c.unlimited,
+        balance: String(c.balance ?? ''),
+      },
+      source, fetchedAt: at,
+    }));
+  }
+  if (!windows.length && !limits[0].flags.reached && limits.length === 1 && !name) {
+    // `premium`-shaped: a limit the vendor named and reported NOTHING about.
+    // Kept (it is a fact about the account), and it carries no windows, so no
+    // reader can mistake it for headroom.
+  }
+  const extra = {};
+  for (const k of CODEX_EXTRA_KEYS) {
+    if (k === 'limitId') { extra.limitId = limitId; continue; }
+    if (k === 'limitName') { if (name != null) extra.limitName = name; continue; }
+    if (k === 'planType') { const p = raw.plan_type || raw.planType; if (p) extra.planType = p; continue; }
+  }
+  return quotaModel.makeLimitSet({ identity, fetchedAt: at, source, limits, extra: Object.keys(extra).length ? extra : null });
+}
+
+/** A legacy codex SNAPSHOT (what normalizeCodexRateLimit returns, i.e. what the
+ *  cache files hold today) → a typed set. Used by the migration and by the
+ *  write path when the previous file predates this model. */
+function limitSetFromSnapshot(snap, { identity = null, source = null } = {}) {
+  if (!snap || typeof snap !== 'object') return null;
+  const at = Number(snap.fetchedAt) || Date.now();
+  const src = source || snap.source || null;
+  const limitId = String(snap.limitId || 'codex');
+  const name = snap.limitName || null;
+  const windows = [];
+  for (const [kind, w] of [['5h', snap.fiveHour], ['7d', snap.sevenDay]]) {
+    if (!w || typeof w !== 'object') continue;
+    // `utilization` first, for the same reason quota-model's `fromLegacy` does:
+    // the tripped-window mark rewrites both, but a caller that marks a bucket
+    // dead in place may set only the fraction.
+    const usedPct = Number.isFinite(Number(w.utilization)) ? Math.max(0, Math.min(1, Number(w.utilization))) * 100
+      : (Number.isFinite(Number(w.usedPercent)) ? Number(w.usedPercent) : null);
+    windows.push(quotaModel.makeWindow({ kind, minutes: w.windowMinutes, usedPct, resetsAt: w.resetsAt, measuredAt: at, status: w.status }));
+  }
+  const flags = {};
+  if (snap.rateLimitReachedType != null) flags.reached = snap.rateLimitReachedType;
+  if (snap.spendControlReached != null) flags.spendControl = snap.spendControlReached;
+  const limits = [quotaModel.makeLimit({ limitId, name, scope: name ? 'model' : 'plan', model: name, windows, flags, source: src, fetchedAt: at })];
+  if (snap.credits && typeof snap.credits === 'object') {
+    limits.push(quotaModel.makeLimit({ limitId: 'credits', scope: 'credits', name: 'Credits', windows: [], flags: { ...snap.credits }, source: src, fetchedAt: at }));
+  }
+  const extra = {};
+  for (const k of CODEX_EXTRA_KEYS) if (snap[k] !== undefined) extra[k] = snap[k];
+  return quotaModel.makeLimitSet({ identity, fetchedAt: at, source: src, limits, extra: Object.keys(extra).length ? extra : null });
+}
+
 module.exports = {
   normalize: normalizeCodexRateLimit,
   signalFromStream,
   probe: capsOf('codex').quotaProbe, // 'rpc-rate-limits': account/rateLimits/read on a LIVE app-server
   classifyAuthFailure,
+  // THE TYPED PRODUCERS (src/quota-model.js, B-9213) — the write path takes these
+  toLimitSet, limitSetFromSnapshot, codexWindowKind, CODEX_EXTRA_KEYS,
   // named helpers for current callers / tests
   normalizeCodexRateLimit, EXHAUSTION_RE, trippedWindow,
   EXHAUSTION_INFO, isExhaustionInfo, canonInfo, codexErrorEnum, parseCodexLimitReset, LIMIT_RESET_RE,

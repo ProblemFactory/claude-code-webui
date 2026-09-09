@@ -94,7 +94,7 @@ function parseRateLimitEvent(msg) {
  * @returns {ok, dead, wroteReading} — dead=true when the bucket is exhausted
  *   (caller should treat it like a limit banner: immediate pool evaluation).
  */
-function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(), source = 'rate-limit-event', corroborated = undefined }) {
+function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(), source = 'rate-limit-event', corroborated = undefined, familyOf = null }) {
   if (!ev || (ev.kind !== 'fiveHour' && ev.kind !== 'sevenDay' && ev.kind !== 'scoped')) {
     // unknown bucket types: surface, never silently drop (the api_retry lesson)
     return { ok: false, dead: false, wroteReading: false, unknownType: ev?.rawType || null };
@@ -131,14 +131,34 @@ function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(
     if (ev.overage && Object.values(ev.overage).some((v) => v !== undefined)) cache.overage = { ...(cache.overage || {}), ...ev.overage, asOf: now };
     return cache;
   };
-  const fileFor = (id) => path.join(cacheDir, String(id).replace(/[^\w.-]/g, '_') + '.json');
+  // THE ONE WRITE PATH (src/usage-cache-write.js): this module still decides
+  // WHAT the reading says (applyTo, the fetchedAt discipline, the sibling
+  // fan-out); it no longer decides how a snapshot reaches disk. The write path
+  // merges this event's ONE bucket into the file's typed `limits` per limitId,
+  // so a single-bucket event can never erase another limit — and, for claude,
+  // never erases the model-scoped cap this file has lost five times.
+  const usageWrite = require('./usage-cache-write.js');
+  const fileFor = (id) => usageWrite.cacheFileFor(cacheDir, id);
   const ids = (identityIds && identityIds.length ? identityIds : [key]);
+  // `measuredAt` is `now` for the sibling writes too. The sibling deliberately
+  // does NOT bump `fetchedAt` (the anti-poison rule above), and a window
+  // measured now must not lose the per-limit merge to an older file just
+  // because that file is not being promoted to "freshest".
+  //
+  // The object — not a separately built typed set — is what we hand the write
+  // path, because `applyTo` above is where this event's resetsAt LADDER lives
+  // (signal > cached > bounded guess): a rejection that states no reset keeps
+  // the cached FUTURE one, and a set built from the raw event alone would
+  // carry `resetsAt: null` and win the merge with it.
   try {
     let base = null, baseAt = -1;
     for (const id of ids) {
       try { const c = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || {}; if ((Number(c.fetchedAt) || 0) > baseAt) { baseAt = Number(c.fetchedAt) || 0; base = c; } } catch { }
     }
     const cache = applyTo(base ? { ...base } : {});
+    // The freshest SIBLING was chosen for its READINGS; its `limits` describe a
+    // different account's window set, so they must not travel with it.
+    delete cache.limits;
     // NOTE (r2): the established window is a fact about WHICH ACCOUNT THIS FILE
     // IS, and this producer used to have to rescue it by hand (the
     // freshest-sibling base above is chosen for its READINGS, so writing it
@@ -155,16 +175,19 @@ function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(
       // the whole point of the refutation it records.
       if (corroborated === undefined) delete cache.corroborated; else cache.corroborated = !!corroborated;
     }
-    fs.mkdirSync(cacheDir, { recursive: true });
-    const f = fileFor(key);
-    fs.writeFileSync(f + '.tmp', JSON.stringify(cache)); fs.renameSync(f + '.tmp', f);
+    const w = usageWrite.writeCacheObject({
+      cacheDir, key, obj: cache, measuredAt: now,
+      source: reading ? (source || 'rate-limit-event') : null, familyOf, backend: 'claude',
+    });
+    if (!w.ok) return { ok: false, dead, wroteReading: false, error: w.why || 'write refused' };
     for (const id of ids) {
       if (id === key) continue;
       try {
         let c2; try { c2 = JSON.parse(fs.readFileSync(fileFor(id), 'utf-8')) || null; } catch { c2 = null; }
         if (!c2) continue; // never create a sibling
         applyTo(c2); // fetchedAt deliberately untouched
-        fs.writeFileSync(fileFor(id) + '.tmp', JSON.stringify(c2)); fs.renameSync(fileFor(id) + '.tmp', fileFor(id));
+        delete c2.limits; // the sibling's own limits are rebuilt from its own (now updated) view
+        usageWrite.writeCacheObject({ cacheDir, key: id, obj: c2, measuredAt: now, familyOf, backend: 'claude' });
       } catch { }
     }
     return { ok: true, dead, wroteReading: reading };

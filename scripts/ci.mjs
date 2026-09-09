@@ -132,6 +132,8 @@ export const SUITES = [
   { name: 'test-pool-auto', tier: 'fast' },
   { name: 'test-spend-paths', tier: 'fast' }, // THE SPEND CEILING (design-account-hardening §4.4c/P9 + D2/D3/D6/D8): the grep-derived census of every producer that can start a turn nobody typed, the persisted per-identity budget, overage, the EDF reserve floor and the four fail-closed sites. 0.6s, no ports, no fixed /tmp path
   { name: 'test-rate-limit-capture', tier: 'fast' },
+  { name: 'test-quota-model', tier: 'fast' }, // the TYPED limit set (B-9213 three concurrent codex limits) + the ONE usage-cache write path + the empty-window rule (B-8b12) + the writer census and the reader census — the money store's shape gate
+
   { name: 'test-public-links', tier: 'fast' }, // every "link to something here" surface uses the instance's public address (not the browser origin)
   { name: 'test-remote-shell', tier: 'fast' },
   { name: 'test-mount-oauth-probe', tier: 'fast' }, // dead OAuth token behind a healthy-looking mount: probe eligibility + slow clock + phrasings + Re-authorize button
