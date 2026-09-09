@@ -144,6 +144,19 @@ function create({ rootDir, serverNotice }) {
       },
     },
     {
+      id: '2026-09-backfill-quota-limits',
+      note: "a usage-cache snapshot could hold exactly ONE set of buckets, so codex's concurrent limits collapsed into whichever pushed last (B-9213: measured on this instance, one conversation pushed `codex` at 5-100 %, the GPT-5.3-Codex-Spark model cap at 0 % and `premium` with no windows at all — the file on disk held Spark and the plan limit was gone). Every write now goes through src/usage-cache-write.js and merges PER limitId; this stamps the typed `limits` onto the files written before that, so they are self-describing from the upgrade boot instead of from whenever their account next produces a reading (an idle account can be days away). Moves no number, changes no fetchedAt, touches no sidecar; archives each pre-migration object first.",
+      run() {
+        const { backfillLimits } = require('../quota-model-migrate.js');
+        const r = backfillLimits({ cacheDir: path.join(dataDir, 'usage-cache'), archiveDir, id: '2026-09-backfill-quota-limits' });
+        console.log('[migrate] quota-limits backfill:', JSON.stringify(r));
+        // Deliberately NO serverNotice: nothing changed for the user — no
+        // number moved and no reading was archived away. A notice about a
+        // shape change is noise, and the notices this instance already sends
+        // about quota repairs are about DATA that moved.
+      },
+    },
+    {
       id: '2026-08-archive-dormant-task-plans',
       note: 'dormant checklist plan arrays (feature removed 2.121.0) → data/archive/',
       run() {

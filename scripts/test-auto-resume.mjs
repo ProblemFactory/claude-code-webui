@@ -324,7 +324,7 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
   const eng = read('src/server/usage-pool-engine.js');
   ok('WIRING: rejected events are SIGNALS, not arms (the turn result classifies)', /if \(r\.dead\) \{[\s\S]{0,600}noteWallSignal\(session, \{ resetsAtMs/.test(eng) && !/armBestReset/.test(eng));
   // the banner names its BUCKET (parseLimitBanner, the same name the cache mark used) and the KEY its mark landed on (B-2c9b) — never a TIME
-  ok('WIRING: the banner is a BOOLEAN signal (no time extraction feeds the machine)', /noteWallSignal\(session, \{ bucket: hit\.kind, scopedName: hit\.kind === 'scoped' \? hit\.name : null, key, slot: !!slot\.slotOk \}\)/.test(eng) && !/noteWallSignal\(session, \{[^}]*resetsAtMs[^}]*hit\./.test(eng) && !/parseBannerResetMs/.test(eng));
+  ok('WIRING: the banner is a BOOLEAN signal (no time extraction feeds the machine)', /noteWallSignal\(session, \{ bucket: hit\.kind, scopedName: hit\.kind === 'scoped' \? hit\.name : null, key: pinKey, slot: !!slot\.slotOk \}\)/.test(eng) && !/noteWallSignal\(session, \{[^}]*resetsAtMs[^}]*hit\./.test(eng) && !/parseBannerResetMs/.test(eng));
   ok('WIRING: both codex exhaustion sites signal + classify through the same machine', /noteWallSignal\(session, \{ resetsAtMs: \(Number\(tripped\?\.resetsAt\)/.test(eng) && /noteWallSignal\(session, \{ resetsAtMs: resets > nowSec \? resets \* 1000 : 0, bucket: 'sevenDay', key: w2\?\.key \|\| codexQuotaKeyFor\(session\), lane: arSignal\.laneOf\(w2\?\.snap \|\| snap\) \}\); noteTurnEnd\(session\);/.test(eng));
   ok('WIRING: turn classification = signals with no real work after the last one', /sigs\.length && workAfter <= 1/.test(eng) && /noteRecovered\?\.\(session\._webuiId, 'turn completed normally'\)/.test(eng));
   ok('WIRING: a walled turn arms from the SESSION-AWARE quotaVerdictFor (usable ⇒ near fire; blocked ⇒ blockedUntil; unknown ⇒ probe)', /quotaVerdictFor\(scope, \{ model, session \}\)/.test(eng) && !/quotaVerdictFor\(scope, \{ model \}\)/.test(eng) && /scheduleWallProbe\(session, scope, model, 0\)/.test(eng));
@@ -513,13 +513,33 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
     const eng2 = read('src/server/usage-pool-engine.js');
     ok('PIN: onWalledTurn demotes BEFORE the verdict, and the verdict is session-aware', /function onWalledTurn\(session, sigs\) \{[\s\S]{0,900}demoteWalledAccount\(session, sigs\)[\s\S]{0,900}quotaVerdictFor\(scope, \{ model, session \}\)/.test(eng2));
     ok("PIN: the walled turn's pool evaluation runs AFTER the arm (finally) so fireNow finds the session armed", /ar\.armIfEnabled\(id, session, Date\.now\(\) \+ 45000[\s\S]{0,2000}\} finally \{[\s\S]{0,700}maybePoolAutoSwitch\(session\);\s*\n\s*\}\s*\n\}/.test(eng2));
-    ok('PIN: noteTurnEnd evaluates the pool only on the NORMAL branch (the walled branch owns its own, after the arm)', /if \(sigs\.length && workAfter <= 1\) \{[\s\S]{0,600}return;\s*\n\s*\}\s*\n\s*maybePoolAutoSwitch\(session\);/.test(eng2) && !/session\._turnWallSigs = \[\]; session\._turnWorkAfterSig = 0;\s*\n\s*maybePoolAutoSwitch\(session\);/.test(eng2));
-    ok("PIN: the demotion rides captureRateLimitEvent with source 'wall' (ONE write path, no twin)", /captureRateLimitEvent\(\{ cacheDir: USAGE_CACHE_DIR, key: member\.id, identityIds: usageIdentityAccountIds\(member\.id\), ev, now, source: 'wall' \}\)/.test(eng2) && /source = 'rate-limit-event', corroborated = undefined \}\)/.test(read('src/rate-limit-capture.js')));
+    ok('PIN: noteTurnEnd evaluates the pool only on the NORMAL branch (the walled branch owns its own, after the arm)', /if \(sigs\.length && workAfter <= 1\) \{[\s\S]{0,700}return;\s*\n\s*\}\s*\n\s*(?:clearRefile\(\);\s*\n\s*)?maybePoolAutoSwitch\(session\);/.test(eng2) && !/session\._turnWallSigs = \[\]; session\._turnWorkAfterSig = 0;\s*\n\s*maybePoolAutoSwitch\(session\);/.test(eng2));
+    // …and the proven re-file is dropped on BOTH exits, but only AFTER the
+    // demotion — it is that pass's evidence for every signal that carries no
+    // window of its own, and clearing it beside the two turn pins (where it
+    // looks like it belongs) put the banner's mark back on the member the turn
+    // had just proved innocent.
+    ok('PIN: the turn-end proof outlives the demotion and is then dropped on both exits', /try \{ onWalledTurn\(session, sigs\); \}[^\n]*\n\s*clearRefile\(\);\s*\n\s*return;/.test(eng2) && (eng2.match(/\n\s*clearRefile\(\);/g) || []).length === 2 && /const clearRefile = \(\) => \{ session\._turnWallRefile = null; \};\s*\n\s*if \(sigs\.length/.test(eng2));
+    // THE MECHANISM, NOT THE LITERAL. This pin exists to stop the demotion
+    // growing a SECOND writer; it used to spell the call byte-for-byte, which
+    // also froze WHICH member is written — and inc-mttbrtc0-6049 is precisely
+    // that key being wrong (the turn pin, while the link had moved mid-turn).
+    // So it now asserts what it is for: exactly ONE `source:'wall'` write in the
+    // module, and its `key` and `identityIds` naming the SAME subject (a key
+    // that disagrees with its identity group is the anchor-poison class).
+    const wallWrites = eng2.match(/captureRateLimitEvent\(\{[^}]*source: 'wall'[^}]*\}\)/g) || [];
+    const wallWrite = wallWrites[0] || '';
+    const wallSubject = /key: (\w+)\.id, identityIds: usageIdentityAccountIds\((\w+)\.id\)/.exec(wallWrite);
+    ok("PIN: the demotion rides captureRateLimitEvent with source 'wall' (ONE write path, no twin)", wallWrites.length === 1 && /cacheDir: USAGE_CACHE_DIR/.test(wallWrite) && !!wallSubject && wallSubject[1] === wallSubject[2] && /source = 'rate-limit-event', corroborated = undefined/.test(read('src/rate-limit-capture.js'))
+    // …and that capture module still has exactly ONE way to reach disk: it
+    // routes through src/usage-cache-write.js (B-9213) rather than owning a
+    // second read-modify-write beside the one the panel and the pool read.
+    && /usageWrite\.writeCacheObject\(\{/.test(read('src/rate-limit-capture.js')));
     ok('PIN: the guard constants (≥2 walls inside a 120s ring, 10min observation recency, 10min session-wall memory) and the ladder itself', /WALL_RING_MS = 120e3/.test(eng2) && /OBSERVED_ORG_RECENT_MS = 10 \* 60e3/.test(eng2) && /SESSION_WALL_MS = 10 \* 60e3/.test(eng2) && /if \(!slotMatch && walls < 2 && !observedMatch\)/.test(eng2));
     ok('PIN: the per-session pool pass decides from sessionBillingMember (the credential slot), not from the observation', /const cm = sessionBillingMember\(s2, poolId\);\s*\n\s*const curFor = cm\.id \|\| linkCur;/.test(eng2) && /decidePoolSwitch\(\{ currentId: curFor, members, readCache: projected/.test(eng2));
     ok('PIN: resolveUsageKey resolves the CREDENTIAL SLOT for pooled sessions (live odometer, probe matching, derived cache keys) — the observation routes nothing', /function resolveUsageKey\(session\)[\s\S]{0,1200}sessionBillingMember\(session, acct\)\.id/.test(eng2) && !/sessionReadingMember/.test(eng2.split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n')));
     ok('PIN: both probe targets (wall ladder + pre-fire gate) are the member whose credentials the CLI reads', (eng2.match(/sessionBillingMember\(session, scope\)\.id : scope/g) || []).length === 2);
-    ok('PIN: every wall signal carries the key its mark landed on (claude rejected + banner + all three codex sites)', /noteWallSignal\(session, \{ resetsAtMs: \(Number\(ev\.resetsAt\) \|\| 0\) \* 1000, bucket: ev\.kind, scopedName: ev\.scopedName, key, slot: !!slot\?\.slotOk \}\)/.test(eng2) && /noteWallSignal\(session, \{ bucket: hit\.kind, scopedName: hit\.kind === 'scoped' \? hit\.name : null, key, slot: !!slot\.slotOk \}\)/.test(eng2) && (eng2.match(/noteWallSignal\(session, \{ resetsAtMs:[^\n]*key: (w\.key|w2\?\.key \|\| codexQuotaKeyFor\(session\)|codexQuotaKeyFor\(session\))(?:, lane: [^}]+)? \}\)/g) || []).length === 3);
+    ok('PIN: every wall signal carries the key its mark landed on (claude rejected + banner + all three codex sites)', /noteWallSignal\(session, \{ resetsAtMs: \(Number\(ev\.resetsAt\) \|\| 0\) \* 1000, bucket: ev\.kind, scopedName: ev\.scopedName, key, slot: !!slot\?\.slotOk \}\)/.test(eng2) && /noteWallSignal\(session, \{ bucket: hit\.kind, scopedName: hit\.kind === 'scoped' \? hit\.name : null, key: pinKey, slot: !!slot\.slotOk \}\)/.test(eng2) && (eng2.match(/noteWallSignal\(session, \{ resetsAtMs:[^\n]*key: (w\.key|w2\?\.key \|\| codexQuotaKeyFor\(session\)|codexQuotaKeyFor\(session\))(?:, lane: [^}]+)? \}\)/g) || []).length === 3);
     // …AND ITS LANE (2026-09-08): the armed wait carries which of the harness's
     // limit windows it is waiting on, so a reading about a SIBLING lane can
     // never be read as "the wall is gone". Every CODEX wall site states it

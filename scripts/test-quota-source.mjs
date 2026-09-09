@@ -111,7 +111,10 @@ What's contributing to your limits usage?`;
     nimbus_quill: { utilization: 0, resets_at: null }, extra_usage: { is_enabled: false } } };
   const g = cl.normalize(live);
   const gRef = ClaudeCodeAdapter.parseGetUsageResponse(live);
-  ok('get_usage payload → the adapter parse (0-100 ints normalized, named scoped field, codename skipped)', g && near(g.fiveHour.utilization, 0.34) && near(g.sevenDay.utilization, 0.39) && g.scopedWeekly.some((w) => /Sonnet/i.test(w.name) && near(w.utilization, 0.12)) && !g.scopedWeekly.some((w) => /nimbus/i.test(w.name)) && g.source === gRef.source, g);
+  // r6: the codename bucket is KEPT (a stated spend is a claim even with no
+  // reset — see test-get-usage-parse for the essay); the null buckets are still
+  // absent, because `null` is the vendor saying there is no such limit.
+  ok('get_usage payload → the adapter parse (0-100 ints normalized, named scoped field, reset-less codename kept, null buckets absent)', g && near(g.fiveHour.utilization, 0.34) && near(g.sevenDay.utilization, 0.39) && g.scopedWeekly.some((w) => /Sonnet/i.test(w.name) && near(w.utilization, 0.12)) && g.scopedWeekly.some((w) => /nimbus/i.test(w.name) && w.utilization === 0) && !g.scopedWeekly.some((w) => /opus|oauth/i.test(w.name)) && g.source === gRef.source, g);
   // (c) GET /api/oauth/usage REST JSON (limits[] + a named seven_day_* field + extra_usage)
   const rest = { five_hour: { utilization: 42, resets_at: '2026-08-08T05:00:00.000Z' }, seven_day: { utilization: 71, resets_at: '2026-08-12T00:00:00.000Z' },
     seven_day_opus: { utilization: 100, resets_at: '2026-08-12T00:00:00.000Z' },
@@ -354,7 +357,7 @@ const cxSess = mkCodex('w-cx', 'cxs-1', (m, s) => {
   ok('server.js still hands the cli-usage refresher to the engine (usage.refreshViaCliPanel — the ONE `claude -p /usage` spawn site)', /getQuotaProbe: \(\) => \{ try \{ return usage\.refreshViaCliPanel; \}/.test(read('server.js')));
   ok('session-schema registers the waiter field with an owner', /_codexLimitsWaiters:\s*\{ owner: 'engine'/.test(read('src/session-schema.js')));
   const ur = read('src/usage-routes.js');
-  ok('usage-routes defines NO quota normalizer of its own any more — it binds the registry and re-exports the old names', !/function normalizeCodexRateLimit\(/.test(ur) && !/function parseCliUsageText\(/.test(ur) && /harnesses\.get\('codex'\)\.quota\.normalize/.test(ur) && /module\.exports = \{ setupUsage, parseCliUsageText, normalizeCodexRateLimit \}/.test(ur));
+  ok('usage-routes defines NO quota normalizer of its own any more — it binds the registry and re-exports the old names', !/function normalizeCodexRateLimit\(/.test(ur) && !/function parseCliUsageText\(/.test(ur) && /harnesses\.get\('codex'\)\.quota;?\s*\n?[\s\S]{0,120}?codexQuota\.normalize|harnesses\.get\('codex'\)\.quota\.normalize/.test(ur) && /module\.exports = \{ setupUsage, parseCliUsageText, normalizeCodexRateLimit \}/.test(ur));
   const arch = read('scripts/test-architecture.mjs');
   // both sides' pins kept: backend-caps is in the PURE SET (membership) AND inside the `const PURE = new Set([` literal (placement)
   ok('test-architecture tiers the harness modules as SHARED (never reaching up into ORCH) and backend-caps as PURE', /'src\/harnesses\/claude-quota\.js', 'src\/harnesses\/codex-quota\.js'/.test(arch) && /'src\/backend-caps\.js'[,\]]/.test(arch) && /const PURE = new Set\(\[[^\]]*'src\/backend-caps\.js'/.test(arch));

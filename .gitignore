@@ -58,6 +58,20 @@ src/lib/build-version.js
 src/server/vs-wake-mut-*.js
 src/server/vs-wake-master-ar-*.js
 src/vs-wake-mut-*.js
+# §18 of scripts/test-readings-attribution.mjs writes a PATCHED COPY of
+# src/server/usage-pool-engine.js beside the real one (same reason: relative
+# requires). Unlinked on exit, swept by PID at start; a SIGKILL must never be
+# able to dirty the tree and block the release gate.
+src/server/vs-readattr-mut-*.js
+# scripts/test-quota-model.mjs writes PATCHED COPIES of the modules under test
+# BESIDE the real ones (they must be siblings, or their relative requires do not
+# resolve): §⑯ `vs-qmr3-`, §⑰ `vs-qmr4-`, §⑱ `vs-qmr6-` in src/, src/harnesses/
+# and src/adapters/. Unlinked on exit, swept by PID at start; a SIGKILL must
+# never be able to dirty the tree and block the gate — and §⑰'s prefix was
+# missing here for a whole release, so the pattern is now the FAMILY (no slash ⇒
+# any directory) rather than one line per section, and §⑱0 asks git itself
+# whether every path this suite can write is ignored.
+vs-qm*-mut-*.js
 # scripts/test-auto-resume.mjs §12a writes PATCHED COPIES of
 # src/server/auto-resume.js beside the real one (they must be SIBLINGS or their
 # relative requires do not resolve). Unlinked on exit and swept at start, but a

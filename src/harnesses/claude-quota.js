@@ -15,6 +15,10 @@
 //   • GET /api/oauth/usage JSON           → parseOAuthUsage     (usage-routes _parseUsage, moved verbatim)
 //   • get_usage control payload           → ClaudeCodeAdapter.parseGetUsageResponse (adapter, unchanged)
 const { capsOf } = require('../backend-caps.js');
+// PURE, and required HERE rather than beside the typed producers below because
+// the two parsers at the top of this file mark their own enumeration with it
+// (r6, `markScopedEnumeration`).
+const quotaModel = require('../quota-model.js');
 const { ClaudeCodeAdapter } = require('../adapters/claude-code.js');
 const { parseRateLimitEvent } = require('../rate-limit-capture.js');
 const { classifyAuthFailure } = require('../account-pool-auto.js');
@@ -72,7 +76,17 @@ function parseCliUsageText(text, nowMs) {
     scopedWeekly.push({ name: m[1], utilization: Math.min(1, Math.max(0, (+m[2]) / 100)),
       ...(m[3] && m[4] ? { resetsAt: _parseCliResetTime(m[3], m[4], nowMs) || undefined } : {}) });
   }
-  return { fiveHour: fiveHour || undefined, sevenDay: sevenDay || undefined, scopedWeekly, fetchedAt: nowMs || Date.now() };
+  // DID THIS PARSE SEE EVERY MODEL CAP THE PANEL PRINTED? (r6.) Count the
+  // `Current week (…)` lines with a LOOSER regex than the one that reads them:
+  // a line whose `N% used` half the bucket regex could not match is a cap this
+  // read lost, and losing one silently is what makes an "authoritative" list a
+  // lie. Format drift therefore costs the right to retire (and nothing else) —
+  // the parse itself still degrades exactly as it always has.
+  let printed = 0;
+  for (const m of s.matchAll(/^Current week \(([^)]+)\):/gm)) if (!/^all models$/i.test(m[1])) printed++;
+  return quotaModel.markScopedEnumeration(
+    { fiveHour: fiveHour || undefined, sevenDay: sevenDay || undefined, scopedWeekly, fetchedAt: nowMs || Date.now() },
+    printed === scopedWeekly.length);
 }
 
 // GET /api/oauth/usage reply → usage-cache shape (usage-routes `_parseUsage`,
@@ -89,17 +103,21 @@ function parseOAuthUsage(u) {
   const sevenDay = toWin(u.seven_day);
   const scopedWeekly = [];
   const haveScoped = new Set();
+  // Model caps this parse SAW but could not turn into a bucket (r6). Only a
+  // parse that dropped none of them may claim to have enumerated the scope —
+  // see quota-model's `markScopedEnumeration`.
+  let dropped = 0;
   if (Array.isArray(u.limits)) {
     for (const lim of u.limits) {
-      if (lim?.kind === 'weekly_scoped' && lim.scope?.model?.display_name) {
-        scopedWeekly.push({
-          name: lim.scope.model.display_name,
-          utilization: (typeof lim.percent === 'number' ? lim.percent : 0) / 100,
-          resetsAt: lim.resets_at ? Math.floor(Date.parse(lim.resets_at) / 1000) || 0 : 0,
-          severity: lim.severity || 'normal',
-        });
-        haveScoped.add(String(lim.scope.model.display_name).toLowerCase());
-      }
+      if (lim?.kind !== 'weekly_scoped') continue;
+      if (!lim.scope?.model?.display_name) { dropped++; continue; } // a model cap we cannot NAME is a cap we lost
+      scopedWeekly.push({
+        name: lim.scope.model.display_name,
+        utilization: (typeof lim.percent === 'number' ? lim.percent : 0) / 100,
+        resetsAt: lim.resets_at ? Math.floor(Date.parse(lim.resets_at) / 1000) || 0 : 0,
+        severity: lim.severity || 'normal',
+      });
+      haveScoped.add(String(lim.scope.model.display_name).toLowerCase());
     }
   }
   // NAMED scoped buckets too (2.305.0, inc-msof8i22): the REST payload can
@@ -107,14 +125,27 @@ function parseOAuthUsage(u) {
   // instead of (or in addition to) a `limits[]` entry. Reading only limits[]
   // made the OPUS cap invisible to the pool's exhaustion test — it stayed on
   // an account whose Opus was spent while a member still had headroom. Any
-  // object field with a utilization/percent AND a reset counts; array entries
-  // win on name collision.
+  // object field with a utilization/percent counts; array entries win on name
+  // collision. A `null` field is the vendor stating there is no such limit and
+  // is not a drop.
+  //
+  // A BUCKET WITHOUT A RESET IS STILL A BUCKET (r6). This loop used to require
+  // `v.resets_at`, which is the SAME shape the `limits[]` branch above accepts
+  // without one — one parser, two answers for one payload shape. And it is the
+  // routine shape, not an edge: on this instance's own anchor streams 704 of
+  // 5631 scoped readings and 615 of 7978 seven-day readings carry no reset at
+  // all (692 of the scoped ones from the ⟳ panel, 3 from this very control
+  // channel's array branch). r3/r4 already settled what such a bucket means —
+  // a STATED SPEND is decisive and counts, it merely may not name a DEADLINE
+  // (`windowState` / `bucketCounts`) — so dropping it turns a fact the vendor
+  // stated into ignorance, and the fact it drops is precisely "this model cap
+  // is spent".
   for (const [k, v] of Object.entries(u)) {
     if (!/^seven_day_./.test(k) || k === 'seven_day_oauth_apps') continue;
-    if (!v || typeof v !== 'object') continue;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) continue;
     const pctRaw = typeof v.utilization === 'number' ? v.utilization
       : (typeof v.percent === 'number' ? v.percent : null);
-    if (pctRaw == null || !v.resets_at) continue;
+    if (pctRaw == null) { dropped++; continue; } // shaped like a weekly bucket, states no number we can read
     const name = k.replace(/^seven_day_/, '').replace(/_/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
     if (haveScoped.has(name.toLowerCase())) continue;
     haveScoped.add(name.toLowerCase());
@@ -143,11 +174,11 @@ function parseOAuthUsage(u) {
       };
     }
   }
-  return {
+  return quotaModel.markScopedEnumeration({
     fiveHour, sevenDay, scopedWeekly, ...(spend ? { spend } : {}),
     overallStatus: (fiveHour.status === 'limited' || sevenDay.status === 'limited') ? 'limited' : 'allowed',
     fetchedAt: Date.now(),
-  };
+  }, dropped === 0);
 }
 
 // ONE entry over the three claude reading shapes (the harness contract).
@@ -209,11 +240,101 @@ function projectReset(prevResetsAt, periodSec, nowSec) {
 }
 const WEEK_SEC = 7 * 86400;
 
+// ── THE TYPED LIMIT SET (src/quota-model.js) ────────────────────────────────
+// Every claude reading shape becomes ONE typed set, so the write path and every
+// reader see the same object no matter which of the four channels produced it.
+// The claude account holds:
+//   • ONE plan limit (`plan`) with a '5h' and a '7d' window,
+//   • ONE model-scoped limit PER `scopedWeekly` entry — measured on this
+//     instance, exactly one exists (Fable; owner: "除了 fable，没有模型 specific
+//     的用量限制的"), but the shape is a LIST because the vendor's payload is,
+//   • an `overage` limit when the account carries extra usage (`spend`, from
+//     `extra_usage`) or an overage state (`rate_limit_event`'s overage fields).
+// `familyOf` is injected by the caller (src/model-family.js) — this file is in
+// the SHARED tier and quota-model is PURE, so neither may reach for it.
+// (`quotaModel` is required at the top of this file — see the note there.)
+
+const CLAUDE_EXTRA_KEYS = ['orgUuid', 'orgName', 'orgEmail', 'email', 'name', 'planType', 'overallStatus', 'scopedFetchedAt', 'spend', 'corroborated'];
+
+/** One claude reading (any of the four shapes) → a typed LimitSet.
+ *  `raw` is either a raw payload `normalize()` understands, or an already
+ *  normalized snapshot (the historical cache shape). Returns null when the
+ *  payload is not a claude quota reading at all — never a fabricated set. */
+function toLimitSet(raw, { identity = null, source = null, nowMs = null, familyOf = null } = {}) {
+  const at = Number(nowMs) || Date.now();
+  const snap = (raw && typeof raw === 'object' && (raw.fiveHour || raw.sevenDay || Array.isArray(raw.scopedWeekly)))
+    ? raw : normalize(raw, at);
+  if (!snap) return null;
+  const set = quotaModel.fromLegacy(snap, {
+    identity, source: source || snap.source || null, fetchedAt: snap.fetchedAt || at,
+    limitId: 'plan', familyOf, extraKeys: CLAUDE_EXTRA_KEYS,
+  });
+  // EXTRA USAGE IS ITS OWN LIMIT, not a footnote on the plan. `spend` is REAL
+  // DOLLARS past the subscription allowance: with overage on, utilization stays
+  // under 1 while every token is billed, so an account ranked on utilization
+  // alone looks like the member with the MOST headroom (design §1.4). Modelling
+  // it as a limit is what lets a reader ask about it at all.
+  const sp = snap.spend;
+  if (sp && typeof sp === 'object' && (Number.isFinite(Number(sp.used)) || Number.isFinite(Number(sp.pct)))) {
+    const pct = Number(sp.pct);
+    const win = quotaModel.makeWindow({
+      kind: 'monthly', minutes: 0,
+      usedPct: Number.isFinite(pct) ? Math.max(0, Math.min(100, pct <= 1 ? pct * 100 : pct)) : null,
+      resetsAt: sp.resetsAt, measuredAt: at,
+    });
+    const i = set.limits.findIndex((l) => l.limitId === 'overage');
+    const flags = { ...(i >= 0 ? set.limits[i].flags : {}), used: Number(sp.used), limit: sp.limit == null ? null : Number(sp.limit), currency: sp.currency || 'USD' };
+    const lim = quotaModel.makeLimit({ limitId: 'overage', scope: 'overage', name: 'Extra usage', windows: [win], flags, source: set.source, fetchedAt: at });
+    if (i >= 0) set.limits[i] = quotaModel.mergeLimit(set.limits[i], lim); else set.limits.push(lim);
+  }
+  return set;
+}
+
+/** ONE parsed `rate_limit_event` → a typed set carrying exactly ONE limit with
+ *  exactly ONE window. That is the honest shape: the record names one bucket,
+ *  and `mergeLimitSets` is what puts it back beside the others without
+ *  disturbing them (the per-bucket `applyTo` this replaces had to hand-preserve
+ *  every field it was not writing — five fields have been lost that way). */
+function limitSetFromEvent(ev, { identity = null, source = 'rate-limit-event', nowMs = null, familyOf = null } = {}) {
+  if (!ev || (ev.kind !== 'fiveHour' && ev.kind !== 'sevenDay' && ev.kind !== 'scoped')) return null;
+  const at = Number(nowMs) || Date.now();
+  const dead = ev.status === 'rejected';
+  // A REJECTION IS A READING OF 100 %, and its window is whatever the record
+  // stated — never a guess here. (The bounded `now + 5h/24h` guess the cache
+  // writer makes when a rejection states no reset stays in the write path,
+  // where the previous value is in hand to prefer first.)
+  const usedPct = dead ? 100 : (ev.utilization != null ? Math.max(0, Math.min(1, ev.utilization)) * 100 : null);
+  const status = dead ? 'limited' : (ev.status || null);
+  const kind = ev.kind === 'fiveHour' ? '5h' : '7d';
+  const win = quotaModel.makeWindow({ kind, usedPct, resetsAt: ev.resetsAt, measuredAt: at, status });
+  const limits = [];
+  if (ev.kind === 'scoped') {
+    const name = String(ev.scopedName || '');
+    limits.push(quotaModel.makeLimit({
+      limitId: 'model:' + name.toLowerCase().replace(/\s+/g, '-'), name, scope: 'model',
+      model: name, family: familyOf ? familyOf(name) : null,
+      windows: [win], flags: { asOf: at }, source, fetchedAt: at,
+    }));
+  } else {
+    limits.push(quotaModel.makeLimit({ limitId: 'plan', scope: 'plan', windows: [win], source, fetchedAt: at }));
+  }
+  if (ev.overage && Object.values(ev.overage).some((v) => v !== undefined)) {
+    limits.push(quotaModel.makeLimit({ limitId: 'overage', scope: 'overage', name: 'Extra usage', windows: [], flags: { ...ev.overage, asOf: at }, source, fetchedAt: at }));
+  }
+  return quotaModel.makeLimitSet({ identity, fetchedAt: at, source, limits });
+}
+
 module.exports = { projectReset, WEEK_SEC,
   normalize,
   signalFromStream,
   probe: capsOf('claude').quotaProbe, // 'cli-usage': the `claude -p /usage` auto-cli rung (usage-routes refreshViaCliPanel)
   classifyAuthFailure,               // account-pool-auto's Anthropic-wording classifier, verbatim
+  // THE TYPED PRODUCERS (src/quota-model.js) — the write path takes these.
+  // `limitSetFromSnapshot` is the HARNESS-NEUTRAL name the engine dispatches on
+  // (`quotaSourceFor(backend).limitSetFromSnapshot`), never a backend-id branch:
+  // for claude a normalized snapshot IS one of the shapes toLimitSet accepts.
+  toLimitSet, limitSetFromEvent, CLAUDE_EXTRA_KEYS,
+  limitSetFromSnapshot: (snap, opts) => toLimitSet(snap, opts),
   // named helpers for current callers / tests
   parseCliUsageText, parseOAuthUsage, LIMIT_BANNER_RE,
 };

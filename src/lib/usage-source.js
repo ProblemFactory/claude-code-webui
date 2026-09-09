@@ -124,3 +124,48 @@ export function spendControlChip(state, { t = (s) => s } = {}) {
     tip: t('This account has reached its spend control, so its requests are rejected — automatic turns on it are refused.'),
   };
 }
+
+// ── LIMITS, NOT BUCKETS (B-9213 / B-8b12) ───────────────────────────────────
+// An account can hold SEVERAL limits at once — measured on this instance, one
+// codex conversation pushed three (`codex`, `GPT-5.3-Codex-Spark`, `premium`),
+// and the panel used to show whichever spoke last. It can also hold a window
+// that has NOT STARTED, whose "reset time" is `now + duration` on every read;
+// printing that as a precise instant is how a banked reset looked consumed.
+//
+// The rules live in `src/quota-model.js` (PURE, bundled). These two helpers are
+// the CLIENT's share of them: the panels ask what a bucket may SAY, they do not
+// re-derive what it IS.
+
+/** Has this window not started yet? Reads the stamp the ONE write path puts on
+ *  every projected bucket — never a re-derivation from the numbers, because the
+ *  client has no idea WHEN the vendor answered. */
+export function windowNotStarted(b) { return !!(b && typeof b === 'object' && b.state === 'empty'); }
+
+/** What a not-yet-started window prints where a reset time would go. A window
+ *  the vendor has not opened has no deadline to show, and saying "resets in
+ *  4h 59m" about it is a number that will still say "4h 59m" tomorrow. */
+export function windowNote(b, { t = (s) => s } = {}) {
+  return windowNotStarted(b) ? t('starts on first use') : null;
+}
+
+/** The panel row for every limit an account holds, served-model first.
+ *  `set` is a typed LimitSet (src/quota-model.js — `limitsOfCache` lifts a
+ *  stored snapshot into one). Each row carries its OWN producer and age,
+ *  because three limits on one account are three separate readings and
+ *  "Updated 3min ago" on the panel header describes only the newest. */
+export function limitRows(model, set, { modelName = null, family = null, t = (s) => s } = {}) {
+  if (!model || !set) return [];
+  return model.orderLimits(set, { model: modelName, family }).map((l) => ({
+    limitId: l.limitId,
+    label: model.limitLabel(l),
+    scope: l.scope,
+    state: model.limitState(l),
+    source: l.source || null,
+    sourceLabel: l.source ? readingSource(l.source, { t }).label : null,
+    fetchedAt: l.fetchedAt || null,
+    windows: model.windowsOf(l).map((w) => ({
+      kind: w.kind, usedPct: w.usedPct, resetsAt: w.resetsAt, state: w.state,
+      note: w.state === 'empty' ? t('starts on first use') : null,
+    })),
+  }));
+}

@@ -3248,4 +3248,7 @@ export default {
   "This account has reached its spend control, so its requests are rejected — automatic turns on it are refused.": "このアカウントは支出上限に達しており、リクエストが拒否されます——自動ターンは実行されません。",
   "paid overage in use": "有料の超過利用中",
   "Automatic turns are refused on this account while it bills paid overage (Settings → Spending).": "このアカウントが従量課金中の間、自動ターンは拒否されます(設定 → 支出)。",
+  "starts on first use": "初回利用時に開始",
+  "no window reported": "ウィンドウの報告なし",
+  "No reading for the plan limit yet — the limits below are what this account has reported.": "プラン上限の読み取りはまだありません —— 以下はこのアカウントが報告した上限です。",
 };
