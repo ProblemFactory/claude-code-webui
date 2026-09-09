@@ -457,6 +457,33 @@ impossible rather than a review promise.
   is on the other machine), a build that names no list is taken to serve the
   three verbs that existed before the table, and a verb it does not serve is
   refused BY NAME while its other controls keep working.
+- **AFTER A RESTART THE ROWS COME FROM THE WRAPPER, AND THE PAYLOAD SAYS SO (2026-09-09).**
+  A queue publication is a `queue_changed` record on the wrapper's stdout, that
+  stdout is an 800KB head-dropped RING, and that ring is what a restarted server
+  rebuilds the session normalizer from — so after a restart `queueState()` is
+  `[]` whether the wrapper's queue is empty or holds 25 items, and the two are
+  the same bytes on the wire. `attached`/`created` therefore carry
+  **`queueKnown`**: `false` = a placeholder, `true` = a fact (a payload from
+  before the field reads as `true`). The client applies the rows either way — an
+  unknown queue IS the empty list — so the strip shows NOTHING for one round
+  trip rather than a row nobody can act on; what the flag gates is the
+  INFERENCE, so only a KNOWN list retires the `Queued` chip of a bubble it does
+  not list. The round trip is the new **`queue-resync`** stdin verb: the attach
+  asks the running wrapper to publish its queue again — INCLUDING an empty one,
+  FORCED past its own fingerprint dedup — and the ordinary `queue_changed` that
+  comes back corrects every attached client at once. It is asked only while
+  `queueKnown` is false (self-limiting) and only when the RUNNING wrapper
+  adverts `caps.queueResync` (the per-process gate: an older ACP wrapper answers
+  an unknown verb with a VISIBLE error card, so it must never be asked; an older
+  codex wrapper drops it silently). Both directions are fixed by it: a message
+  steered away before the restart no longer haunts the strip, and a message that
+  really is still queued comes BACK instead of being invisible for the rest of
+  the session. And a `queue_op_result` refusal of `'gone'` — the wrapper listed
+  its queue and the item was not there — now REMOVES the row instead of painting
+  it red: the wrapper is authoritative about absence, and its own follow-up
+  refresh (fingerprint-deduped) can never retract a marker. Every other refusal
+  keeps the row and wears the reason, because that message really is still
+  queued.
 - **The chip is re-applied when the capability flips.** `_queueSupported` starts
   false and both of its sources arrive AFTER the bubbles are on screen (the
   attach payload is applied at the END of `loadHistory`; a live wrapper's

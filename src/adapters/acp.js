@@ -105,6 +105,14 @@ class AcpAdapter extends BackendAdapter {
     return JSON.stringify({ type: 'queue-op', op: 'remove', id });
   }
 
+  // RE-STATE THE QUEUE (2026-09-09). The wrapper's promptQueue IS the queue,
+  // so this is a pure re-publication — the same answer codex gives, for the
+  // same reason: a restarted server's `queue: []` is a guess (the publication
+  // it would have learned from scrolled out of the stdout ring).
+  formatQueueResync() {
+    return JSON.stringify({ type: 'queue-resync' });
+  }
+
   // READ-ONLY permission-rule read (owner ruling 10). ACP v1 has no
   // config-read method, and the wrapper says exactly that back
   // ('unsupported-by-protocol') plus the one permission fact the protocol DOES

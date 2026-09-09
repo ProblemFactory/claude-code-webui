@@ -1116,6 +1116,16 @@ class CodexAdapter extends BackendAdapter {
     return JSON.stringify({ type: 'queue-op', op, id });
   }
 
+  // RE-STATE THE QUEUE (2026-09-09). Not a queue OP — it changes nothing and
+  // carries no item: it asks the wrapper to publish `meta.queue` again with
+  // `force`, because `publishQueue` dedups on its own fingerprint and a server
+  // that lost the last publication to the stdout ring cannot be told "still
+  // empty" any other way. No id, no text, so no size gate is possible or
+  // needed.
+  formatQueueResync() {
+    return JSON.stringify({ type: 'queue-resync' });
+  }
+
   /** Build a preview user message for buffer before JSONL arrives.
    *  ITS CONTENT MUST BE SPELLED EXACTLY AS THE WRAPPER SPELLS ITS OWN COPY
    *  (round 3, 2026-09-07): both carry the same `webui_msg_id`, so the merge

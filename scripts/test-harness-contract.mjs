@@ -99,6 +99,49 @@ ok(Object.keys(BACKEND_META).every((id) => HARNESSES[id]), 'every client META ro
   }
   ok(!BACKEND_META.shell.caps, 'shell carries NO client caps object on purpose — its chrome resolves through the all-false fallback');
 }
+// ── THE QUEUE IS A CLAIM, SO IT MUST BE RE-STATABLE (2026-09-09) ───────────
+// A queue publication is a stdout record and every wrapper that owns a queue
+// keeps its stdout in a RING (MAX_BUFFER, head-dropped), so a server that
+// restarts rebuilds a normalizer that has never seen one: its `queue: []` is a
+// GUESS, byte-identical whether the wrapper's queue is empty or holds 25 items.
+// Every harness that declares a queue therefore owes THREE things — the ask
+// (adapter), the answer (wrapper verb) and the per-PROCESS advert the server
+// gates the ask on. This is the conformance row, so a FOURTH harness that
+// declares queueVerbs and forgets one fails HERE, not in a fleet report.
+for (const id of chatHarnessIds()) {
+  const verbs = capsOf(id).inputModes?.queueVerbs || [];
+  const ad = registry.get(id);
+  const w = fs.readFileSync(path.join(REPO, HARNESSES[id].wrapper), 'utf8');
+  if (!verbs.length) {
+    // claude: the CLI owns its own queue and publishes nothing, so there is
+    // nothing to re-state — and the adapter must REFUSE rather than format a
+    // frame its wrapper would drop (the accept-and-ignore failure of 2.361.4).
+    let threw = '';
+    try { ad.formatQueueResync(); } catch (e) { threw = e.message; }
+    ok(!!threw, `${id}: declares NO queue verbs ⇒ formatQueueResync REFUSES with a reason (${threw})`);
+    continue;
+  }
+  let frame = null, err = '';
+  try { frame = JSON.parse(ad.formatQueueResync()); } catch (e) { err = e.message; }
+  ok(frame && frame.type === 'queue-resync' && Object.keys(frame).length === 1,
+    `${id}: adapter formats the resync ASK as a bare {type:'queue-resync'} frame (no id, no text ⇒ no size gate to get wrong)`, err || JSON.stringify(frame));
+  ok(/msg\.type === 'queue-resync'|case 'queue-resync'/.test(w),
+    `${id}: its wrapper SERVES the verb (${path.basename(HARNESSES[id].wrapper)})`);
+  ok(/queueResync:\s*true/.test(w),
+    `${id}: …and ADVERTS it in the sidecar it writes — the per-PROCESS gate, because a wrapper spawned before the verb either drops the frame silently (codex) or answers it with a VISIBLE error card (ACP)`);
+}
+// …and the server READS that advert (wrapperCaps is the ONE reader of a
+// wrapper's own file; a caps flag nothing surfaces is a fix that never landed).
+{
+  const { wrapperCaps } = require(path.join(REPO, 'src/server/wrapper-files.js'));
+  const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-hc-qr-'));
+  fs.writeFileSync(path.join(d, 'sess-new.json'), JSON.stringify({ caps: { inputQueue: true, queueResync: true } }));
+  fs.writeFileSync(path.join(d, 'sess-old.json'), JSON.stringify({ caps: { inputQueue: true } }));
+  ok(wrapperCaps(d, 'sess-new', '/x').queueResync === true, 'wrapperCaps surfaces queueResync from a REAL sidecar file');
+  ok(wrapperCaps(d, 'sess-old', '/x').queueResync === false, '…and a wrapper predating the verb reads FALSE (never inherited from inputQueue)');
+  ok(wrapperCaps(d, 'sess-missing', '/x').queueResync === false, '…and an unreadable sidecar (a REMOTE wrapper: its file is on ITS machine) is FALSE — unknown is never "yes"');
+  fs.rmSync(d, { recursive: true, force: true });
+}
 ok(chatHarnessIds().join(',') === 'claude,codex,opencode', `chat-capable harnesses: ${chatHarnessIds().join(',')}`);
 // S5 pins: the stdout registry covers exactly the declared protocols; an unknown one has no consumer (never a stream-json fallback)
 ok(PROTOCOLS.every((p) => chatHarnessIds().some((id) => HARNESSES[id].caps.streamProtocol === p)), `no dead stdout consumer row: every registered protocol is declared by a chat harness (${PROTOCOLS.join(',')})`);

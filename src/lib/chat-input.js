@@ -1373,7 +1373,13 @@ export class ChatInput {
     // The OP state ends either way — it never carries edit mode any more
     // (round-4), so an ok result can simply clear it without erasing the
     // marker of an edit that is still open on this very row.
-    if (ok) this._queueRowState.delete(key);
+    // A REFUSAL MARKS A ROW ONLY IF THE ROW IS STILL THERE (2026-09-09): the
+    // 'gone' verdict removes it first (ChatView._dropQueueRow — the wrapper is
+    // authoritative about absence), and a marker for a row nobody renders is
+    // state that outlives its subject. Painting it is how the incident's ✕
+    // click left a red ghost on screen.
+    const live = this._queue.some((it) => String(it?.id || '') === key);
+    if (ok || !live) this._queueRowState.delete(key);
     else this._queueRowState.set(key, { state: 'refused', title: text || '' });
     // THE EDIT'S OWN ANSWER: ok puts the pre-edit draft back, a refusal hands
     // the rewrite back to the user (never the moment it is thrown away).

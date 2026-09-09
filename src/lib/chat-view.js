@@ -1291,12 +1291,73 @@ class ChatView {
     return this._getSessionIds()?.backend || this.winInfo?.backend || 'claude';
   }
 
-  _setQueue(items) {
+  /** THE ONE WRITER of the strip's rows. `known:false` (2026-09-09) = the list
+   *  is a PLACEHOLDER, not an observation — after a restart the server's
+   *  normalizer was rebuilt from a transcript that carries no queue record at
+   *  all (a publication is a stdout record and the wrapper's stdout is an
+   *  800KB RING), so the `[]` it sends is byte-identical whether the wrapper's
+   *  queue is empty or holds 25 items. The rows are applied either way (the
+   *  wire contract is that an unknown queue always IS the empty list, and
+   *  showing nothing for one round trip beats showing a row nobody can act on
+   *  — the incident's strip carried an item that had left the queue 58 minutes
+   *  and one restart earlier, and clicking ✕ on it only painted it red).
+   *
+   *  WHAT THE FLAG ACTUALLY GATES is the INFERENCE. On a KNOWN list the bubble
+   *  chips are reconciled against it — the normalizer's own server-side rule
+   *  (an item that left the queue with no explicit steer/remove RAN), applied
+   *  to whatever this client has rendered. On an unknown we learned nothing, so
+   *  a 'Queued' chip stays: retiring it would assert the message left a queue
+   *  we cannot see. A chip is a claim about the queue too. */
+  _setQueue(items, { known = true } = {}) {
     this._queue = Array.isArray(items) ? items : [];
+    if (known) this._reconcileQueueChips(this._queue);
     this._chatInput?.setQueue(this._queue, this._queueCaps());
     // A queue update is the ONLY event that can tell us the id of a message
     // the chord just sent (see _steerAfterSend).
     this._drainPendingSteers();
+  }
+
+  /** Drop the 'Queued' chip from every rendered bubble the AUTHORITATIVE queue
+   *  does not list. The server's normalizer does exactly this (2.369.55
+   *  `_processQueueChanged`) and emits an edit per bubble — but a client that
+   *  missed those edits (socket down, or a rebuilt normalizer whose
+   *  `_queuedMsgIds` starts empty) never receives them, so the chip outlives
+   *  the row that justified it. Only ever REMOVES a claim. */
+  _reconcileQueueChips(items) {
+    const live = new Set((items || []).map((it) => String(it?.msgId || '')).filter(Boolean));
+    for (const msg of this._messages || []) {
+      if (msg?.queueState !== 'queued') continue;
+      if (live.has(this._msgIdOf(msg))) continue;
+      this._clearQueueChip(msg);
+    }
+  }
+
+  /** Retire ONE bubble's queue chip (view state + the rendered element). */
+  _clearQueueChip(msg) {
+    if (!msg || msg.queueState !== 'queued') return;
+    msg.queueState = null;
+    // `?.` because this also runs on views the queue reaches before the first
+    // render (and on the partial views the suite drives) — the STATE is what
+    // matters, the element is repainted from it on the next render anyway.
+    const el = this._elements?.get(msg.id);
+    if (el) ChatRenderers.applyQueueChip(el, msg, null);
+  }
+
+  /** A row the WRAPPER says is not in the queue any more ('gone': it listed
+   *  the queue and the item was not there, or `thread/queue/delete` answered
+   *  {deleted:false} = it drained while we asked). The wrapper is
+   *  AUTHORITATIVE ABOUT ABSENCE, so the row leaves — it must not sit there
+   *  painted red, which is what a refusal marker means and is what the
+   *  incident's ✕ click produced. The wrapper's own follow-up `refreshQueue()`
+   *  cannot correct us: `publishQueue` dedups on the wrapper's OWN
+   *  fingerprint, and by its lights nothing changed. */
+  _dropQueueRow(id) {
+    const key = String(id || '');
+    if (!key) return false;
+    const rows = this._queue || [];
+    if (!rows.some((it) => String(it?.id || '') === key)) return false;
+    this._setQueue(rows.filter((it) => String(it?.id || '') !== key));
+    return true;
   }
 
   // ── THE Alt+Enter CHORD, VIEW SIDE ──────────────────────────────────────
@@ -1455,7 +1516,14 @@ class ChatView {
     // ("it already ran") for what is really a dead socket.
     if (!this._queueOpsLive()) return;
     const mine = (this._queue || []).find((it) => it.msgId && this._msgIdOf(msg) === it.msgId);
-    if (!mine) { this._renderers.appendSystem(t('That message is no longer queued — it already ran.')); return; }
+    if (!mine) {
+      // Same verdict as the wrapper's 'gone', reached locally: this bubble has
+      // no row. Then its 'Queued' chip is a claim the queue does not support —
+      // retire it here too, or the next click says the same thing again.
+      this._clearQueueChip(msg);
+      this._renderers.appendSystem(t('That message is no longer queued — it already ran.'));
+      return;
+    }
     this._sendQueueOp('steer', mine.id);
   }
 
@@ -1482,7 +1550,12 @@ class ChatView {
     // carries-the-key guarded (2.368.3 law): a partial meta without queueVerbs
     // keeps the served verb list (undefined = keep, see _setQueueSupported).
     if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined);
-    if ('queue' in meta) this._setQueue(meta.queue);
+    // `queueKnown:false` = the server's list is a GUESS (see _setQueue). It is
+    // a MODIFIER of `queue`, so it is read inside that key's guard — but it
+    // carries its own `in meta` test all the same, because the fact it states
+    // when ABSENT has to be spelled out: a payload from before the field is
+    // read as KNOWN, which is the behaviour this branch always had.
+    if ('queue' in meta) this._setQueue(meta.queue, { known: ('queueKnown' in meta) ? meta.queueKnown !== false : true });
     // Does the RUNNING wrapper serve the live style verb? Same shape as
     // queueSupported and the same reason (2.361.1/2.364.1): the harness caps
     // row is about the PROTOCOL, this is about the process that is running.
@@ -3122,7 +3195,15 @@ class ChatView {
     // The outcome of ONE queue op: the strip row ends its pending state and,
     // on a refusal, wears the reason (the system card the normalizer also
     // emits scrolls away — the control the user pressed must speak too).
-    if (op.subtype === 'queue-result') { this._chatInput?.setQueueOpResult(op.id, op.ok !== false, op.text || ''); return; }
+    if (op.subtype === 'queue-result') {
+      // 'gone' is a FACT ABOUT ABSENCE from the one process that owns the
+      // queue — the row LEAVES (before the result is applied, so the strip
+      // never marks a row it is about to lose). Every other refusal keeps the
+      // row and marks it, because the message really is still queued.
+      if (op.ok === false && op.reason === 'gone') this._dropQueueRow(op.id);
+      this._chatInput?.setQueueOpResult(op.id, op.ok !== false, op.text || '');
+      return;
+    }
     if (op.subtype === 'served-model') {
       this._statusBar.setServedModel(op.data?.model || null);
       return;
@@ -4390,6 +4471,19 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       // time, i.e. it already covers everything the catch-up is about to
       // render.
       if (msg.chatStatus) this.applyStatus(msg.chatStatus);
+      // …AND THE REST OF THAT SNAPSHOT (2026-09-09, the ghost-row incident).
+      // The paragraph above was written for chatStatus and stopped there, so
+      // this — the ONLY attach path that does not rebuild — silently dropped
+      // every other live fact the payload carries: the input QUEUE (a strip
+      // whose rows the server no longer knows about survived every reconnect,
+      // and clicking them answered "it already ran" in red), plus
+      // queueSupported/queueVerbs, turnState, inProgressTools, autoResume,
+      // outputStyle, responseStyleLive, spawnOrigin. `_applyLiveMeta` is
+      // carries-the-key guarded throughout, so applying it here can only
+      // REPLACE a fact the server just stated — never clear one it omitted.
+      // The catch-up below fetches MESSAGES; session state is not a message
+      // and nothing else re-states it.
+      this._applyLiveMeta(msg);
       // Sync streaming label from server
       if (msg.isStreaming) this._onServerStreamLabel(msg.streamingLabel || t('thinking...'), msg.streamingKind || null);
       else this._hideTyping();

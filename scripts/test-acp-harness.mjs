@@ -282,6 +282,25 @@ console.log('— the input queue: published, removable, order-preserving (no ste
     await w.waitFor(() => last()?.items?.length === 2, 4000, 'two queued');
     ok('the ACP wrapper PUBLISHES its promptQueue the way codex publishes the app-server\'s (one client path, a capability row apart)',
       last().items.map((i) => i.msgId).join(',') === 'qb,qc' && last().items[0].preview === 'first queued' && last().items.every((i) => i.id && i.kind === 'user'), last().items);
+    // RE-STATE IT ON DEMAND (`queue-resync`, 2026-09-09). A queue publication is
+    // a stdout record and this wrapper's stdout is an 800KB head-dropped RING —
+    // the very file a restarted server rebuilds its normalizer from — so after a
+    // restart the server's `queue: []` is a GUESS. It asks; this answers. Here
+    // the queue is NOT empty, which is the direction that would otherwise leave
+    // a real pending message invisible for the rest of the session.
+    {
+      const before = w.findAll('queue_changed').length;
+      const noticesBefore = w.findAll('notice').length;
+      w.send({ type: 'queue-resync' });
+      await w.waitFor(() => w.findAll('queue_changed').length > before, 4000, 'the resync publication');
+      ok('`queue-resync` re-states the queue on demand — the answer a rebuilt normalizer cannot produce for itself',
+        w.findAll('queue_changed').length === before + 1 && last().items.map((i) => i.msgId).join(',') === 'qb,qc', last().items);
+      ok('…and it is an ORDINARY publication: `verbs` rides it like every other, so the client re-learns the controls in the same frame',
+        Array.isArray(last().verbs) && last().verbs.includes('remove'), last().verbs);
+      ok('…and it is not an unknown verb here (an ACP wrapper answers one with a VISIBLE error card — which is exactly why the server gates the ask on this wrapper\'s own sidecar advert)',
+        w.findAll('notice').length === noticesBefore && !w.find('notice', (r) => r.noticeKind === 'unknown-verb'), w.findAll('notice').slice(-1)[0]);
+      ok('…and the wrapper adverts it in the sidecar it writes (the per-PROCESS gate the server reads)', w.metaJson()?.caps?.queueResync === true, JSON.stringify(w.metaJson()?.caps));
+    }
     // steer is denied by the CAPS row before it leaves the browser; a frame that
     // reaches the wrapper anyway is REFUSED with a reason, never silently dropped
     w.send({ type: 'queue-op', op: 'steer', id: last().items[0].id });

@@ -2135,6 +2135,14 @@ function createWsCreateHandler({ ctx, agentEnv, crashLoopRef, noConvoRef,
             // input queue — stated explicitly (not omitted) so the creator's
             // carries-the-key guard clears any strip a recycled window kept.
             queue: [],
+            // …but it is NOT a FACT (2026-09-09): the app-server's queue
+            // belongs to the THREAD, so a RESUMED thread hands the new wrapper
+            // items it never filled (measured: `queue_changed n=25` two
+            // seconds after boot). The `[]` above is the placeholder that
+            // clears a recycled window's strip; the FACT is the wrapper's own
+            // forced baseline publication, seconds later. Saying so keeps the
+            // client from ever showing a row nobody can act on.
+            queueKnown: false,
             // The wrapper has not written its sidecar yet, so we do not KNOW
             // whether it publishes a queue: say false and let its own baseline
             // `queue_changed` (published at boot, seconds later) turn the
