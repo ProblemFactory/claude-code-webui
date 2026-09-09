@@ -82,6 +82,53 @@ console.log('\nTHE RULE\n    ' + G.SWEEP_RULE + '\n');
   ok(r.offenders.some((o) => o.name === '-tmp-vs-wire-probe-def' && o.declared),
     '…and the same declared prefix past the staleness threshold IS an offender (declared means "while running", not "for ever")');
   ok(typeof r.rule === 'string' && r.rule.length > 100, 'the decision carries the rule it applied');
+
+  // ── ②b THE IN-FLIGHT GRACE (r3) ────────────────────────────────────────────
+  // REPRODUCED before this was written: on this box, running the full fast
+  // tier, a `-tmp-vs-chat-e2e-cwd-<mkdtemp>` dir 4 min old — created by a
+  // CONCURRENT PRE-FIX checkout, a shape only master's test-chat-e2e can mint —
+  // made `npm run ci` exit 1 here, in a worktree that could not have created
+  // it, cannot remove it (every sweeper's floor is FIXTURE_STALE_MS) and is
+  // provably unharmed by it (the walk ingests 0 events, discovery skips it).
+  // The grace is OPT-IN so the per-suite censuses keep absolute strictness.
+  {
+    const nowMs = 2_000_000_000_000;
+    const younger = nowMs - 4 * 60_000;          // the reproduced 4-min leftover
+    const stale = nowMs - G.FIXTURE_STALE_MS - 1_000;
+    const rows = [{ name: '-tmp-vs-chat-e2e-cwd-paw5IT', mtimeMs: younger }];
+    const swept = G.fixtureLitter(rows, { now: nowMs, graceMs: G.FIXTURE_STALE_MS });
+    const sp = swept.spared.find((s) => s.name === '-tmp-vs-chat-e2e-cwd-paw5IT');
+    ok(swept.offenders.length === 0 && sp && sp.declared === false && /concurrent|running right now/i.test(sp.why),
+      'GRACE: the whole-directory sweep SPARES an undeclared fixture dir younger than the threshold, and NAMES it (undeclared ⇒ declared:false, with a reason that says why nothing may remove it yet)',
+      JSON.stringify(swept));
+    // NEGATIVE CONTROL ①: the grace expires. A grace that never expires is the
+    // vacuous direction — it would delete the sweep.
+    const stillSwept = G.fixtureLitter([{ name: '-tmp-vs-chat-e2e-cwd-paw5IT', mtimeMs: stale }],
+      { now: nowMs, graceMs: G.FIXTURE_STALE_MS });
+    ok(stillSwept.offenders.length === 1 && stillSwept.offenders[0].declared === false,
+      'NEGATIVE CONTROL: the SAME dir past the threshold is still an offender (the grace expires; it is "not yet litter", never "not litter")',
+      JSON.stringify(stillSwept));
+    // NEGATIVE CONTROL ②: the grace is OPT-IN. The four per-suite censuses call
+    // fixtureLitter(added) with no options, on entries they already know are
+    // new — mtime ≈ now, so ageMs can be 0. `graceMs > 0` is what keeps
+    // `0 <= 0` from silently sparing a suite's own litter.
+    const perSuite = G.fixtureLitter([
+      { name: '-tmp-vs-chatpage-test-1', mtimeMs: nowMs },        // ageMs === 0
+      { name: '-tmp-vs-chat-e2e-cwd-paw5IT', mtimeMs: younger },
+    ], { now: nowMs });
+    ok(perSuite.offenders.length === 2 && perSuite.spared.length === 0,
+      'NEGATIVE CONTROL: with NO graceMs (the per-suite censuses\' call shape) a brand-new fixture dir — ageMs === 0 included — is STILL an offender',
+      JSON.stringify(perSuite));
+    // …and the decision reports the grace it applied, so the printed line and
+    // the assert text cannot drift from the rule.
+    ok(swept.graceMs === G.FIXTURE_STALE_MS && perSuite.graceMs === 0,
+      'the decision carries the grace it applied (0 unless the caller opted in)');
+    // The DECLARED spare keeps its own shape: same field, different reason.
+    const dec = G.fixtureLitter([{ name: '-tmp-vs-wire-probe-abc', mtimeMs: younger }], { now: nowMs, graceMs: G.FIXTURE_STALE_MS });
+    ok(dec.spared.length === 1 && dec.spared[0].declared === true && dec.spared[0].why !== G.IN_FLIGHT_WHY,
+      'a DECLARED prefix is still spared for its OWN declared reason, never absorbed into the in-flight grace (the two answers stay distinguishable)',
+      JSON.stringify(dec.spared));
+  }
 }
 
 // ── ③ THE CONTROL: plant one under a THROWAWAY home and prove it is caught ──
@@ -139,10 +186,20 @@ console.log('\nTHE RULE\n    ' + G.SWEEP_RULE + '\n');
     console.log(`  ⚠ SKIP: cannot read ${projects} (${e.code || e.message}) — nothing measured here`);
   }
   if (entries) {
-    const r = G.fixtureLitter(entries);
-    console.log(`  scanned ${entries.length} project dirs in ${projects}; spared ${r.spared.length} declared in-flight`);
+    // THE ONLY CALLER THAT PASSES `graceMs`. This is a shared directory other
+    // checkouts on this box write to, and nothing in this tree may remove a
+    // fixture dir younger than FIXTURE_STALE_MS (every sweeper's own floor), so
+    // an in-flight entry is NAMED with its age instead of demanding a removal
+    // that is not yet allowed. It becomes an offender the moment it goes stale.
+    // The four per-suite censuses deliberately pass NO grace: their entries are
+    // already diffed against a pre-run listing, so a grace there would spare
+    // the suite's own litter. §2 controls both directions; §6 pins that no
+    // other suite passes graceMs, and that this call still does.
+    const r = G.fixtureLitter(entries, { graceMs: G.FIXTURE_STALE_MS });
+    const declared = r.spared.filter((s) => s.declared), inFlight = r.spared.filter((s) => !s.declared);
+    console.log(`  scanned ${entries.length} project dirs in ${projects}; spared ${declared.length} declared in-flight, ${inFlight.length} undeclared but younger than ${Math.round(r.graceMs / 60000)} min`);
     ok(r.offenders.length === 0,
-      `the real ~/.claude/projects carries no fixture project dir (${entries.length} entries scanned)`,
+      `the real ~/.claude/projects carries no STALE fixture project dir (${entries.length} entries scanned, grace ${Math.round(r.graceMs / 60000)} min)`,
       r.offenders.length
         ? `LITTER: ${JSON.stringify(r.offenders.slice(0, 5))}\n    A suite wrote a synthetic transcript into your real home. Isolate it\n    (scripts/scratch.mjs scratchHome) and remove the leftovers:\n    ${r.offenders.slice(0, 5).map((o) => 'rm -rf ' + JSON.stringify(path.join(projects, o.name))).join('\n    ')}`
         : '');
@@ -490,6 +547,57 @@ console.log('\nTHE RULE\n    ' + G.SWEEP_RULE + '\n');
   const scan = (() => { try { return fs.readFileSync(path.join(here, '..', 'data', 'bin', 'vibespace-usage-scan'), 'utf-8'); } catch { return ''; } })();
   ok(/isFixtureProjectDir/.test(scan) && /isFixtureSid/.test(scan) && /FIXTURE_SID_PREFIX/.test(scan),
     'the shipped scanner carries the inline copy of the convention (parity-pinned by test-usage-walk-parity)');
+}
+
+// ── ⑥ THE GRACE IS WIRED TO EXACTLY ONE CALLER (r3 WIRING PIN) ─────────────
+// The in-flight grace is a RELAXATION, so its blast radius is the thing to
+// pin: it belongs to the whole-directory sweep, which looks at a shared
+// resource, and to nothing else. The four per-suite censuses hand
+// fixtureLitter() entries they already diffed against a pre-run listing — a
+// grace there would spare the suite's OWN litter, which is the whole defect
+// this suite exists to catch. Derived by grep over every suite and PRINTED,
+// like the censuses above: a pure-function relaxation with no wiring pin is
+// the "unstaged wiring" class (2.355.0) waiting to happen in reverse.
+{
+  const here = path.dirname(new URL(import.meta.url).pathname);
+  const suites = fs.readdirSync(here).filter((f) => /^test-.*\.mjs$/.test(f)).sort();
+  const src = (f) => { try { return fs.readFileSync(path.join(here, f), 'utf-8'); } catch { return ''; } };
+  const SELF = 'test-fixture-isolation.mjs';
+  // A call site = `fixtureLitter(` plus its argument text up to the statement
+  // end; `[^;\n]` cannot cross into the next statement, so a later mention of
+  // graceMs is not attributed to this call.
+  const graceCallers = [];
+  const callers = [];
+  for (const f of suites) {
+    const t = src(f);
+    for (const m of t.matchAll(/fixtureLitter\(([^;]{0,300})/g)) {
+      callers.push(f);
+      if (/graceMs/.test(m[1])) graceCallers.push(f);
+    }
+  }
+  const others = [...new Set(graceCallers.filter((f) => f !== SELF))];
+  console.log(`  census (g): ${callers.length} fixtureLitter() call sites across ${new Set(callers).size} suites; graceMs passed by: ${[...new Set(graceCallers)].join(', ') || '(none)'}`);
+  ok(others.length === 0,
+    'ONLY the standing sweep may pass graceMs — no per-suite census relaxes its own measurement',
+    JSON.stringify(others));
+  // …and the sweep really does pass it: a relaxation nobody wired is the
+  // reproduced defect still shipping (that is what the OTHER half of a wiring
+  // pin is for — this assert goes red if §4 loses the option).
+  {
+    const self = src(SELF);
+    const a = self.indexOf('// ── ④ THE REAL HOME');
+    const b = self.indexOf('// ── ⑤ THE CENSUSES');
+    const region = a >= 0 && b > a ? self.slice(a, b) : '';
+    ok(region.length > 200 && /fixtureLitter\([^;]{0,300}graceMs:\s*G\.FIXTURE_STALE_MS/.test(region),
+      '…and §4 (the whole-directory sweep) DOES pass it, at the shared FIXTURE_STALE_MS — the floor every sweeper in this tree already refuses to delete below',
+      JSON.stringify({ region: region.length }));
+  }
+  // CONTROLS: the census can go red, and it does not fire on a plain call.
+  const scan = (t) => { const out = []; for (const m of t.matchAll(/fixtureLitter\(([^;]{0,300})/g)) if (/graceMs/.test(m[1])) out.push(1); return out.length; };
+  ok(scan('const lit = fixtureLitter(added, { graceMs: G.FIXTURE_STALE_MS });') === 1,
+    'CONTROL (g): a per-suite census that relaxed itself WOULD be caught');
+  ok(scan('const lit = fixtureLitter(added);\nconst graceMs = 0;') === 0,
+    'CONTROL (g): a plain call is not flagged by a later mention of graceMs (the matcher cannot cross the statement end)');
 }
 
 console.log(fail ? `FAIL (${fail})` : `ALL PASS (${pass})`);

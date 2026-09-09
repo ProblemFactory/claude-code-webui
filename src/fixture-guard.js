@@ -86,7 +86,19 @@ const REAL_HOME_FIXTURE_PREFIXES = [
 // litter rather than a run in flight. Shared with the wire probe's own sweep
 // so the two can never disagree about the same directory (test-stdout-registry
 // asserts the probe reports this value and the clock it decided on).
+//
+// IT IS ALSO THE FLOOR ON WHAT ANY SWEEPER MAY REMOVE. Every sweeper in this
+// tree — the wire probe's own (test-stdout-registry r5/r6) and test-chat-e2e's
+// self-sweep — refuses to delete a fixture dir younger than this, with the same
+// reason: it may belong to a copy of the suite that is RUNNING RIGHT NOW. This
+// box hosts ~160 checkouts of this repo and the heavy tier is detached, so two
+// worktrees really do overlap. See `graceMs` on fixtureLitter() below.
 const FIXTURE_STALE_MS = 10 * 60 * 1000;
+
+// The sentence a whole-directory sweep prints for an UNDECLARED fixture dir it
+// is not yet willing to call litter. It is a sentence, not a shrug: it names
+// what is (and is not) known about the directory.
+const IN_FLIGHT_WHY = 'younger than the staleness threshold, so it may be a copy of a suite running right now (possibly from a pre-fix checkout); no sweeper in this tree may remove it yet, the usage walk and session discovery both refuse it, and it becomes an offender the moment it goes stale';
 
 /** cwdToProjectDir's rule (src/session-store.js), restated. It cannot be
  *  imported: session-store requires THIS module, and PURE imports nothing. */
@@ -141,28 +153,62 @@ const SWEEP_RULE = [
   'HOME (scripts/scratch.mjs mints the paths). The only fixture cwds allowed under the',
   'real home are the DECLARED ones in src/fixture-guard.js REAL_HOME_FIXTURE_PREFIXES,',
   `and even those only while in flight (< ${FIXTURE_STALE_MS / 60000} min old).`,
+  '',
+  'A directory younger than that threshold is NOT YET litter when the whole real home is',
+  'being swept: no sweeper in this tree is allowed to remove one (it may be a concurrent',
+  `run, including one from a pre-fix checkout), so demanding its removal would ask for`,
+  'something nothing can do. It is NAMED with its age and becomes an offender when stale.',
 ].join('\n    ');
 
 /** THE SWEEP, as a pure decision over a directory listing.
  *  `entries`: [{name, mtimeMs}] from ~/.claude/projects.
  *  Returns {offenders, spared, rule} — offenders is what makes the gate red.
  *  Parameterised by root listing + clock so the negative control can plant one
- *  under a throwaway HOME and prove the rule catches it. */
-function fixtureLitter(entries, { now = Date.now(), staleMs = FIXTURE_STALE_MS, tmpRoots = TMP_ROOTS } = {}) {
+ *  under a throwaway HOME and prove the rule catches it.
+ *
+ *  `graceMs` (OPT-IN, default 0) — how long an UNDECLARED fixture dir may sit
+ *  there before it counts as litter. It exists for exactly one caller: the
+ *  whole-directory standing sweep (scripts/test-fixture-isolation.mjs §4),
+ *  which looks at a shared resource other checkouts are writing to.
+ *
+ *  WHY IT IS OPT-IN AND NOT THE DEFAULT. The four PER-SUITE censuses hand this
+ *  function entries they have already diffed against a listing taken before
+ *  their own run, i.e. entries they KNOW appeared during it, whose mtimes are
+ *  by construction ~now. A grace there would spare every offender including the
+ *  suite's own — the vacuous direction. The standing sweep is the opposite
+ *  case: it sees a directory it did not diff, on a box hosting ~160 checkouts,
+ *  and a young entry there carries no attribution at all.
+ *
+ *  REPRODUCED (2026-09-09, on this box, running the full fast tier): a
+ *  `-tmp-vs-chat-e2e-cwd-<mkdtemp>` dir created 4 min earlier by a PRE-FIX
+ *  checkout (the mkdtemp suffix is a shape only master's test-chat-e2e can
+ *  mint) made `npm run ci` exit 1 at test-fixture-isolation in an unrelated
+ *  worktree — a mandatory push gate red over a directory that tree could not
+ *  have created, cannot remove (every sweeper's own floor is FIXTURE_STALE_MS),
+ *  and is provably inert (the walk ingests 0 events from it, discovery skips
+ *  it). The same shape is recorded in the kb as an incident of its own
+ *  (test-stdout-registry round 5: an absolute-absence assertion turned the
+ *  gate red on the exact case the sweep exists to spare).
+ *
+ *  The grace is bounded by `graceMs > 0` on purpose: with the default 0 an
+ *  entry whose mtime equals `now` has ageMs === 0, and `0 <= 0` would have
+ *  quietly spared the per-suite censuses' own freshest entries. */
+function fixtureLitter(entries, { now = Date.now(), staleMs = FIXTURE_STALE_MS, tmpRoots = TMP_ROOTS, graceMs = 0 } = {}) {
   const offenders = [], spared = [];
   for (const e of entries || []) {
     const name = e && e.name;
     if (!isFixtureProjectDir(name, tmpRoots)) continue;
     const ageMs = Math.max(0, now - (Number(e.mtimeMs) || 0));
     const why = realHomeFixtureReason(name, tmpRoots);
-    if (why && ageMs <= staleMs) { spared.push({ name, ageMs, why }); continue; }
+    if (why && ageMs <= staleMs) { spared.push({ name, ageMs, why, declared: true }); continue; }
+    if (!why && graceMs > 0 && ageMs <= graceMs) { spared.push({ name, ageMs, why: IN_FLIGHT_WHY, declared: false }); continue; }
     offenders.push({ name, ageMs, declared: !!why });
   }
-  return { offenders, spared, rule: SWEEP_RULE, staleMs, now };
+  return { offenders, spared, rule: SWEEP_RULE, staleMs, graceMs, now };
 }
 
 module.exports = {
   FIXTURE_CWD_PREFIX, FIXTURE_SID_PREFIX, TMP_ROOTS, REAL_HOME_FIXTURE_PREFIXES,
-  FIXTURE_STALE_MS, SWEEP_RULE,
+  FIXTURE_STALE_MS, SWEEP_RULE, IN_FLIGHT_WHY,
   encodeCwd, isFixtureProjectDir, isFixtureSid, isFixtureCwd, realHomeFixtureReason, fixtureLitter,
 };
