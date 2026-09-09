@@ -1459,8 +1459,40 @@ class ChatView {
    *  'Queued' chip was dead (round-2 verifier's MAJOR). So a FLIP — in either
    *  direction — re-applies the chips of every rendered message that has a
    *  queueState. The strip has no such problem (it re-renders from
-   *  `_setQueue`); the chips live inside bubbles nobody rebuilds. */
-  _setQueueSupported(next, verbs) {
+   *  `_setQueue`); the chips live inside bubbles nobody rebuilds.
+   *
+   *  `at` (2026-09-09 r3) is WHEN THIS STATEMENT ARRIVED — the SAME rule the
+   *  rows got in r2, because THE ADVERT REACHES THE STRIP TOO: `_queueCaps()`
+   *  collapses to NO_QUEUE_CAPS when this flag is false, and the composer then
+   *  renders ZERO rows and HIDES the strip (`queueOps ? this._queue : []`). So
+   *  a stale `queueSupported:false` produces the exact outcome r2 exists to
+   *  prevent — a real pending message held by the wrapper, present in `_queue`,
+   *  and on screen NOWHERE — and the rows' guard one method up cannot see it.
+   *  REACHED whenever the attach payload's advert is a NO, which is what the
+   *  server answers with no readable LOCAL sidecar (a REMOTE session — its
+   *  sidecar lives on ITS machine, as ws-handler says where it asks — or the
+   *  2.339.2 resolution-failure class): the advert then falls back to the
+   *  IN-BAND publication, which a restart RESETS, so the payload says
+   *  `queueSupported:false` while that same wrapper's own publication — ~10ms,
+   *  against the 0-500ms render stagger — says true.
+   *
+   *  ITS OWN STAMP, not `_queueStatedAt`: these are two different facts stated
+   *  by different frames, and one clock lets a statement about the ROWS censor
+   *  a statement about the ADVERT. `_dropQueueRow` stamps the rows at `now`
+   *  from a purely local inference, which would then refuse a later payload's
+   *  advert for no reason at all.
+   *
+   *  AND THE GUARD SITS ABOVE THE NO-CHANGE EARLY RETURN, which is
+   *  load-bearing rather than tidy: the wrapper's answer is usually a
+   *  no-CHANGE (same process, so the pre-restart view already holds
+   *  `supported:true` with the same verbs), so a guard below that return would
+   *  never record the answer's instant and the stale payload would still win.
+   *  Measured, both ways. */
+  _setQueueSupported(next, verbs, { at = performance.now() } = {}) {
+    // Monotonic (performance.now), like the rows' stamp: the only question
+    // ever asked of these two numbers is which of the two frames arrived first.
+    if ((this._queueAdvertStatedAt || 0) > at) return;
+    this._queueAdvertStatedAt = at;
     const val = !!next;
     const list = Array.isArray(verbs) ? verbs.map((v) => String(v)) : this._queueVerbsServed;
     // The VERB LIST is part of this flag, not a second one: a wrapper can
@@ -1570,24 +1602,30 @@ class ChatView {
     // FIRST: it decides which controls the items are rendered with.
     // carries-the-key guarded (2.368.3 law): a partial meta without queueVerbs
     // keeps the served verb list (undefined = keep, see _setQueueSupported).
-    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined);
+    //
+    // WHEN THIS PAYLOAD ARRIVED (2026-09-09 r2, hoisted above the advert in
+    // r3 — BOTH queue facts are judged by it, because a stale advert empties
+    // the strip just as thoroughly as stale rows do). The stamp rides on the
+    // frame itself: the payload IS the meta, and a second out-of-band channel
+    // beside it is the whitelist-drift class. It is NOT a fact about the
+    // session (nothing here is reset when it is missing): every caller that
+    // applies a frame the moment it lands leaves it off, and `now` is then the
+    // truth. Spelled with its own `in meta` test all the same — the absent
+    // case is a behaviour and behaviours get written down.
+    const rxTick = ('__rxTick' in meta) ? Number(meta.__rxTick) : NaN;
+    const rxAt = Number.isFinite(rxTick) ? rxTick : performance.now();
+    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined, { at: rxAt });
     // `queueKnown:false` = the server's list is a GUESS (see _setQueue). It is
     // a MODIFIER of `queue`, so it is read inside that key's guard — but it
     // carries its own `in meta` test all the same, because the fact it states
     // when ABSENT has to be spelled out: a payload from before the field is
     // read as KNOWN, which is the behaviour this branch always had.
-    // …and WHEN this payload arrived, so a DEFERRED application of it cannot
-    // overwrite a statement that landed in the meantime (see _setQueue). The
-    // stamp rides on the frame itself — the payload IS the meta, and a second
-    // out-of-band channel beside it is the whitelist-drift class. It is NOT a
-    // fact about the session (nothing here is reset when it is missing): every
-    // caller that applies a frame the moment it lands leaves it off, and `now`
-    // is then the truth. Spelled with its own `in meta` test all the same —
-    // the absent case is a behaviour and behaviours get written down.
-    const rxTick = ('__rxTick' in meta) ? Number(meta.__rxTick) : NaN;
+    // …and it is judged by `rxAt` (hoisted above the advert), so a DEFERRED
+    // application of this payload cannot overwrite a statement that landed in
+    // the meantime (see _setQueue).
     if ('queue' in meta) this._setQueue(meta.queue, {
       known: ('queueKnown' in meta) ? meta.queueKnown !== false : true,
-      at: Number.isFinite(rxTick) ? rxTick : performance.now(),
+      at: rxAt,
     });
     // Does the RUNNING wrapper serve the live style verb? Same shape as
     // queueSupported and the same reason (2.361.1/2.364.1): the harness caps

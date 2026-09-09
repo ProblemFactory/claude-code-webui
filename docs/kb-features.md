@@ -492,6 +492,14 @@ impossible rather than a review promise.
   executed, so a payload half a second old cannot overwrite the answer it
   provoked (and a steer that empties the queue mid-stagger is not undone by it
   either).
+  The SAME rule governs the advert on the line above the rows — whether the
+  session HAS a queue surface at all. A false advert collapses the capability
+  and the composer then renders no rows and hides the strip, which is the same
+  outcome as losing the rows, so both are judged by when the payload ARRIVED.
+  It matters wherever the server has no readable local sidecar to read the
+  advert from — a REMOTE session, whose wrapper wrote its sidecar on its own
+  machine — because there the advert comes from the wrapper's own publication,
+  which a restart resets.
 - **The chip is re-applied when the capability flips.** `_queueSupported` starts
   false and both of its sources arrive AFTER the bubbles are on screen (the
   attach payload is applied at the END of `loadHistory`; a live wrapper's

@@ -63,3 +63,9 @@ src/vs-wake-mut-*.js
 # relative requires do not resolve). Unlinked on exit and swept at start, but a
 # SIGKILL can strand one — and a dirty tree is what the release gate REFUSES on.
 src/server/vs-aredge-mut-*.js
+# scripts/test-queue-steer.mjs ⑬d writes PATCHED COPIES of src/lib/chat-view.js
+# beside the real one (they must be SIBLINGS or their relative imports do not
+# resolve). They are unlinked on exit and swept at start, but a SIGKILL can
+# strand one — and a dirty tree is what the release gate REFUSES on, so they can
+# never be allowed to become tree state.
+src/lib/.chat-view.stale-prefix-*.js

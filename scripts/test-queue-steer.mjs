@@ -235,17 +235,25 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   // the claim is that the advert is applied FIRST, and a byte budget between
   // them turns every added comment into a red suite (it did, twice).
   {
-    const advert = cv.indexOf("if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined);");
+    const advert = cv.indexOf("if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined, { at: rxAt });");
     const queue = cv.indexOf("if ('queue' in meta) this._setQueue(meta.queue, {");
     ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST',
       advert > 0 && queue > advert && /if \('queue' in meta\) this\._setQueue\(meta\.queue, \{\s*\n\s*known: \('queueKnown' in meta\) \? meta\.queueKnown !== false : true,/.test(cv),
       JSON.stringify({ advert, queue }));
+    // …and BOTH are judged by the SAME arrival stamp (r3). The advert is not a
+    // lesser fact: a stale `queueSupported:false` collapses `_queueCaps()` to
+    // NO_QUEUE_CAPS and the composer then renders zero rows — the identical
+    // user-visible outcome r2's row guard exists to prevent. So `rxAt` is
+    // computed ONCE, above the advert, and handed to both.
+    const stamp = cv.indexOf("const rxAt = Number.isFinite(rxTick) ? rxTick : performance.now();");
+    ok('…and the arrival stamp is computed ONCE, ABOVE the advert, and passed to BOTH queue writers (an advert judged by "whatever ran last" empties the strip just as thoroughly as stale rows)',
+      stamp > 0 && stamp < advert && /at: rxAt,\n/.test(cv), JSON.stringify({ stamp, advert, queue }));
   }
   // ONE WRITER for the capability, because a FLIP has a consequence (the
   // rendered chips must be re-applied — round-2's MAJOR). A bare assignment
   // anywhere else silently skips it.
   ok('`_queueSupported` has exactly ONE writer besides its initialiser (_setQueueSupported), so every flip is observable',
-    (cv.match(/this\._queueSupported = /g) || []).length === 2 && /_setQueueSupported\(next, verbs\) \{[\s\S]{0,700}this\._queueSupported = val;\s*\n\s*this\._queueVerbsServed = list;\s*\n\s*this\._refreshQueueChips\(\);/.test(cv),
+    (cv.match(/this\._queueSupported = /g) || []).length === 2 && /_setQueueSupported\(next, verbs, \{ at = performance\.now\(\) \} = \{\}\) \{[\s\S]{0,900}this\._queueSupported = val;\s*\n\s*this\._queueVerbsServed = list;\s*\n\s*this\._refreshQueueChips\(\);/.test(cv),
     (cv.match(/this\._queueSupported = [^\n]*/g) || []));
   ok('…and the VERB LIST shares that one writer (a wrapper that gains verbs without changing `supported` must re-apply the chips too)',
     (cv.match(/this\._queueVerbsServed = /g) || []).length === 2 && /JSON\.stringify\(list\) === JSON\.stringify\(this\._queueVerbsServed\)/.test(cv),
@@ -4890,6 +4898,84 @@ console.log('— ⑬d the deferred restart payload cannot overwrite the answer i
   const cvSrc = read('src/lib/chat-view.js');
   const SEVEN = ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'];
   const REAL = { id: 'qReal', msgId: 'mq', preview: 'the real pending message', text: 'the real pending message', kind: 'user' };
+
+  // ── THE PATCHED COPIES' HYGIENE (r3) ────────────────────────────────────
+  // The pre-fix controls below are copies of src/lib/chat-view.js written
+  // BESIDE the real one (they must be SIBLINGS or their relative imports do
+  // not resolve). Same idiom, same two protections as test-new-member-wake §8
+  // and test-auto-resume §12a — gitignored (`src/lib/.chat-view.stale-prefix-*.js`)
+  // AND swept at start by PID liveness, because a SIGKILL during the window
+  // strands one and a DIRTY TREE is what the release gate refuses on
+  // (measured: `node scripts/ci.mjs --heavy` → "REFUSED — this tree is DIRTY").
+  // Only PIDs that are GONE: this suite can legitimately run twice in one
+  // worktree, and deleting a LIVE run's module mid-import is worse than litter.
+  const { spawnSync, spawn } = await import('node:child_process');
+  // The ONE sanitized git environment (scripts/git-env.mjs): this suite runs
+  // inside `npm run ci`, i.e. inside a pre-push HOOK, which exports GIT_DIR /
+  // GIT_INDEX_FILE — asking git anything without it asks about somebody else's
+  // repo (test-architecture §42's own lesson, round 6).
+  const { gitEnvFrom } = await import(path.join(REPO, 'scripts/git-env.mjs'));
+  const preCopies = [];
+  process.on('exit', () => { for (const f of preCopies) { try { fs.unlinkSync(f); } catch { } } });
+  /** Sweep stranded copies — and ONLY the ones whose PID is GONE. Returns what
+   *  it removed and what it SPARED, so the assert below reads the sweeper's own
+   *  verdict instead of inventing a second rule (test-stdout-registry r7 (b)). */
+  const sweepPreCopies = () => {
+    const removed = [], spared = [];
+    try {
+      for (const f of fs.readdirSync(path.join(REPO, 'src/lib'))) {
+        const m = /^\.chat-view\.stale-prefix-(\d+)[-.]/.exec(f);
+        if (!m) continue;
+        if (Number(m[1]) === process.pid) { spared.push(f); continue; }
+        try { process.kill(Number(m[1]), 0); spared.push(f); continue; } catch (e) { if (e.code === 'EPERM') { spared.push(f); continue; } }
+        try { fs.unlinkSync(path.join(REPO, 'src/lib', f)); removed.push(f); } catch { }
+      }
+    } catch { }
+    return { removed, spared };
+  };
+  sweepPreCopies();
+  // …and the two protections are ASSERTED, because a stranded copy is a DIRTY
+  // TREE and a dirty tree is what the release gate REFUSES on (measured:
+  // `node scripts/ci.mjs --heavy` -> "REFUSED — this tree is DIRTY, so a marker
+  // for <sha> would not describe what ran", exit 2; the fast tier likewise
+  // writes no green marker). Both halves, because either alone is a hole:
+  // gitignore keeps a SIGKILL's litter out of the status output, the PID sweep
+  // keeps it from accumulating, and NEITHER may touch a concurrent run's copy.
+  {
+    const ignored = spawnSync('git', ['-C', REPO, 'check-ignore', '-q', 'src/lib/.chat-view.stale-prefix-99999.js'],
+      { env: gitEnvFrom(process.env) }).status === 0;
+    ok('the patched-copy name is GITIGNORED (a SIGKILL between write and unlink must never become tree state — the gate refuses a dirty tree)', ignored);
+    // A pid that cannot exist (above pid_max) is GONE; our own child is LIVE.
+    const deadPid = 4294967290;
+    const live = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
+    const dead = path.join(REPO, 'src/lib', `.chat-view.stale-prefix-${deadPid}-sweep.js`);
+    const alive = path.join(REPO, 'src/lib', `.chat-view.stale-prefix-${live.pid}-sweep.js`);
+    try {
+      fs.writeFileSync(dead, '// stranded by a SIGKILLed run\n');
+      fs.writeFileSync(alive, '// a CONCURRENT run is importing this\n');
+      const swept = sweepPreCopies();
+      ok('…and the sweep removes a copy whose PID is GONE', !fs.existsSync(dead) && swept.removed.includes(path.basename(dead)), JSON.stringify(swept));
+      ok('NEGATIVE CONTROL: it SPARES a LIVE run\'s copy — this suite can legitimately run twice in one worktree, and deleting a live import is worse than the litter',
+        fs.existsSync(alive) && swept.spared.includes(path.basename(alive)), JSON.stringify(swept));
+    } finally {
+      try { live.kill('SIGKILL'); } catch { }
+      for (const f of [dead, alive]) { try { fs.unlinkSync(f); } catch { } }
+    }
+  }
+  let preN = 0;
+  /** A patched copy of the view, as a SIBLING of the real one. Every
+   *  replacement is COUNTED and the count is asserted by the caller — an
+   *  unpatched "control" is not a control. */
+  const preModule = (edits) => {
+    let src = cvSrc, hits = 0;
+    for (const [from, to] of edits) {
+      if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 80) };
+      src = src.split(from).join(to); hits++;
+    }
+    const f = path.join(REPO, 'src/lib', `.chat-view.stale-prefix-${process.pid}-${++preN}.js`);
+    fs.writeFileSync(f, src); preCopies.push(f);
+    return { file: f, hits, src };
+  };
   const GHOST = { id: 'qGhost', msgId: 'mg', preview: 'the steered message', text: 'the steered message', kind: 'user' };
 
   // ── the chain, pinned where this leg stops executing it ──────────────────
@@ -4909,7 +4995,8 @@ console.log('— ⑬d the deferred restart payload cannot overwrite the answer i
     })());
   ok('…and `_applyLiveMeta` reads THAT stamp for the queue, with its own `in meta` test (absent ⇒ now, which is the truth for every synchronous caller — and what test-auto-resume\'s carries-the-key sweep demands of every key read there)',
     /const rxTick = \('__rxTick' in meta\) \? Number\(meta\.__rxTick\) : NaN;/.test(cvSrc)
-    && /at: Number\.isFinite\(rxTick\) \? rxTick : performance\.now\(\),/.test(cvSrc));
+    && /const rxAt = Number\.isFinite\(rxTick\) \? rxTick : performance\.now\(\);/.test(cvSrc)
+    && /at: rxAt,\n/.test(cvSrc));
 
   const payload = (over = {}) => ({
     type: 'attached', sessionId: 'sess-open', normEpoch: 99,
@@ -4923,14 +5010,17 @@ console.log('— ⑬d the deferred restart payload cannot overwrite the answer i
   // the assertion meaningless). `answer` is the wrapper's publication arriving
   // on the ordinary meta-op path, exactly as the resync's answer does.
   const drive = async (CV, { seedKnown = null, over = {}, answer = null, answerAt = 10, stagger = 0.99 }) => {
-    const strip = { items: null, calls: [] };
+    const strip = { items: null, calls: [], ops: [] };
     let handler = null;
     const view = Object.assign(Object.create(CV.prototype), {
       sessionId: 'sess-open', _normEpoch: 7, _readOnly: false, _disconnected: false, _disposed: false,
       _queue: [], _queueSupported: true, _queueVerbsServed: SEVEN.slice(), _messages: [], _elements: new Map(),
       _renderedMsgIds: new Set(), _total: 0, _canPaginate: false, _newMsgCount: 0,
       _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
-      _chatInput: { setQueue: (items) => { strip.items = items; strip.calls.push((items || []).length); }, setDisconnected() { }, setQueueOpResult() { } },
+      // `caps` is recorded beside the row count because the ADVERT reaches the
+      // strip through it: ChatInput renders `queueOps ? this._queue : []`, so
+      // "rows survived" and "rows are rendered" are two different questions.
+      _chatInput: { setQueue: (items, caps) => { strip.items = items; strip.calls.push((items || []).length); strip.ops.push({ n: (items || []).length, ops: !!caps?.queueOps }); }, setDisconnected() { }, setQueueOpResult() { } },
       _renderers: { appendSystem() { } },
       ws: { send() { }, onGlobal: (h) => { handler = h; }, offGlobal() { } },
       _statusBar: { setResponseStyleLive() { }, setTurnState() { }, setAutoResume() { }, setSpawnOrigin() { }, setOutputStyle() { }, setOutputStylePending() { } },
@@ -4957,7 +5047,12 @@ console.log('— ⑬d the deferred restart payload cannot overwrite the answer i
     // Stand the 20s no-reply ladder down (⑬c's note: it declares these
     // half-built views dead inside ⑭'s minute otherwise).
     view._reattachGen = (view._reattachGen || 0) + 1;
-    return { ids: (view._queue || []).map((r) => String(r?.id || '')), strip: strip.calls };
+    return {
+      ids: (view._queue || []).map((r) => String(r?.id || '')), strip: strip.calls, stripOps: strip.ops,
+      // THE ADVERT SIDE (r3): `_queueSupported` is what `_queueCaps()` reads,
+      // and `queueOps` is what the composer gates the rows on.
+      supported: view._queueSupported, queueOps: CV.prototype._queueCaps.call(view).queueOps,
+    };
   };
 
   // The PRE-FIX module: the real source with ONLY the recency guard removed
@@ -4965,13 +5060,17 @@ console.log('— ⑬d the deferred restart payload cannot overwrite the answer i
   // — the behaviour every path had before this round).
   const GUARD = '    if ((this._queueStatedAt || 0) > at) return;\n';
   ok('the pre-fix control patches a REAL line of the product source', cvSrc.includes(GUARD));
-  const preCut = cvSrc.replace(GUARD, '');
-  ok('CONTROL: exactly one line was removed', preCut.length === cvSrc.length - GUARD.length);
-  const preCopy = path.join(REPO, 'src/lib', `.chat-view.stale-prefix-${process.pid}.js`);
-  fs.writeFileSync(preCopy, preCut);
+  const preRows = preModule([[GUARD, '']]);
+  ok('CONTROL: exactly one line was removed', preRows.hits === 1 && preRows.src.length === cvSrc.length - GUARD.length, preRows.err || '');
   let Pre = null;
-  try {
-    ({ ChatView: Pre } = await import(preCopy));
+  // "CAN THIS BE MEASURED" IS ITSELF AN ASSERT (test-stdout-registry r7ⓐ): a
+  // control whose needle went missing must be ONE LOUD RED, never
+  // `import(undefined)` — that throws MODULE_NOT_FOUND and takes every
+  // remaining assert in this file with it (measured, while mutation-testing
+  // this very arm).
+  if (!preRows.file) { ok('⑬d cannot run: the rows pre-fix control was not built — ' + preRows.err, false); }
+  else {
+    ({ ChatView: Pre } = await import(preRows.file));
 
     // ── ① THE DEFECT: the answer arrives at 10ms, the reset at ~495ms ───────
     {
@@ -5029,9 +5128,97 @@ console.log('— ⑬d the deferred restart payload cannot overwrite the answer i
       ok('PRE-FIX: the same frames put the steered row BACK on the strip (the second instance of the class, measured)',
         pre.ids.join(',') === 'qGhost', JSON.stringify(pre));
     }
-  } finally {
-    try { fs.unlinkSync(preCopy); } catch { }
+    // ── ⑥ THE ADVERT HAS THE SAME RACE, AND THE SAME OUTCOME (r3) ──────────
+    // Round 2 gave the recency rule to the queue ROWS and left the line above
+    // them — the ADVERT — judged by "whatever ran last". That is not a lesser
+    // fact: `_queueCaps()` collapses to NO_QUEUE_CAPS when `_queueSupported`
+    // is false, and ChatInput._renderQueue then does
+    // `const items = this._queueCaps.queueOps ? this._queue : []` and HIDES the
+    // strip. So a stale `queueSupported:false` reproduces r2's own outcome
+    // exactly — a real pending message the wrapper holds, present in `_queue`,
+    // rendered NOWHERE — with the r2 guard intact and looking green.
+    //
+    // REACHABLE wherever the payload's advert is a NO. r1's admission ("the
+    // advert comes from the running wrapper's sidecar and does not change
+    // under a restart") is true only for a LOCAL session with a readable
+    // sidecar; ws-handler names the other case where it asks ("or REMOTE — its
+    // sidecar lives on ITS machine"), and the 2.339.2 resolution-failure class
+    // is a third. There the advert falls back to the IN-BAND publication,
+    // which a restart resets ⇒ the payload says false while the wrapper's own
+    // publication, arriving in ~10ms against the stagger, says true.
+    //
+    // The payload here is not hand-written: it is what the REAL `queueAdvert`
+    // block answers (⑬b's lift idiom) for the REAL `wrapperCaps` of a session
+    // with no local sidecar and a REBUILT normalizer.
+    {
+      const { wrapperCaps } = require(path.join(REPO, 'src/server/wrapper-files.js'));
+      const { LEGACY_QUEUE_VERBS } = require(path.join(REPO, 'src/backend-caps.js'));
+      const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+      const noSidecarDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qs-nosidecar-'));
+      const wc = wrapperCaps(noSidecarDir, 'sess-remote-1', null);
+      try { fs.rmSync(noSidecarDir, { recursive: true, force: true }); } catch { }
+      ok('the REAL wrapperCaps answers no-sidecar for a session whose wrapper wrote none here (a REMOTE session; ws-handler names this case where it asks)',
+        wc.inputQueue === false && wc.queueResync === false && wc.reason === 'no-sidecar', JSON.stringify(wc));
+      const body = /const queueAdvert = \(\(\) => \{([\s\S]*?)\n              \}\)\(\);/.exec(read('src/ws-handler.js'));
+      ok('…and the advert block is still liftable (same needle ⑬b uses)', !!body);
+      const advertFn = new Function('wcapsAttach', 'session', 'LEGACY_QUEUE_VERBS', body[1]);
+      const remoteAdvert = advertFn(wc, { _normalizer: new CodexMessageManager('adv-remote-rebuilt') }, LEGACY_QUEUE_VERBS);
+      ok('THE PAYLOAD THIS ARM DRIVES IS THE PRODUCT\'S OWN: no sidecar + a rebuilt normalizer ⇒ queueSupported FALSE (the advert a running wrapper is about to contradict)',
+        remoteAdvert.queueSupported === false && remoteAdvert.queueVerbs === null, JSON.stringify(remoteAdvert));
+
+      // The wrapper's own publication carries supported:true + the SAME verbs
+      // the pre-restart view already holds ⇒ a NO-CHANGE call. That is why the
+      // guard must sit ABOVE `_setQueueSupported`'s no-change early return.
+      const now = await drive(ChatView, { over: remoteAdvert, answer: [REAL], answerAt: 10, stagger: 0.99 });
+      ok('THE FIX: the 500ms-old advert does NOT retract the running wrapper\'s — the row is on the strip AND the composer is given controls for it',
+        now.ids.join(',') === 'qReal' && now.supported === true && now.queueOps === true
+        && now.stripOps.every((c) => c.ops === true), JSON.stringify(now));
+      const preAdvert = preModule([['    if ((this._queueAdvertStatedAt || 0) > at) return;\n    this._queueAdvertStatedAt = at;\n', '']]);
+      ok('the advert pre-fix control patches REAL lines of the product source', preAdvert.hits === 1, preAdvert.err || '');
+      // Same rule as the rows control above: a control that was not built is
+      // ONE LOUD RED and the arms that need it are SKIPPED, never an
+      // `import(undefined)` that kills the rest of the file.
+      if (!preAdvert.file) { ok('⑥ cannot compare against the pre-fix advert: the control was not built — ' + preAdvert.err, false); }
+      else {
+        const { ChatView: PreAdvert } = await import(preAdvert.file);
+        const pre = await drive(PreAdvert, { over: remoteAdvert, answer: [REAL], answerAt: 10, stagger: 0.99 });
+        ok('PRE-FIX: the r2 guard keeps the row in `_queue` (green) while the stale advert flips the capability — `queueOps:false` ⇒ ChatInput renders ZERO rows and hides the strip',
+          pre.ids.join(',') === 'qReal' && pre.supported === false && pre.queueOps === false
+          && JSON.stringify(pre.stripOps.map((c) => c.ops)) === '[true,false]', JSON.stringify(pre));
+        // NEGATIVE CONTROL: the same frames in the other order. An ordering race
+        // is only a race if the other order is correct in BOTH copies.
+        const nowC = await drive(ChatView, { over: remoteAdvert, answer: [REAL], answerAt: 200, stagger: 0.01 });
+        const preC = await drive(PreAdvert, { over: remoteAdvert, answer: [REAL], answerAt: 200, stagger: 0.01 });
+        ok('CONTROL: reset FIRST and the answer second — both copies end with the capability the wrapper stated (so ① measures the guard, not a payload this arm broke)',
+          nowC.supported === true && nowC.queueOps === true && preC.supported === true && preC.queueOps === true,
+          JSON.stringify({ nowC, preC }));
+      }
+      // …and the rule's own two directions on the ONE writer, with the SEPARATE
+      // stamp: `_dropQueueRow` stamps the ROWS at `now` from a purely local
+      // inference, and sharing one clock would let it censor a later advert.
+      {
+        const mk = () => Object.assign(Object.create(ChatView.prototype), {
+          _queue: [], _queueSupported: true, _queueVerbsServed: SEVEN.slice(), _messages: [], _elements: new Map(),
+          _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+          _chatInput: { setQueue() { } }, _drainPendingSteers() { }, _refreshQueueChips() { },
+        });
+        const older = mk();
+        ChatView.prototype._setQueueSupported.call(older, true, SEVEN, { at: 2000 });
+        ChatView.prototype._setQueueSupported.call(older, false, null, { at: 1000 });
+        ok('an advert that arrived BEFORE the newest one is ignored', older._queueSupported === true);
+        const newer = mk();
+        ChatView.prototype._setQueueSupported.call(newer, true, SEVEN, { at: 1000 });
+        ChatView.prototype._setQueueSupported.call(newer, false, null, { at: 2000 });
+        ok('NEGATIVE CONTROL: one that arrived AFTER it applies — one rule, two measurements', newer._queueSupported === false);
+        const sep = mk();
+        ChatView.prototype._setQueue.call(sep, [REAL], { known: true, at: 3000 });   // rows stamped LATE
+        ChatView.prototype._setQueueSupported.call(sep, false, null, { at: 2000 });  // advert older than the ROWS
+        ok('SEPARATE STAMPS: a ROW statement never censors an ADVERT statement (`_dropQueueRow` stamps rows at `now` from a local inference — one clock would refuse the next payload\'s advert for no reason)',
+          sep._queueSupported === false, JSON.stringify({ supported: sep._queueSupported, rows: sep._queue.length }));
+      }
+    }
   }
+  for (const f of preCopies.splice(0)) { try { fs.unlinkSync(f); } catch { } }
 }
 
 // ── ⑭ THE SAME QUESTION, END TO END: a real server, a real wrapper, a REAL
