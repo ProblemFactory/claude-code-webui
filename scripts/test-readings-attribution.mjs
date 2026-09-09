@@ -1815,15 +1815,60 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     w.reading(0.61); cap.done();
     ok('§15 with no established window the guard is INERT (no evidence, no refusal)', Math.abs(w.readCache(w.LINK).sevenDay.utilization - 0.61) < 1e-9);
   }
-  // a reading that AGREES is untouched, and a rejection is never window-guarded
+  // a reading that AGREES is untouched; and a REJECTION is judged too (r2)
   {
     const w = mk(); const cap = quiet();
     w.reading(0.55, { resetsAt: w.WIN[w.LINK] });
+    // A rejection whose stated WEEKLY reset contradicts the member's own
+    // unexpired window, with nothing else identified. Round 1 wrote it anyway
+    // ("a rejection is deliberately NOT window-guarded"), and that exemption is
+    // what let the incident's foreign window land at the FIRST write — the one
+    // `guardReadingTarget` cannot reach, because a rejection deliberately
+    // carries no `win`. It is now the same rule the turn-end pass asks, at both
+    // moments, and a weekly refutation with no candidate refuses.
     w.eng.recordRateLimitEvent(w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'seven_day', resets_at: nowSec + 9 * 86400, resetsAt: nowSec + 9 * 86400 } });
-    cap.done();
+    const lines = cap.done();
     ok('§15 a reading that agrees with the target is written unchanged', w.readCache(w.LINK).sevenDay.utilization === 1 || Math.abs(w.readCache(w.LINK).sevenDay.utilization - 0.55) < 1e-9);
-    ok('§15 a REJECTION is deliberately NOT window-guarded — its resetsAt is frequently a bounded guess, and its identity has the turn-pinned rejection slot',
+    ok('§15 a REJECTION is judged at the write too — a foreign weekly reset never reaches the member\'s bucket',
+      w.readCache(w.LINK).sevenDay.utilization !== 1 && w.readCache(w.LINK).sevenDay.resetsAt !== nowSec + 9 * 86400, JSON.stringify(w.readCache(w.LINK).sevenDay));
+    ok('§15 …and the refusal is ARCHIVED as its own moment (\'rejection:\', not the turn-end \'wall:\') and SPOKEN',
+      (() => {
+        const arch = path.join(w.dataDir, 'archive', 'readings-window-mismatch.ndjson');
+        const rows = fs.existsSync(arch) ? fs.readFileSync(arch, 'utf8').trim().split('\n').map((l) => JSON.parse(l)) : [];
+        return rows.some((r) => r.what === 'rejection:7d') && lines.some((l) => /refusing to mark/.test(l));
+      })(), lines.filter((l) => /\[wall\]/.test(l)).join(' | ').slice(0, 220));
+  }
+  // …and the GUESS case the old exemption was really about is untouched: a
+  // rejection that states NO reset has no window evidence, so the pin stands
+  // and the bucket is marked exactly as before. This is the control that keeps
+  // the leg above from being read as "walls are now refused".
+  {
+    const w = mk(); const cap = quiet();
+    w.eng.recordRateLimitEvent(w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'seven_day' } });
+    cap.done();
+    ok('§15 CONTROL: a rejection that states no reset is marked on the pin exactly as before (its resetsAt would be a bounded guess, and a guess is not evidence)',
       w.readCache(w.LINK).sevenDay.utilization === 1 && w.readCache(w.LINK).sevenDay.status === 'limited', JSON.stringify(w.readCache(w.LINK).sevenDay));
+  }
+  // …and a FIVE-HOUR rejection whose reset CONTRADICTS the member's own
+  // unexpired 5h window, with nothing else identified, is still marked (§18c:
+  // a 5h reset is corroborating evidence, and refusing a wall costs money in
+  // the other direction). `mk()` stamps no 5h window at all, so this leg must
+  // stamp one itself — without it the rule short-circuits on "no evidence, no
+  // refusal" and the assert passes whatever the strength rule says, which is an
+  // assert that cannot fail.
+  {
+    const w = mk(); const cap = quiet();
+    const OWN5 = nowSec + 30 * 60;
+    w.stampWindow(w.LINK, { sevenDay: w.WIN[w.LINK], fiveHour: OWN5, scoped: {} });
+    const FOREIGN5 = nowSec + 4 * 3600;
+    ok('§15 CONTROL setup: the stated reset really does contradict the member\'s own unexpired 5h window (else the leg below cannot fail)',
+      quotaModel.windowRefutes(OWN5, FOREIGN5, { atSec: nowSec }), `own=${OWN5} stated=${FOREIGN5}`);
+    w.eng.recordRateLimitEvent(w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', resets_at: FOREIGN5, resetsAt: FOREIGN5 } });
+    const lines = cap.done();
+    ok('§15 CONTROL: a five-hour rejection nothing else identifies is still marked on the pin (a 5h window is evidence, not proof)',
+      w.readCache(w.LINK).fiveHour.utilization === 1 && w.readCache(w.LINK).fiveHour.status === 'limited', JSON.stringify(w.readCache(w.LINK).fiveHour));
+    ok('§15 CONTROL: …and the disagreement is SPOKEN rather than passing silently',
+      lines.some((l) => /disagrees with .* own window — writing it there anyway/.test(l)), lines.filter((l) => /\[wall\]/.test(l)).join(' | ').slice(0, 220));
   }
   // the established window may only be written by the panel refresh, and the
   // session-attributed producers must PRESERVE it (dropping it disarms the guard)
@@ -1891,19 +1936,31 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
       JSON.stringify([w.readCache(w.LINK).sevenDay, w.readCache(w.SPARE).sevenDay]));
     ok('§15 …and there is NO second switch', w.am.poolCurrent(w.P) === w.SPARE, `default=${w.am.poolCurrent(w.P)} spare=${w.SPARE} fish=${w.FISH}`);
 
-    // NEGATIVE CONTROL — a PATCHED COPY of the shipped tool with the storage
-    // decision reverted (the window read back out of the snapshot, as it was),
-    // over a snapshot carrying the window: the SAME `out` literal deletes it.
-    // The patch is asserted to have hit, so this can never silently become a
-    // second green arm.
+    // NEGATIVE CONTROL — a PATCHED COPY of the shipped tool with BOTH of this
+    // file's write-discipline decisions reverted, over a snapshot carrying the
+    // window: the pre-fix tool deletes it on one ordinary render.
+    //
+    // TWO reversions since r2, and the fact that BOTH are needed is the finding
+    // itself. r2 moved the window OUT of the object every producer rewrites (a
+    // fact only ONE producer may state does not belong there). r2-round-2 then
+    // found that the object's rewrite was ALSO the wrong shape — an enumerated
+    // list of fields to KEEP, which had by then dropped `scopedWeekly`, the org
+    // identity, `spend`, `corroborated`, the window, and `limits` — and replaced
+    // it with a spread of what was there. Either decision alone stops this
+    // render. Both patches are asserted to hit, so this can never silently
+    // become a second green arm.
     const w2 = mkIncidentWorld();
     const shipped = read('data/bin/vibespace-usage');
     const NEEDLE = "const w = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, windowSidecarName(key)), 'utf-8'));";
+    const SPREAD = "    ...(prev && typeof prev === 'object' ? prev : {}),\n";
     ok('§15 NEGATIVE CONTROL setup: the storage decision is a single line in the shipped tool (the patch below must hit it)',
       shipped.split(NEEDLE).length === 2, '');
+    ok('§15 NEGATIVE CONTROL setup: …and so is the rewrite decision (the spread that replaced the preserve list)',
+      shipped.split(SPREAD).length === 2, '');
     const preFixTool = path.join(w2.root, 'vibespace-usage.prefix');
-    fs.writeFileSync(preFixTool, shipped.replace(NEEDLE,
-      "const c = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, String(key).replace(/[^\\w.-]/g, '_') + '.json'), 'utf-8')); const w = c && c.ownWindow;"), { mode: 0o755 });
+    fs.writeFileSync(preFixTool, shipped
+      .replace(NEEDLE, "const c = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, String(key).replace(/[^\\w.-]/g, '_') + '.json'), 'utf-8')); const w = c && c.ownWindow;")
+      .replace(SPREAD, ''), { mode: 0o755 });
     for (const id of [w2.LINK, w2.SPARE, w2.FISH]) {         // put the window back IN the snapshot, pre-fix style
       const c = w2.readCache(id);
       c.ownWindow = { sevenDay: w2.WIN[id], fiveHour: null, scoped: { fable: w2.WIN[id] }, at: Date.now(), source: 'on-demand' };
@@ -1913,8 +1970,26 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
     const before2 = [w2.LINK, w2.SPARE, w2.FISH].map((id) => !!w2.readCache(id).ownWindow);
     for (const id of [w2.LINK, w2.SPARE, w2.FISH]) runTool(preFixTool, w2, id, w2.WIN[id], Math.round(w2.readCache(id).sevenDay.utilization * 100));
     const after2 = [w2.LINK, w2.SPARE, w2.FISH].map((id) => !!w2.readCache(id).ownWindow);
-    ok('§15 NEGATIVE CONTROL: with the window back in the snapshot, one render of the SAME `out` literal deletes all three',
+    ok('§15 NEGATIVE CONTROL: with the window back in the snapshot, one render of the pre-fix `out` literal deletes all three',
       before2.every(Boolean) && after2.every((x) => x === false), JSON.stringify([before2, after2]));
+    // …and the SHIPPED tool, with only the storage reverted, would NOT have —
+    // which is what makes the second reversion load-bearing rather than
+    // decorative (the spread preserves any field it does not measure).
+    {
+      const w3 = mkIncidentWorld();
+      const halfTool = path.join(w3.root, 'vibespace-usage.halffix');
+      fs.writeFileSync(halfTool, shipped.replace(NEEDLE,
+        "const c = JSON.parse(fs.readFileSync(path.join(CACHE_DIR, String(key).replace(/[^\\w.-]/g, '_') + '.json'), 'utf-8')); const w = c && c.ownWindow;"), { mode: 0o755 });
+      for (const id of [w3.LINK]) {
+        const c = w3.readCache(id);
+        c.ownWindow = { sevenDay: w3.WIN[id], fiveHour: null, scoped: { fable: w3.WIN[id] }, at: Date.now(), source: 'on-demand' };
+        w3.writeCache(id, c);
+        fs.rmSync(path.join(w3.cacheDir, readingLag.windowSidecarName(id)), { force: true });
+      }
+      runTool(halfTool, w3, w3.LINK, w3.WIN[w3.LINK], Math.round(w3.readCache(w3.LINK).sevenDay.utilization * 100));
+      ok('§15 …CONTROL for the control: with ONLY the storage reverted, the current `out` shape carries the window through anyway (the two decisions are independent)',
+        !!w3.readCache(w3.LINK).ownWindow, JSON.stringify(Object.keys(w3.readCache(w3.LINK))));
+    }
     const cap2 = quiet();
     w2.am.ensureSessionPoolLink(w2.P, w2.SID, w2.SPARE, { why: 'per-session-switch' });
     w2.am.setPoolTarget(w2.P, w2.SPARE, { why: 'pool-switch' });
@@ -3544,32 +3619,188 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
   }
 }
 
+// ── §18d THE FIRST WRITE, NOT ONLY THE AGGREGATE (r2) ───────────────────────
+// The round-1 verifier's first finding, reproduced. A rejected
+// `rate_limit_event` is written TWICE — once per RECORD the instant it arrives
+// (that write is what makes the pool act in the same tick) and once when the
+// turn ends and the signals are folded. Round 1 put the attribution rule on the
+// second write only, so the incident's own damage still landed at the first.
+//
+// §18's fixture could not see it, because BOTH its rejections name the SAME
+// bucket: the turn-end write of the pin's own 5h happens to overwrite the
+// foreign value the per-record write had just put there. Send the two
+// rejections on DIFFERENT buckets — the shape of a member that walls on its
+// weekly while the NEXT member walls on its five-hour, which is exactly what a
+// mid-turn re-point produces — and the victim keeps a stranger's reset.
+//
+// Measured on the pre-fix module: victim 5h = the OTHER member's window,
+// `accountRemaining` 0, ~3 h of exclusion. That is the incident, after the
+// round-1 fix, in the shape the round-1 test did not cover.
+{
+  const mkTwoBucket = () => {
+    const w = mkWorld();
+    if (!w) return null;
+    const nowS = Math.floor(Date.now() / 1000);
+    const OWN_V5 = nowS + 33 * 60;                   // the victim's own 5h
+    const OWN_V7 = nowS + 3 * 86400;                 // …and its own 7d
+    const OWN_T5 = nowS + 3 * 3600 + 43 * 60;        // the true owner's 5h, 3h10m out
+    w.stampWindow(w.LINK, { sevenDay: OWN_V7, fiveHour: OWN_V5, scoped: {} });
+    w.stampWindow(w.FISH, { sevenDay: null, fiveHour: OWN_T5, scoped: {} });
+    return { w, OWN_V5, OWN_V7, OWN_T5 };
+  };
+  const runTwoBucket = (eng, w, OWN_V7, OWN_T5) => {
+    const rej = (type, r) => eng.recordRateLimitEvent(w.session, {
+      type: 'rate_limit_event',
+      rate_limit_info: { status: 'rejected', rateLimitType: type, utilization: 1, resets_at: r, resetsAt: r },
+    });
+    rej('seven_day', OWN_V7);              // ① the victim's OWN weekly wall — pins the turn on it
+    w.am.ensureSessionPoolLink(w.P, w.SID, w.FISH, { why: 'per-session-switch' }); // ② the link moves mid-turn
+    rej('five_hour', OWN_T5);              // ③ the FIVE-HOUR rejection the new member's credentials earned
+    eng.noteTurnEnd(w.session);
+  };
+
+  const T = mkTwoBucket();
+  if (!T) { ok('§18d SKIP — pool not supported here', true); }
+  else {
+    const cap = quiet();
+    runTwoBucket(T.w.eng, T.w, T.OWN_V7, T.OWN_T5);
+    cap.done();
+    const victim = T.w.readCache(T.w.LINK) || {};
+    const trueOwner = T.w.readCache(T.w.FISH) || {};
+    ok('§18d the victim\'s FIVE-HOUR bucket is never touched by the other member\'s wall (the turn-end pass writes a different bucket, so nothing repairs this one)',
+      Number(victim.fiveHour?.resetsAt) !== T.OWN_T5 && victim.fiveHour?.status !== 'limited',
+      JSON.stringify(victim.fiveHour));
+    ok('§18d …its OWN weekly wall is still marked (the rule refuses a bucket, never a turn)',
+      victim.sevenDay?.utilization === 1 && Number(victim.sevenDay?.resetsAt) === T.OWN_V7, JSON.stringify(victim.sevenDay));
+    ok('§18d …and the five-hour wall is filed on the member whose credentials earned it',
+      Number(trueOwner.fiveHour?.resetsAt) === T.OWN_T5 && trueOwner.fiveHour?.status === 'limited', JSON.stringify(trueOwner.fiveHour));
+
+    // ── ONE WALL, THREE PRODUCERS, ONE MEMBER. The rate_limit_event is the
+    // only one of them that carries a window; both banner paths state no time
+    // at all (`parseLimitBanner` returns `{kind}` — owner ruling: never parse
+    // text for times), so they have no evidence of their own and fall back to
+    // the turn pin. Without the proven re-file they would mark the member this
+    // turn just proved innocent, and ONE rejection would demote TWO members.
+    {
+      const T3 = mkTwoBucket();
+      const cap3 = quiet();
+      T3.w.eng.recordRateLimitEvent(T3.w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'seven_day', utilization: 1, resets_at: T3.OWN_V7, resetsAt: T3.OWN_V7 } });
+      T3.w.am.ensureSessionPoolLink(T3.w.P, T3.w.SID, T3.w.FISH, { why: 'per-session-switch' });
+      T3.w.eng.recordRateLimitEvent(T3.w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', utilization: 1, resets_at: T3.OWN_T5, resetsAt: T3.OWN_T5 } });
+      const beforeBanner = { ...(T3.w.readCache(T3.w.LINK).fiveHour || {}) };
+      T3.w.eng.markLimitBanner(T3.w.session, "You've reached your 5-hour limit");
+      const lines3 = cap3.done();
+      ok('§18d the BANNER for that same wall follows the proven re-file — it states no time of its own, so it may not fall back to the member just proved innocent',
+        T3.w.readCache(T3.w.LINK).fiveHour?.utilization !== 1 && T3.w.readCache(T3.w.FISH).fiveHour?.utilization === 1,
+        `victim=${JSON.stringify(T3.w.readCache(T3.w.LINK).fiveHour)} was=${JSON.stringify(beforeBanner)} owner=${JSON.stringify(T3.w.readCache(T3.w.FISH).fiveHour)}`);
+      ok('§18d …and it SAYS which member it moved to and why', lines3.some((l) => /banner follows this turn's proven re-file/.test(l)), lines3.filter((l) => /\[wall\]/.test(l)).join(' | ').slice(0, 260));
+      T3.w.eng.noteTurnEnd(T3.w.session);
+      ok('§18d …and the proof dies with the turn, like the two pins beside it (a re-point only reaches the CLI on its NEXT request)',
+        !T3.w.session._turnWallRefile, JSON.stringify(T3.w.session._turnWallRefile));
+      // …AND THE MEMBER'S OWN WALL SURVIVES THE BANNER. `demoteWalledAccount`
+      // resolves `member` — and therefore the identity group every earlier
+      // signal is filtered against — from the LAST signal's key, so moving the
+      // banner's SIGNAL to the re-file target silently drops the pin's own
+      // legitimate wall from the whole turn-end pass. (Reproduced while writing
+      // this: the redirect was applied to the signal as well as the write, and
+      // the victim's own weekly wall stopped being demoted at all.) Only the
+      // WRITE follows the proof; the signal keeps the pin's key, and the
+      // turn-end pass reaches the same destination by asking the same proof.
+      {
+        const T5 = mkTwoBucket();
+        const cap5 = quiet();
+        T5.w.eng.recordRateLimitEvent(T5.w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'seven_day', utilization: 1, resets_at: T5.OWN_V7, resetsAt: T5.OWN_V7 } });
+        T5.w.am.ensureSessionPoolLink(T5.w.P, T5.w.SID, T5.w.FISH, { why: 'per-session-switch' });
+        T5.w.eng.recordRateLimitEvent(T5.w.session, { type: 'rate_limit_event', rate_limit_info: { status: 'rejected', rateLimitType: 'five_hour', utilization: 1, resets_at: T5.OWN_T5, resetsAt: T5.OWN_T5 } });
+        T5.w.eng.markLimitBanner(T5.w.session, "You've reached your 5-hour limit");
+        T5.w.eng.noteTurnEnd(T5.w.session);
+        const lines5 = cap5.done();
+        const walled5 = T5.w.eng.sessionWalledMembers(T5.w.SID);
+        ok('§18d …and the pinned member\'s OWN wall still reaches the turn-end pass (the banner moved the WRITE, not the signal that decides whose turn this was)',
+          walled5.has(T5.w.LINK) && walled5.has(T5.w.FISH) && /demoted .* 7d/.test(lines5.join(' | ')),
+          `walled=${JSON.stringify([...walled5])} LINK=${T5.w.LINK} FISH=${T5.w.FISH} :: ${lines5.filter((l) => /demoted/.test(l)).join(' | ')}`);
+        ok('§18d …and the banner did NOT put a second 5h mark back on the pin at turn end (one rejection, one member)',
+          T5.w.readCache(T5.w.LINK).fiveHour?.utilization !== 1 && T5.w.readCache(T5.w.FISH).fiveHour?.utilization === 1,
+          `${JSON.stringify(T5.w.readCache(T5.w.LINK).fiveHour)} / ${JSON.stringify(T5.w.readCache(T5.w.FISH).fiveHour)}`);
+      }
+
+      // CONTROL: with NO proven re-file this turn, the banner marks the pin
+      // exactly as it always has — this is a redirect on proof, not a new rule.
+      {
+        const T4 = mkTwoBucket();
+        const cap4 = quiet();
+        T4.w.eng.markLimitBanner(T4.w.session, "You've reached your 5-hour limit");
+        cap4.done();
+        ok('§18d CONTROL: with no proven re-file the banner marks the turn pin exactly as before',
+          T4.w.readCache(T4.w.LINK).fiveHour?.utilization === 1 && T4.w.readCache(T4.w.FISH).fiveHour?.utilization !== 1,
+          `${JSON.stringify(T4.w.readCache(T4.w.LINK).fiveHour)} / ${JSON.stringify(T4.w.readCache(T4.w.FISH).fiveHour)}`);
+      }
+    }
+
+    // ── NEGATIVE CONTROL: a PATCHED COPY of the product module with the
+    // PER-RECORD call neutered — round 1 exactly, at that one site. The
+    // turn-end rule stays in place, which is the point: it is not enough.
+    {
+      const src = fs.readFileSync(path.join(REPO, 'src/server/usage-pool-engine.js'), 'utf8');
+      const NEEDLE = '      writeKey = wallRecordTarget(session, key, ev);';
+      ok('§18d NEGATIVE CONTROL setup: the per-record call is a single line (the patch must hit it)', src.split(NEEDLE).length === 2);
+      const patched = src.replace(NEEDLE, '      writeKey = key;  // PRE-FIX: the per-record write asked nothing');
+      const T2 = mkTwoBucket();
+      const mutFile = path.join(REPO, 'src/server/vs-readattr-mut-' + process.pid + '-18d.js');
+      fs.writeFileSync(mutFile, patched);
+      mutants.push(mutFile);
+      const eng2 = require(mutFile).create({
+        app: { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} },
+        rootDir: T2.w.root, USAGE_CACHE_DIR: T2.w.cacheDir, activeSessions: T2.w.sessions,
+        wss: { clients: new Set() }, WS_OPEN: 1, broadcastToSession() { }, serverNotice() { },
+        serverSetting: () => undefined, getAccounts: () => T2.w.am, getHosts: () => null, getUsageHistory: () => null,
+        recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
+        getAutoResume: () => null, getOtelIngest: () => ({ observedOrgFor: () => null }), getQuotaProbe: () => null,
+      });
+      const cap2 = quiet();
+      runTwoBucket(eng2, T2.w, T2.OWN_V7, T2.OWN_T5);
+      cap2.done();
+      const v2 = T2.w.readCache(T2.w.LINK) || {};
+      ok('§18d NEGATIVE CONTROL: with only the turn-end rule, the FOREIGN five-hour window really does stay on the victim (the incident, after round 1)',
+        Number(v2.fiveHour?.resetsAt) === T2.OWN_T5 && v2.fiveHour?.status === 'limited',
+        `pre-fix victim 5h=${JSON.stringify(v2.fiveHour)} foreign=${T2.OWN_T5} own=${T2.OWN_V5}`);
+      ok('§18d NEGATIVE CONTROL: …and that is money — the pool reads the victim as having no headroom until a window that is not its own',
+        (() => {
+          const { accountRemaining } = require(path.join(REPO, 'src/account-pool-auto.js'));
+          const rem = accountRemaining(v2, {});
+          return rem && rem.remaining === 0 && rem.known === true;
+        })(), JSON.stringify(require(path.join(REPO, 'src/account-pool-auto.js')).accountRemaining(v2, {})));
+    }
+  }
+}
+
 // ── §18b THE RULE'S OWN BOUNDARIES, on the real engine ──────────────────────
 // Each leg removes ONE input and asserts the rule falls back rather than
 // guessing — an over-eager version of this fix would archive every exhaustion
 // mark on the instance, which is what `guardReadingTarget` warned about when it
-// exempted walls in the first place.
+// exempted walls in the first place. Every case names its BUCKET KIND, because
+// since r2 that is what decides how much the window's refutation is worth.
 {
   const nowS = Math.floor(Date.now() / 1000);
   const cases = [
     ['a banner states no reset ⇒ the pin stands (parseLimitBanner returns {kind} only)',
-      { statedResetsAt: null, pinnedKey: 'A', pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
+      { kind: 'sevenDay', statedResetsAt: null, pinnedKey: 'A', pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
     ['the pin\'s own window does not contradict ⇒ the pin stands',
-      { statedResetsAt: nowS + 1800, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
+      { kind: 'sevenDay', statedResetsAt: nowS + 1800, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
     ['the pin has NO established window ⇒ no evidence, no refusal',
-      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: null, atSec: nowS }, 'write', 'A'],
+      { kind: 'sevenDay', statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: null, atSec: nowS }, 'write', 'A'],
     ['the pin\'s window had already ENDED ⇒ it may legitimately have moved',
-      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS - 10, atSec: nowS }, 'write', 'A'],
+      { kind: 'sevenDay', statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS - 10, atSec: nowS }, 'write', 'A'],
     ['refuted but the ledger is silent ⇒ write NOWHERE (refusing never mis-files)',
-      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: null, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
+      { kind: 'sevenDay', statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: null, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
     ['refuted but the ledger only answers for the POOL DEFAULT ⇒ not an answer about this conversation',
-      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: false, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
+      { kind: 'sevenDay', statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: false, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
     ['the two witnesses disagree (ledger names the pin) ⇒ write NOWHERE',
-      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'A', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
+      { kind: 'sevenDay', statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'A', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'archive', null],
     ['the candidate\'s OWN window contradicts it too ⇒ write NOWHERE',
-      { statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, ledgerOwnResetsAt: nowS + 1200, atSec: nowS }, 'archive', null],
+      { kind: 'sevenDay', statedResetsAt: nowS + 9999, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, ledgerOwnResetsAt: nowS + 1200, atSec: nowS }, 'archive', null],
     ['±120 s is the same window, not a contradiction (the panel-vs-event wobble)',
-      { statedResetsAt: nowS + 1800 + 60, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
+      { kind: 'sevenDay', statedResetsAt: nowS + 1800 + 60, pinnedKey: 'A', ledgerKey: 'B', ledgerIsSessionScoped: true, pinnedOwnResetsAt: nowS + 1800, atSec: nowS }, 'write', 'A'],
   ];
   for (const [what, args, action, key] of cases) {
     const d = quotaModel.wallAttribution(args);
@@ -3577,6 +3808,85 @@ const mkIncidentWorld = ({ stampWindows = true } = {}) => {
   }
   ok('§18b the wall tolerance IS reading-lag\'s, not a second opinion',
     quotaModel.WINDOW_JITTER_SEC === 120, String(quotaModel.WINDOW_JITTER_SEC));
+}
+
+// ── §18c NOT EVERY WINDOW REFUTES EQUALLY WELL (r2, measured) ───────────────
+// Round 1 let ANY window kind refuse a wall on its own. Re-measured with the
+// predicate the rule actually uses — each reading against its account's own
+// last `on-demand` stamp, which is what `establishedWindows()` serves and can
+// be hours old — over all 7798 claude anchor rows on this instance, with the
+// empty-window fence applied:
+//
+//              own producer          session producers   of the refuted:
+//              (cannot be mis-filed)                     ANOTHER account's window
+//   7d           0 / 4109              0 / 1160            —
+//   scoped       0 / 4029              0 /  700            —
+//   5h          13 / 1706  (0.76 %)  137 / 1055 (12.99 %)  101 (73.72 %)
+//
+// A weekly window has never once contradicted its own account. A five-hour one
+// contradicts it 13 times — all of them ONE account alternating A-B-A-B between
+// two resets 90 minutes apart at a constant 0.89 utilization, which is B-9213
+// inside the plan bucket rather than a window moving — and three quarters of
+// the readings it refutes state another account's own window at that instant,
+// i.e. are true positives. So a 5h refutation is EVIDENCE, and only the weekly
+// one is PROOF.
+//
+// The asymmetry matters in exactly one place, and it is a MONEY place: when
+// nothing else is identified, a refusal is not the free conservative option it
+// looks like. A wall that never lands leaves the pool sending turns to a member
+// the CLI has just refused. At 13 % of 5h walls that would have bought the
+// panel fix with a new leak.
+{
+  const nowS = Math.floor(Date.now() / 1000);
+  const strengths = [['sevenDay', 'decisive'], ['scoped', 'decisive'], ['weekly', 'decisive'], ['7d', 'decisive'],
+  ['fiveHour', 'corroborating'], ['5h', 'corroborating'], ['other', 'none'], [null, 'none'], ['', 'none']];
+  ok('§18c the strength is a function of the WINDOW KIND and nothing else',
+    strengths.every(([k, s]) => quotaModel.refutationStrength(k) === s),
+    JSON.stringify(strengths.map(([k]) => [k, quotaModel.refutationStrength(k)])));
+
+  const refuted = (kind, extra) => quotaModel.wallAttribution({
+    kind, statedResetsAt: nowS + 9999, pinnedKey: 'A', pinnedOwnResetsAt: nowS + 1800, atSec: nowS, ...extra,
+  });
+  // ① nothing else identified: the two kinds part company
+  const w7 = refuted('sevenDay', { ledgerKey: null });
+  const w5 = refuted('fiveHour', { ledgerKey: null });
+  ok('§18c a WEEKLY refutation refuses on its own (0 false refutations in 9998 judged readings)',
+    w7.action === 'archive' && w7.key === null, JSON.stringify(w7));
+  ok('§18c a FIVE-HOUR refutation does NOT — the pin stands, because refusing a wall costs money too',
+    w5.action === 'write' && w5.key === 'A' && w5.disagrees === true, JSON.stringify(w5));
+  ok('§18c …and it SAYS so rather than passing silently (the disagreement is the incident\'s own shape)',
+    /five-hour reset is only corroborating evidence/.test(w5.reason), w5.reason);
+  const p7 = refuted('sevenDay', { ledgerKey: 'A', ledgerIsSessionScoped: true });
+  const p5 = refuted('fiveHour', { ledgerKey: 'A', ledgerIsSessionScoped: true });
+  ok('§18c the same split when the ledger names the PIN (witnesses disagree)',
+    p7.action === 'archive' && p5.action === 'write' && p5.key === 'A', JSON.stringify([p7.action, p5.action]));
+
+  // ② the ledger identifies somebody else: BOTH kinds corroborate and re-file.
+  //    This is the incident, and it is a FIVE-HOUR wall — so restricting the
+  //    weekly half to 'decisive' must not cost the fix its own case.
+  const r5 = refuted('fiveHour', { ledgerKey: 'B', ledgerIsSessionScoped: true, ledgerOwnResetsAt: nowS + 9999 });
+  const r7 = refuted('sevenDay', { ledgerKey: 'B', ledgerIsSessionScoped: true, ledgerOwnResetsAt: nowS + 9999 });
+  ok('§18c a five-hour window may CORROBORATE an identification the ledger made independently (this is inc-mttbrtc0-6049)',
+    r5.action === 'refile' && r5.key === 'B', JSON.stringify(r5));
+  ok('§18c …exactly as a weekly one does (the strength changes what it may do ALONE, never what two witnesses may do)',
+    r7.action === 'refile' && r7.key === 'B', JSON.stringify(r7));
+
+  // ③ an unmeasured kind refutes NOTHING. A new backend's bucket has to earn
+  //    'decisive' with its own measurement, never inherit claude's.
+  const un = refuted('credits', { ledgerKey: 'B', ledgerIsSessionScoped: true, ledgerOwnResetsAt: nowS + 9999 });
+  ok('§18c an UNMEASURED window kind refutes nothing at all — unknown is not a licence',
+    un.action === 'write' && un.key === 'A' && /nothing is measured/.test(un.reason), JSON.stringify(un));
+
+  // NEGATIVE CONTROL: round 1's rule, which had no notion of strength. Driven
+  // through the SAME entry point by handing it the kind the old code implied
+  // (it never asked), so this is the behaviour that shipped, not my memory of
+  // it: every one of the three "nothing else identified" cases archived.
+  const round1 = (extra) => quotaModel.wallAttribution({
+    kind: 'sevenDay', statedResetsAt: nowS + 9999, pinnedKey: 'A', pinnedOwnResetsAt: nowS + 1800, atSec: nowS, ...extra,
+  });
+  ok('§18c NEGATIVE CONTROL: with no strength (round 1 = every kind decisive) the 5h cases archive instead',
+    round1({ ledgerKey: null }).action === 'archive' && round1({ ledgerKey: 'A', ledgerIsSessionScoped: true }).action === 'archive',
+    'the strength split is what changes these two, and only these two');
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

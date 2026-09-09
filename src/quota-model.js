@@ -692,20 +692,54 @@ function fromLegacy(legacy, { identity = null, source = null, fetchedAt = null, 
 // anybody. Refutation needs no uniqueness, which is exactly why the r2
 // measurement does not bite here.
 //
-// AND REFUTATION ALONE IS NOT ENOUGH TO MOVE A READING. Measured over every
-// anchor stream on this instance (comparisons where the previous stated reset
-// was still in the future at the next reading): a RUNNING 5h reset moves >120 s
-// in 4.31 % of consecutive readings (105 of 2434) and a running 7d in 1.46 %
-// (99 of 6783) — while an EMPTY one moves in 32.97 % / 41.13 %, which is B-8b12
-// and is why `windowState` fences empty windows off first. Inspected, that
-// running-window residue is dominated by two things that are not "the window
-// moved": the limit banner's own bounded GUESS (`now + 5h`, written when the
-// banner states no time — this rule refuses to read a guess as evidence) and
-// the A-B-A signature of THIS defect (a foreign reading lands and the account's
-// own next reading puts it straight back: ident-604088's `+11400s` wall
-// followed by `-11400s` on-demand is the incident itself). We do not get to
-// call the residue zero, so refutation may REFUSE but may never, by itself,
-// choose a new home.
+// BUT NOT EVERY WINDOW REFUTES EQUALLY WELL, AND THE DIFFERENCE IS MEASURED
+// (r2, the round-1 verifier's second finding — round 1 asserted the residue was
+// small and cited a number measured on a DIFFERENT quantity: the drift between
+// two CONSECUTIVE readings seconds apart, not the drift between a reading and
+// its account's own on-demand stamp, which is what this rule actually compares
+// and which can be hours old). Re-measured with the predicate the rule uses,
+// over every claude anchor stream on this instance (7798 rows, the empty-window
+// fence already applied, each account judged against its OWN last `on-demand`
+// stamp — the only producer that writes the `.window-` sidecar):
+//
+//                       judged   refuted   of the refuted: states ANOTHER
+//                                          account's own window at that instant
+//   7d   own producer     4109      0        —
+//        session prod.    1160      0        —
+//   scoped own producer   4029      0        —
+//        session prod.     700      0        —
+//   5h   own producer     1706     13 0.76%  —
+//        session prod.    1055    137 12.99%  101 = 73.72 %
+//
+// Read that table carefully, because it says two different things:
+//
+//  · A WEEKLY window (7d and every model-scoped bucket) never once contradicted
+//    its own account, in 9998 judged readings across seven identities and a
+//    month. It is a DECISIVE refuter, which is the same conclusion 2.369.73 r2
+//    reached from the other direction when it made the weekly phase the only
+//    identity evidence.
+//  · A FIVE-HOUR window is EVIDENCE, not proof. Three quarters of the readings
+//    it refutes state another account's own window at that very instant — those
+//    are true positives, mis-filings of exactly the kind this rule exists to
+//    catch — but a residue remains, and the honest bound on it is the OWN
+//    PRODUCER row: 13 readings where an account's own `/usage` panel, which
+//    cannot be mis-filed (its key and its credential dir are one decision),
+//    stated a 5h reset its own previous stamp contradicts. Inspected, all 13 are
+//    one account alternating A-B-A-B between two resets 90 minutes apart at a
+//    constant 0.89 utilization — which is not "a window moved" but B-9213 in the
+//    plan bucket: more than one limit collapsed into one field. Until that is
+//    modelled per limit end to end we do not get to call the residue zero.
+//
+// THEREFORE, REFUTATION HAS A STRENGTH, AND IT IS THE WINDOW KIND'S (see
+// `refutationStrength`). A weekly refutation may REFUSE the write on its own. A
+// five-hour refutation may only CORROBORATE an identification the ledger made
+// independently; on its own it leaves the pin exactly where it was and SAYS so.
+// The asymmetry is the point: refusing a wall is not free either — an
+// exhaustion mark that never lands means the pool keeps sending turns to a
+// member the CLI has just refused, which is the same money in the other
+// direction, and it is what `guardReadingTarget` warned about when it exempted
+// walls in the first place. A 13 % false-refusal rate on 5h walls would have
+// bought the panel fix with a new leak.
 //
 // THEREFORE: TWO INDEPENDENT WITNESSES. The identification comes from the
 // LEDGER — `slotAt(sessionKeys, signal.at)`, our own first-class record of
@@ -739,9 +773,40 @@ function windowRefutes(ownResetsAt, statedResetsAt, { atSec = null, jitterSec = 
   return Math.abs(own - stated) > jitterSec;
 }
 
+/** HOW MUCH IS A REFUTATION BY THIS WINDOW WORTH? (r2, measured — the table is
+ *  in the essay above.) Deliberately a FUNCTION OF THE WINDOW KIND and nothing
+ *  else, so the answer cannot vary with the caller's mood:
+ *
+ *   'decisive'      — a WEEKLY window (7d, and every model-scoped bucket, which
+ *                     is weekly by construction). 0 contradictions in 9998
+ *                     judged readings on this instance's whole corpus. It may
+ *                     REFUSE a write on its own.
+ *   'corroborating' — the FIVE-HOUR window. 73.72 % of the readings it refutes
+ *                     state another account's own window at that instant (true
+ *                     positives), but its own account's own panel contradicted
+ *                     itself 13 times in 1706 readings. It may confirm an
+ *                     identification the LEDGER made independently; it may
+ *                     never, alone, refuse a wall.
+ *   'none'          — a kind we have measured nothing about. Unknown is not a
+ *                     licence: no evidence, no refusal (P6).
+ *
+ *  A NEW KIND LANDS IN 'none' BY DEFAULT, on purpose. The next backend's bucket
+ *  must earn 'decisive' with its own measurement, not inherit one taken on
+ *  claude's weekly window. */
+function refutationStrength(kind) {
+  const k = lower(kind);
+  if (k === 'sevenday' || k === '7d' || k === 'scoped' || k === 'weekly') return 'decisive';
+  if (k === 'fivehour' || k === '5h') return 'corroborating';
+  return 'none';
+}
+
 /** WHERE DOES THIS WALL BELONG? PURE, and deliberately conservative: it can
  *  only ever return the pin, one specific other member, or "write nowhere".
  *
+ * @param {string} kind                 the BUCKET this rejection named
+ *        ('fiveHour' | 'sevenDay' | 'scoped'). It selects how much the window's
+ *        refutation is worth — see `refutationStrength`. An unmeasured kind
+ *        refutes nothing at all.
  * @param {number|null} statedResetsAt  the reset the REJECTION stated (seconds).
  *        null/0 = the producer had none (the limit banner states no time —
  *        `parseLimitBanner` returns `{kind}` only) ⇒ no window evidence exists
@@ -757,32 +822,49 @@ function windowRefutes(ownResetsAt, statedResetsAt, { atSec = null, jitterSec = 
  * @returns {{action:'write'|'refile'|'archive', key:string|null, reason:string}}
  */
 function wallAttribution({
-  statedResetsAt = null, pinnedKey = null, ledgerKey = null, ledgerIsSessionScoped = false,
+  kind = null, statedResetsAt = null, pinnedKey = null, ledgerKey = null, ledgerIsSessionScoped = false,
   pinnedOwnResetsAt = null, ledgerOwnResetsAt = null, atSec = null, jitterSec = WINDOW_JITTER_SEC,
 } = {}) {
   const pin = str(pinnedKey) || null;
   if (!pin) return { action: 'archive', key: null, reason: 'no pinned target' };
   const stated = posNum(statedResetsAt);
   if (stated == null) return { action: 'write', key: pin, reason: 'the rejection states no reset — no window evidence' };
+  const strength = refutationStrength(kind);
+  if (strength === 'none') {
+    return { action: 'write', key: pin, reason: `nothing is measured about a '${str(kind) || 'null'}' window's stability, so it refutes nothing (no evidence, no refusal)` };
+  }
   if (!windowRefutes(pinnedOwnResetsAt, stated, { atSec, jitterSec })) {
     return { action: 'write', key: pin, reason: 'the pinned member\'s own window does not contradict this reset' };
   }
   // The pin is REFUTED. Identification is the ledger's job, never this window's.
   const led = str(ledgerKey) || null;
-  if (!led || !ledgerIsSessionScoped) {
-    return { action: 'archive', key: null, reason: `this reset (${stated}) contradicts the pinned member's own unexpired window (${posNum(pinnedOwnResetsAt)}), and the slot ledger cannot say who held the link` };
+  const identified = !!led && ledgerIsSessionScoped && led !== pin;
+  if (identified) {
+    if (windowRefutes(ledgerOwnResetsAt, stated, { atSec, jitterSec })) {
+      return { action: 'archive', key: null, reason: `this reset (${stated}) contradicts BOTH the pinned member's and the ledger's candidate's own windows` };
+    }
+    return { action: 'refile', key: led, reason: `the link moved to this member at ${atSec}s and its own window does not contradict the stated reset (${stated})` };
   }
-  if (led === pin) {
-    // The ledger agrees with the pin, so the two witnesses DISAGREE with each
-    // other: one of them is wrong and we cannot tell which. Refuse the write —
-    // the harm this rule exists to stop is writing a foreign window onto a
-    // member, and doing nothing never does that.
-    return { action: 'archive', key: null, reason: `this reset (${stated}) contradicts the member's own unexpired window (${posNum(pinnedOwnResetsAt)}) but the ledger names that same member` };
+  // NOBODY ELSE IS IDENTIFIED. What happens now is the whole point of measuring
+  // the window kinds separately (r2): a refusal is not the free, conservative
+  // option it looks like — a wall that never lands leaves the pool sending
+  // turns to a member the CLI has just refused.
+  if (strength === 'decisive') {
+    return {
+      action: 'archive', key: null,
+      reason: led === pin
+        // Both witnesses spoke and they contradict each other: one of them is
+        // wrong and we cannot tell which. Refuse — the harm this rule exists to
+        // stop is writing a foreign window onto a member, and doing nothing
+        // never does that.
+        ? `this reset (${stated}) contradicts the member's own unexpired window (${posNum(pinnedOwnResetsAt)}) but the ledger names that same member`
+        : `this reset (${stated}) contradicts the pinned member's own unexpired window (${posNum(pinnedOwnResetsAt)}), and the slot ledger cannot say who held the link`,
+    };
   }
-  if (windowRefutes(ledgerOwnResetsAt, stated, { atSec, jitterSec })) {
-    return { action: 'archive', key: null, reason: `this reset (${stated}) contradicts BOTH the pinned member's and the ledger's candidate's own windows` };
-  }
-  return { action: 'refile', key: led, reason: `the link moved to this member at ${atSec}s and its own window does not contradict the stated reset (${stated})` };
+  return {
+    action: 'write', key: pin, disagrees: true,
+    reason: `this reset (${stated}) contradicts the pinned member's own unexpired window (${posNum(pinnedOwnResetsAt)}), but a five-hour reset is only corroborating evidence (measured: its own account's panel contradicts itself too) and nothing else is identified — the pin stands`,
+  };
 }
 
 module.exports = {
@@ -802,7 +884,7 @@ module.exports = {
   // panels
   orderLimits, limitLabel, limitState,
   // the wall's own attribution (inc-mttbrtc0-6049)
-  windowRefutes, wallAttribution,
+  windowRefutes, refutationStrength, wallAttribution,
   // legacy bridge
   toLegacyView, fromLegacy, legacyWindowLimit,
 };

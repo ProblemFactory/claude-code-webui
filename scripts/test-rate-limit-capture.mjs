@@ -141,8 +141,26 @@ fs.rmSync(dir, { recursive: true, force: true });
   // credentials produced it), so the pin allows the extra arguments while still
   // requiring the two resolvers and the same rejected/allowed split.
   ok(/const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session[^;]*\);/.test(eng), '⑥ rate_limit_event: rejection AND reading both resolve a credential slot (turn-pinned twins)');
-  ok(/const target = guardReadingTarget\(key, win, \{ session/.test(eng) && /if \(!target\) return;/.test(eng), '⑥ …and a READING is additionally checked against the target\'s own established window before it is written (never a rejection: its resetsAt is often a bounded guess)');
-  ok(/const key = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng), '⑥ limit-banner marks land on the slot too (same physics, same resolver)');
+  ok(/const target = guardReadingTarget\(key, win, \{ session/.test(eng) && /if \(!target\) return;/.test(eng), '⑥ …and a READING is checked against the target\'s own established window before it is written (guardReadingTarget — the VALUE half)');
+  // 2026-09-09 r2: a REJECTION is judged too, by its own rule. It cannot go
+  // through `guardReadingTarget` (that one judges by the weekly window a
+  // reading carries, and a rejection deliberately hands it no `win` at all) —
+  // it goes through `wallRecordTarget`, the same two-witness rule the turn-end
+  // aggregate asks, at the same moment the number is written. Round 1 guarded
+  // only the aggregate and the incident's foreign window still landed.
+  ok(/writeKey = wallRecordTarget\(session, key, ev\);/.test(eng) && /if \(!writeKey\) \{/.test(eng)
+    && /captureRateLimitEvent\(\{ cacheDir: USAGE_CACHE_DIR, key: writeKey,/.test(eng),
+    '⑥ …and a REJECTION is judged at the SAME write, by the wall rule (it carries no window for guardReadingTarget to read)');
+  ok(/const pinKey = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng), '⑥ limit-banner marks land on the slot too (same physics, same resolver)');
+  // 2026-09-09 r2: the banner's WRITE may follow a re-file a rejection RECORD
+  // of the same turn PROVED (it states no time of its own, so leaving it on the
+  // refuted member marks two members for one rejection) — but its SIGNAL keeps
+  // the pin's key, because demoteWalledAccount resolves `member` (and the
+  // identity group every earlier signal is filtered against) from the LAST
+  // signal, and moving it drops the pinned member's own wall from the pass.
+  ok(/session\._turnWallRefile;\s*\n\s*if \(refile && refile\.from === key && refile\.to\) \{/.test(eng)
+    && /noteWallSignal\(session, \{ bucket: hit\.kind[^}]*key: pinKey,/.test(eng),
+    '⑥ …the banner\'s WRITE follows a proven re-file while its SIGNAL keeps the pin (moving the signal drops the pinned member\'s own wall)');
   ok(/function resolveUsageKey\(session\)[\s\S]{0,900}sessionBillingMember\(session, acct\)\.id/.test(eng), '⑥ VALUES follow the credential slot as well — there is no longer a "reading member" different from the billing member');
   ok(/\(prev\.source \|\| 'unknown'\) === \(g\.cache\.source \|\| 'unknown'\)/.test(eng), '⑥ calib pairs are same-source (cross-source offset is attribution, not prediction error — mirrors extractPairs 2.340.0)');
   const sv = fs2.readFileSync(new URL('../server.js', import.meta.url), 'utf8');

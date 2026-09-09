@@ -1091,7 +1091,20 @@ if (!probe) {
   // window to the resolver — the lag shadow and the window guard are strictly
   // ADDITIONAL evidence about which credentials produced it, so the pin widens
   // to allow the extra arguments while still requiring the same two resolvers.
-  ok('WIRING: BOTH a rejection and a reading are keyed to the credential slot, each turn-pinned', /const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session[^;]*\);[\s\S]{0,300}key = \(slot && slot\.key\) \|\| usageCacheKeyFor\(session\);/.test(eng) && /const slot = rejectionSlotFor\(session\);\s*\n\s*const key = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng));
+  // (2026-09-09 r2: the banner's `key` became a `let`, because a rejection
+  // RECORD of the same turn can PROVE the wall belongs elsewhere and the
+  // banner — which states no time of its own — has to follow that proof or one
+  // rejection marks two members. The pin therefore also demands that the ONLY
+  // thing allowed to move it is that proven re-file, so a third way of choosing
+  // the banner's target goes red here.)
+  ok('WIRING: BOTH a rejection and a reading are keyed to the credential slot, each turn-pinned', /const slot = ev\.status === 'rejected' \? rejectionSlotFor\(session\) : readingSlotFor\(session[^;]*\);[\s\S]{0,300}key = \(slot && slot\.key\) \|\| usageCacheKeyFor\(session\);/.test(eng) && /const slot = rejectionSlotFor\(session\);\s*\n\s*const pinKey = slot\.key \|\| readingSlotFor\(session\)\.key \|\| usageCacheKeyFor\(session\)/.test(eng));
+  ok('WIRING: …and the ONLY thing that may move the banner off that pin is a re-file this turn PROVED (the banner states no time, so it has no evidence of its own)',
+    (() => {
+      const b = eng.slice(eng.indexOf('const pinKey = slot.key || readingSlotFor(session).key'));
+      const body = b.slice(0, b.indexOf('const corr = corroborateReading(session, key,'));
+      const assigns = (body.match(/(?<![.\w$])key\s*=(?!=)[^;]*/g) || []).filter((a) => !/^key\s*=\s*pinKey$/.test(a.trim()));
+      return assigns.length === 1 && /^key\s*=\s*refile\.to$/.test(assigns[0].trim()) && /session\._turnWallRefile/.test(body);
+    })(), 'assignments between the pin and the write');
   ok('WIRING: the refuted resolver is GONE from executable code (comments keep the record)', !/\borgVerifiedKey\b/.test(engCode) && /REFUTED AND REMOVED: `orgVerifiedKey/.test(eng));
   // wallSlotFor is the FRESH reading; it now has exactly THREE readers —
   // wallKeyFor, the rejection pin's no-signal fallback, and the reading pin's
@@ -1099,7 +1112,28 @@ if (!probe) {
   // record, goes red here.
   ok('WIRING: NOTHING resolves the slot per RECORD any more — wallSlotFor has exactly three readers (wallKeyFor + the two turn pins\' fallbacks)', (eng.match(/wallSlotFor\(session\)/g) || []).length === 4 && /function wallKeyFor\(session\) \{ return wallSlotFor\(session\)\.key; \}/.test(eng) && /if \(first\) return \{ key: first\.key, slotOk: !!first\.slot, slotReason: 'turn-pinned' \};[\s\S]{0,60}return wallSlotFor\(session\);/.test(eng) && /const fresh = wallSlotFor\(session\);/.test(eng), 'wallSlotFor(session) refs: ' + (eng.match(/wallSlotFor\(session\)/g) || []).length);
   ok('WIRING: the READING pin dies with the turn, exactly like the rejection pin', /session\._turnWallSigs = \[\]; session\._turnWorkAfterSig = 0;[\s\S]{0,400}session\._turnReadingSlot = null;/.test(eng));
-  ok('WIRING: both wall signals carry the slot verdict taken AT REJECTION TIME (the link moves before the turn ends)', (eng.match(/noteWallSignal\(session, \{[^}]*slot: !!slot/g) || []).length === 2 && /sigs\.some\(\(x\) => x && x\.slot && \(!x\.key \|\| ids\.has\(x\.key\)\)\)/.test(eng));
+  // THE MECHANISM, NOT THE COUNT (r2). This used to require EXACTLY TWO call
+  // sites carrying `slot:`, which froze HOW MANY claude rejection paths exist
+  // rather than what each of them must do — and the r2 wall-attribution fix
+  // added a third (the branch that archives a rejection instead of writing it,
+  // where the session is still blocked and the signal must still be recorded).
+  // The invariant is that no wall signal may resolve the slot FRESHLY: every
+  // one of them carries the turn-pinned `slot` variable its own path already
+  // took, because the link moves before the turn ends.
+  {
+    const calls = eng.match(/noteWallSignal\(session, \{[^}]*\}\)/g) || [];
+    const withSlot = calls.filter((c) => /\bslot:/.test(c));
+    ok('WIRING: every wall signal that states a slot verdict took it AT REJECTION TIME (the turn-pinned variable, never a fresh resolution)',
+      calls.length >= 3 && withSlot.length >= 3 && withSlot.every((c) => /slot: !!slot\??\.slotOk/.test(c))
+      && !calls.some((c) => /wallSlotFor\(|sessionBillingMember\(/.test(c))
+      && /sigs\.some\(\(x\) => x && x\.slot && \(!x\.key \|\| ids\.has\(x\.key\)\)\)/.test(eng),
+      `${calls.length} call sites, ${withSlot.length} stating a slot`);
+    // …and the codex paths, which have no credential slot to state, say so by
+    // carrying a LANE instead — so "no slot" is a shape, never an omission.
+    ok('WIRING: …and a call site with no slot to state carries its lane instead (never nothing)',
+      calls.filter((c) => !/\bslot:/.test(c)).every((c) => /\blane:/.test(c)),
+      calls.filter((c) => !/\bslot:/.test(c) && !/\blane:/.test(c)).join(' | ').slice(0, 200));
+  }
   ok('WIRING: EVERY decision — blocking and value — reads sessionBillingMember; the observation routes nothing', (eng.match(/sessionBillingMember\(/g) || []).length >= 6 && /acct = sessionBillingMember\(session, acct\)\.id \|\| acct;/.test(eng) && !/sessionReadingMember/.test(engCode) && !/sessionCurrentMember/.test(eng));
   ok('WIRING: the per-session switch excludes members that already rejected this conversation', /const rejected = \[\.\.\.sessionWalledMembers\(sid, now\)\];[\s\S]{0,400}exclude: rejected/.test(eng));
   ok('WIRING: the verdict cannot answer `usable` through a member that rejected this session', /const walled = session \? sessionWalledMembers\(session\._webuiId\) : new Set\(\);[\s\S]{0,600}walled\.has\(m\.id\) && v\.usable !== false/.test(eng));

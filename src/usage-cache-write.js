@@ -84,14 +84,47 @@ function backendOfCacheObject(obj) {
  *  when the file already has one; otherwise lifts the legacy view (which is
  *  what every file written before this module holds).
  *
+ *  A CLAUDE ARRAY WITH NO `plan` LIMIT TAKES ITS PLAN LIMIT FROM THE LEGACY
+ *  VIEW (r2). For claude the legacy buckets ARE the plan limit — `fromLegacy`
+ *  builds exactly that — and there is one producer that can state them without
+ *  being able to state anything else: the shipped statusline, a single file on
+ *  hosts with no checkout, which measures `rate_limits` and nothing more.
+ *  Round 1 let it rebuild the whole object from a hand-written preserve list
+ *  that did not name `limits`, so one ordinary render deleted the canonical
+ *  half of every claude snapshot (reproduced against the real tool). The fix is
+ *  not a longer preserve list — that list is the tool that has failed six times
+ *  on this one file. The tool now keeps every limit it did not measure and
+ *  DROPS the one it did, leaving its reading in the legacy buckets it has
+ *  always written; this rung puts the plan limit back, stamped with that
+ *  object's own `source`/`fetchedAt`, which are the statusline's own and are
+ *  therefore the only provenance it is entitled to. A producer that cannot
+ *  express a window state or another limit's age can never forge one.
+ *
  *  `familyOf` is INJECTED (src/model-family.js) — quota-model is PURE and this
  *  module must not decide the family vocabulary either. */
 function liftCacheObject(obj, { identity = null, backend = null, familyOf = null, measuredAt = null } = {}) {
   if (!obj || typeof obj !== 'object') return quotaModel.makeLimitSet({ identity });
+  const be0 = backend || backendOfCacheObject(obj);
   if (Array.isArray(obj.limits)) {
-    return quotaModel.makeLimitSet({ identity, fetchedAt: obj.fetchedAt, source: obj.source, limits: obj.limits });
+    const set = quotaModel.makeLimitSet({ identity, fetchedAt: obj.fetchedAt, source: obj.source, limits: obj.limits });
+    // Scoped to claude on purpose: codex names its limits itself ('codex',
+    // 'codex_bengalfox', 'premium') and none of them is called 'plan', so a
+    // backend-blind rung would invent a plan limit on every codex file.
+    if (be0 !== 'codex' && !set.limits.some((l) => l && l.limitId === 'plan')) {
+      const { CLAUDE_EXTRA_KEYS } = require('./harnesses/claude-quota.js');
+      const legacy = quotaModel.fromLegacy(obj, {
+        identity, source: obj.source || null, fetchedAt: Number(measuredAt) || Number(obj.fetchedAt) || null,
+        limitId: 'plan', familyOf, extraKeys: CLAUDE_EXTRA_KEYS,
+      });
+      const plan = legacy.limits.find((l) => l && l.limitId === 'plan');
+      // Only when the legacy view actually STATES something. An account whose
+      // plan limit is genuinely absent (no buckets at all) keeps it absent —
+      // this rung restores a reading, it does not manufacture one.
+      if (plan && plan.windows.length) return quotaModel.makeLimitSet({ ...set, limits: [plan, ...set.limits] });
+    }
+    return set;
   }
-  const be = backend || backendOfCacheObject(obj);
+  const be = be0;
   const at = Number(measuredAt) || Number(obj.fetchedAt) || null;
   if (be === 'codex') {
     const { limitSetFromSnapshot } = require('./harnesses/codex-quota.js');

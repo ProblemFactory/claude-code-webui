@@ -38,6 +38,11 @@ const { familyOfScopedBucket } = require(path.join(ROOT, 'src/model-family.js'))
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓', m); } else { fail++; console.log('  ✗', m); } };
+// scratch dirs this suite makes (mkdtemp, never a fixed /tmp name — the fast tier
+// forbids a suite claiming a machine-global path); swept on exit so a run that
+// drives the shipped tool repeatedly does not leave a directory per assert.
+const tmpDirs = [];
+process.on('exit', () => { for (const d of tmpDirs) { try { fs.rmSync(d, { recursive: true, force: true }); } catch { } } });
 const eq = (a, b, m) => ok(JSON.stringify(a) === JSON.stringify(b), `${m} — got ${JSON.stringify(a)}`);
 
 // ── the CORPUS: real payload shapes, anonymised ─────────────────────────────
@@ -348,7 +353,7 @@ console.log('\n⑨ backend shape detection is by FIELDS, never by key name');
       ["src/server/spend-guard.js", "the P4 spend ceiling (2.369.81): it READS a usage-cache object through an injected dep (deps.readCacheFor, for the overage verdict) and its own writeJsonAtomic writes data/spend-budget.json — the persisted per-identity budget, a different store"],
       ["src/usage-anchors.js", "writes the ANCHOR streams (data/usage-anchors/*.ndjson) — a different store, fed BY cache writes"],
       ["src/ws-create.js", "names VIBESPACE_USAGE_CACHE when shipping the remote tools; it writes session state"],
-      ['data/bin/vibespace-usage', 'the SHIPPED statusline tool: a single file on hosts with no checkout, so it cannot require src/ — the same documented exception as vibespace-usage-scan, and it mirrors the RULES it needs byte-for-byte'],
+      ['data/bin/vibespace-usage', 'the SHIPPED statusline tool: a single file on hosts with no checkout, so it cannot require src/ — the same documented exception as vibespace-usage-scan. WHAT IT MIRRORS IS THE READING-LAG RULE, byte-for-byte between sentinels and pinned by test-readings-attribution §13 (r2: round 1 said "the RULES it needs", which was true of `windowOf` and false of the MERGE — and the merge is where it deleted `limits`). It does NOT mirror the write path: it spreads the stored object, states only the buckets it measured, and DROPS the one limit it can measure so the lift reconstructs it. §⑮ drives the real file.'],
     ]);
     console.log('  … writers found:', [...hits.keys()].map((f) => `${f}(${hits.get(f).length})`).join(' ') || '(none)');
     const stray = [...hits.keys()].filter((f) => !ALLOW.has(f));
@@ -568,6 +573,156 @@ console.log('\n⑨ backend shape detection is by FIELDS, never by key name');
   });
   ok(!QM.toLegacyView(noWindows).fiveHour && !QM.toLegacyView(noWindows).sevenDay,
     '⑭ a set with no window-bearing limit projects NO bucket (never invent one)');
+}
+
+
+// ── ⑮ THE SHIPPED STATUSLINE MAY NOT DELETE THE CANONICAL HALF ──────────────
+// (r2, the round-1 verifier's third finding, reproduced against the REAL tool.)
+//
+// `data/bin/vibespace-usage` is the highest-frequency writer on the instance —
+// up to once per 8 s per account — and an ALLOWLISTED exception to the one
+// write path, because it ships as a single file to hosts with no checkout. It
+// rebuilt the cache object from a hand-written list of fields to PRESERVE, and
+// that list did not name `limits`. Measured, over a migrated copy of a real
+// cache file: three limits in, ZERO out, the `overage` object gone with them,
+// and the next reader re-deriving the limits under THIS producer's name and
+// clock — so the model claimed a model-scoped Fable cap had been measured by
+// the statusline at a time the very same file's `scopedFetchedAt` contradicts.
+//
+// A list of what to KEEP is a promise every future edit has to remember, and it
+// has now been forgotten six times on this one file (`scopedWeekly`, the org
+// identity, `spend`, `corroborated`, the established window — which is why THAT
+// moved to a sidecar — and `limits`). So the tool no longer enumerates: it
+// spreads what was there, states only what it measured, and DROPS the single
+// limit it is able to measure (the plan one), whose reading it has just written
+// into the legacy buckets where `liftCacheObject` reconstructs it with this
+// object's own provenance. A producer that cannot express a window state or
+// another limit's age can never forge one.
+//
+// This leg drives the REAL FILE. Its negative control is a patched copy with
+// the spread reverted to round 1's enumerated literal.
+{
+  const { execFileSync } = await import('child_process');
+  const TOOL = path.join(ROOT, 'data/bin/vibespace-usage');
+  const nowSec = Math.floor(Date.now() / 1000);
+  const KEY = 'sub-quotamodel15';
+
+  // A migrated snapshot in the shape the write path produces: three limits,
+  // each with its OWN source and its OWN age, and only one of them (the plan)
+  // is something the statusline can measure.
+  const mkDir = () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qm15-'));
+    tmpDirs.push(dir);
+    const legacy = {
+      fiveHour: { utilization: 0.71, resetsAt: nowSec + 2 * 3600 },
+      sevenDay: { utilization: 0.44, resetsAt: nowSec + 3 * 86400 },
+      scopedWeekly: [{ name: 'Fable', utilization: 0.93, resetsAt: nowSec + 3 * 86400 }],
+      scopedFetchedAt: Date.now() - 3600e3,
+      overage: { status: 'allowed', inUse: false },
+      orgUuid: 'org-anon', orgName: 'Anon', overallStatus: 'allowed',
+      fetchedAt: Date.now() - 3600e3, source: 'on-demand',
+    };
+    W.writeCacheObject({ cacheDir: dir, key: KEY, obj: legacy, source: 'on-demand', familyOf: familyOfScopedBucket, backend: 'claude' });
+    // …and give the model cap a DIFFERENT, older provenance than the plan one,
+    // the way three real readings on one account differ.
+    const f = W.cacheFileFor(dir, KEY);
+    const o = JSON.parse(fs.readFileSync(f, 'utf8'));
+    o.limits = o.limits.map((l) => (l.limitId === 'plan' ? l : { ...l, source: 'on-demand', fetchedAt: Date.now() - 7200e3 }));
+    fs.writeFileSync(f, JSON.stringify(o));
+    const old = Date.now() - 60000;                       // past the tool's own 8 s throttle
+    fs.utimesSync(f, old / 1000, old / 1000);
+    return { dir, f };
+  };
+  const render = (tool, dir) => {
+    const payload = JSON.stringify({
+      session_id: 'sess-qm15', model: { id: 'claude-fable-5', display_name: 'Fable 5' },
+      rate_limits: {
+        five_hour: { used_percentage: 12, resets_at: nowSec + 3600, status: 'allowed' },
+        seven_day: { used_percentage: 46, resets_at: nowSec + 200000, status: 'allowed' },
+      },
+    });
+    execFileSync(tool, [], { input: payload, encoding: 'utf8', env: { ...process.env, VIBESPACE_USAGE_CACHE: dir, VIBESPACE_ACCOUNT_KEY: KEY, HOME: dir } });
+  };
+  const limitsOf = (o) => W.limitsOfCache(o, { identity: KEY, backend: 'claude', familyOf: familyOfScopedBucket }).limits;
+  const byId = (ls, id) => ls.find((l) => l.limitId === id) || null;
+
+  const A = mkDir();
+  const before = JSON.parse(fs.readFileSync(A.f, 'utf8'));
+  const beforeModel = byId(before.limits, 'model:fable');
+  render(TOOL, A.dir);
+  const after = JSON.parse(fs.readFileSync(A.f, 'utf8'));
+
+  ok(Array.isArray(after.limits), '⑮ one render of the SHIPPED tool leaves the canonical half in place');
+  const afterLimits = limitsOf(after);
+  ok(afterLimits.length === before.limits.length && ['plan', 'model:fable', 'overage'].every((id) => byId(afterLimits, id)),
+    `⑮ …with every limit the account holds (${afterLimits.map((l) => l.limitId).join(',')})`);
+  const am = byId(after.limits, 'model:fable');
+  ok(am && beforeModel && am.source === beforeModel.source && am.fetchedAt === beforeModel.fetchedAt,
+    '⑮ …and a limit this producer cannot measure keeps ITS OWN source and ITS OWN age (never re-stamped)');
+  ok(byId(after.limits, 'overage'), '⑮ …including the overage limit, which the pre-fix literal dropped entirely');
+  const ap = byId(afterLimits, 'plan');
+  ok(ap && ap.source === 'passive' && ap.fetchedAt >= before.fetchedAt,
+    `⑮ …while the PLAN limit — the one it did measure — carries this producer's own name and clock (${ap && ap.source})`);
+  ok(ap && QM.windowOfKind(ap, '5h')?.usedPct === 12 && QM.windowOfKind(ap, '7d')?.usedPct === 46,
+    '⑮ …and its numbers are the ones this render actually read');
+  ok(after.scopedFetchedAt === before.scopedFetchedAt && !!after.overage && after.orgUuid === 'org-anon',
+    '⑮ …every other field survives by construction, not by being remembered (spread, not a preserve list)');
+
+  ok(!('corroborated' in after),
+    '⑮ …and the ONE field it refuses to inherit is `corroborated` — a verdict about a different reading, which this producer has no observation to re-earn');
+
+  // THE RECONSTRUCTION RUNG IS CLAUDE-ONLY. codex names its own limits
+  // ('codex', 'codex_bengalfox', 'premium'…) and none of them is called
+  // 'plan', so a backend-blind rung would invent a plan limit on every codex
+  // file out of buckets that already belong to a named limit.
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qm15c-')); tmpDirs.push(dir);
+    const cxKey = '__global_codex__';
+    const set = CODEXQ.toLimitSet(sparkAt(T0), { identity: cxKey, source: 'codex-rate-limits', fetchedAt: T0 });
+    W.writeReading({ cacheDir: dir, key: cxKey, set, source: 'codex-rate-limits', backend: 'codex' });
+    const o = JSON.parse(fs.readFileSync(W.cacheFileFor(dir, cxKey), 'utf8'));
+    const ids = (hint) => W.limitsOfCache(o, { identity: cxKey, backend: hint, familyOf: familyOfScopedBucket }).limits.map((l) => l.limitId);
+    ok(!ids('codex').includes('plan') && !ids(null).includes('plan'),
+      `⑮ a CODEX snapshot never gains an invented plan limit, told or inferred (${ids(null).join(',')})`);
+  }
+
+  // THE TOOL NEVER AUTHORS THE CANONICAL HALF. A file that has not been
+  // migrated has no `limits`, and a one-element array claiming to be all of
+  // them would DELETE that file's scoped cap and its overage the moment
+  // anything lifted it (liftCacheObject prefers `limits` over the legacy view).
+  {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qm15b-')); tmpDirs.push(dir);
+    const f = W.cacheFileFor(dir, KEY);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(f, JSON.stringify({
+      fiveHour: { utilization: 0.5, resetsAt: nowSec + 3600 }, sevenDay: { utilization: 0.2, resetsAt: nowSec + 86400 },
+      scopedWeekly: [{ name: 'Fable', utilization: 0.9, resetsAt: nowSec + 86400 }], fetchedAt: Date.now() - 3600e3, source: 'cli-usage',
+    }));
+    const old = Date.now() - 60000; fs.utimesSync(f, old / 1000, old / 1000);
+    render(TOOL, dir);
+    const o = JSON.parse(fs.readFileSync(f, 'utf8'));
+    ok(!('limits' in o), '⑮ on a NOT-YET-MIGRATED file the tool writes no `limits` at all (a producer that knows one limit may not author the list of all of them)');
+    ok(limitsOf(o).some((l) => l.limitId === 'model:fable'), '⑮ …so the scoped cap on that file is still reachable');
+  }
+
+  // ── NEGATIVE CONTROL: round 1's enumerated literal, in a patched copy of the
+  // real tool. The patch is asserted to hit, so this can never silently become
+  // a second green arm.
+  {
+    const shipped = fs.readFileSync(TOOL, 'utf8');
+    const SPREAD = "    ...(prev && typeof prev === 'object' ? prev : {}),\n";
+    ok(shipped.split(SPREAD).length === 2, '⑮ NEGATIVE CONTROL setup: the rewrite decision is a single line in the shipped tool');
+    const B = mkDir();
+    const preFix = path.join(B.dir, 'vibespace-usage.prefix');
+    fs.writeFileSync(preFix, shipped.replace(SPREAD, ''), { mode: 0o755 });
+    render(preFix, B.dir);
+    const o = JSON.parse(fs.readFileSync(B.f, 'utf8'));
+    ok(!Array.isArray(o.limits) && !o.overage,
+      `⑮ NEGATIVE CONTROL: with the preserve list back, ONE render deletes the canonical half and the overage (keys: ${Object.keys(o).join(',')})`);
+    const relifted = limitsOf(o);
+    ok(!relifted.some((l) => l.limitId === 'overage') && relifted.every((l) => l.source === 'passive'),
+      `⑮ NEGATIVE CONTROL: …and the re-lift stamps THIS producer's name on limits it never measured (${relifted.map((l) => l.limitId + '=' + l.source).join(',')})`);
+  }
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
