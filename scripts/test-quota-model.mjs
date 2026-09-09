@@ -510,10 +510,17 @@ console.log('\n⑨ backend shape detection is by FIELDS, never by key name');
   ok(dlB === 1789509325, `⑫ the healthy member's deadline is its PLAN window (${dlB})`);
   ok(sparkResetB && sparkResetB < dlB, `⑫ …while the Spark bucket's sliding "reset" (${sparkResetB}) is NEARER, so EDF would have picked it every single evaluation`);
 
-  // bucketRems: the report names only buckets that make a claim
+  // bucketRems: every bucket that states a spend is REPORTED with what it has
+  // left — including the untouched one, which is 100 % free (r4) — but only a
+  // bucket that may name a DEADLINE publishes its reset. That split is the
+  // whole r4 fix on one row.
   const rems = POOL.bucketRems(A, nowSec);
-  ok(rems.length === 1 && rems[0].kind === 'weekly' && rems[0].remaining === 0,
-    `⑫ bucketRems reports one spent weekly bucket and no empty ones (${JSON.stringify(rems)})`);
+  const spentRow = rems.find((r) => r.label === '7d');
+  const emptyRow = rems.find((r) => /Spark/i.test(r.label));
+  ok(rems.length === 2 && spentRow && spentRow.remaining === 0 && spentRow.resetsAt === 1789356983,
+    `⑫ bucketRems reports the SPENT weekly bucket at 0 % with its pinned reset (${JSON.stringify(rems)})`);
+  ok(emptyRow && emptyRow.remaining === 100 && emptyRow.resetsAt === 0,
+    `⑫ …and the untouched one at 100 % free with NO reset — it is headroom, never a deadline (${JSON.stringify(emptyRow)})`);
 
   // the VERDICT the wall machine arms auto-resume from
   const vA = POOL.quotaVerdict(A, nowSec);
@@ -798,12 +805,28 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
 
   const POOL = require(path.join(ROOT, 'src/account-pool-auto.js'));
   const CAP = require(path.join(ROOT, 'src/rate-limit-capture.js'));
-  const QMFILE = 'src/quota-model.js', WFILE = 'src/usage-cache-write.js', CFILE = 'src/rate-limit-capture.js';
+  const { UsageAnchors } = require(path.join(ROOT, 'src/usage-anchors.js'));
+  const QMFILE = 'src/quota-model.js', WFILE = 'src/usage-cache-write.js', CFILE = 'src/rate-limit-capture.js', PFILE = 'src/account-pool-auto.js';
+
+  /** What the REAL anchor stream records for a cache object. This is the third
+   *  reader of `bucketCounts` (the pool's two are remaining and deadline) and
+   *  the one whose harm nothing else can stand in for: an anchor is the
+   *  estimator's entire training input AND the corpus the by-window repair
+   *  fingerprints identities from. Driven through `UsageAnchors` itself — the
+   *  predicate is not re-spelled here. */
+  const anchorBuckets = (cache) => {
+    const d = scratch();
+    const A = new UsageAnchors({ dataDir: d });
+    A.maybeRecord({ identityKey: 'acct:probe', accountId: 'probe', cache, costSince: null });
+    return (A.lastAnchor('acct:probe') || {}).buckets || { fiveHour: null, sevenDay: null, scopedWeekly: [] };
+  };
   const NOW = 1788970000000, nowSec = Math.floor(NOW / 1000);
   const scratch = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qm16-')); tmpDirs.push(d); return d; };
   // ⑯c builds the view-vs-accessor shape matrix; ⑯d re-drives it against its
   // own mutant to show the matrix now covers the defect that walked past it.
-  let propShapes = null, propNow = 0;
+  let propShapes = null, propNow = 0, propOpt = () => false;
+  // ⑯e migrates a real-shape file and then re-reads it under its own mutant.
+  let migAfter = null;
   const rd = (d, k) => JSON.parse(fs.readFileSync(path.join(d, k + '.json'), 'utf8'));
 
   // ── ⑯a A STATED SPEND WITH NO RESET ───────────────────────────────────────
@@ -837,13 +860,15 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
     // defect stand in for this one. This leg must fail for exactly one reason.
     const world = (Q) => {
       const dir = scratch();
+      const P = Q.POOL || POOL;
       Q.W.writeCacheObject({ cacheDir: dir, key: 'A', obj: { ...panel, fetchedAt: NOW }, measuredAt: NOW, source: 'cli-usage' });
       Q.W.writeCacheObject({ cacheDir: dir, key: 'B', obj: { fiveHour: { utilization: 0.2, resetsAt: nowSec + 3000 }, sevenDay: { utilization: 0.1, resetsAt: nowSec + 300000 }, fetchedAt: NOW }, measuredAt: NOW, source: 'cli-usage' });
       const caches = { A: rd(dir, 'A'), B: rd(dir, 'B') };
       return {
         caches,
-        rem: POOL.accountRemaining(caches.A, nowSec),
-        dec: POOL.decidePoolSwitch({ currentId: 'A', members: [{ id: 'A', name: 'A' }, { id: 'B', name: 'B' }], readCache: (id) => caches[id] ?? null, nowSec, hot: true, explain: true }),
+        rem: P.accountRemaining(caches.A, nowSec),
+        anchors: anchorBuckets(caches.A),
+        dec: P.decidePoolSwitch({ currentId: 'A', members: [{ id: 'A', name: 'A' }, { id: 'B', name: 'B' }], readCache: (id) => caches[id] ?? null, nowSec, hot: true, explain: true }),
       };
     };
     const real = world({ W, CAP });
@@ -853,6 +878,8 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
       `⑯a …and the pool LEAVES it (${JSON.stringify({ to: real.dec && real.dec.to, why: real.dec && real.dec.reason })})`);
     ok(real.caches.A.fiveHour.state === undefined,
       `⑯a …because the reset-less bucket counts on the strength of its spend alone (${JSON.stringify(real.caches.A.fiveHour)})`);
+    ok(real.anchors.fiveHour && real.anchors.fiveHour.u === 0.95,
+      `⑯a …and the reading reaches the ANCHOR stream, which is what the estimator learns from (${JSON.stringify(real.anchors.fiveHour)})`);
 
     // NEGATIVE CONTROL: put the deadline test back in front of the spend test.
     const w = mutantWorld('a', [QMFILE, WFILE, CFILE], {
@@ -864,11 +891,38 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
     patchHit(w, '⑯a restores the pre-fix ordering in windowState');
     const pre = world({ W: load(w, WFILE), CAP: load(w, CFILE) });
     ok(pre.caches.A.fiveHour.state === 'unknown' && pre.caches.A.fiveHour.utilization === 0.95,
-      `⑯a NEGATIVE CONTROL: with the old ordering the bucket is 95 % spent AND stamped unknown, so bucketCounts drops it (${JSON.stringify(pre.caches.A.fiveHour)})`);
-    ok(pre.rem.remaining === 80,
-      `⑯a NEGATIVE CONTROL: …the member reads ${pre.rem.remaining} % free on its 7d window alone — the burst window it is nearly through is invisible`);
-    ok(pre.dec === null || (pre.dec && pre.dec.to === null),
-      `⑯a NEGATIVE CONTROL: …and the pool stays on it (${JSON.stringify(pre.dec && pre.dec.reason)})`);
+      `⑯a NEGATIVE CONTROL: with the old ordering the bucket is 95 % spent AND stamped unknown (${JSON.stringify(pre.caches.A.fiveHour)})`);
+    // WHAT THE `windowState` ORDERING UNIQUELY PROTECTS, AFTER r4. The r4 split
+    // gave the REMAINING its own predicate (`bucketStatesSpend`), so a stated
+    // 95 % is worth 5 % free whatever the stamp says — the two fixes are two
+    // independent belts against one money harm, and each needs its own control
+    // (⑯a-x below removes the OTHER belt and shows this shape go dark again).
+    // What only THIS fix protects is everything keyed on `bucketCounts`: the
+    // ANCHOR STREAM, which is the estimator's entire input and the corpus the
+    // window fingerprint identifies accounts from.
+    ok(pre.anchors.fiveHour === null,
+      `⑯a NEGATIVE CONTROL: …so the 95 % reading never becomes an ANCHOR — the estimator and the window guard never see it (${JSON.stringify(pre.anchors)})`);
+    ok(pre.rem.remaining === 5 && pre.dec && pre.dec.to === 'B',
+      `⑯a NEGATIVE CONTROL: …while the pool is held by the OTHER belt, which is why this control may not claim the remaining (${JSON.stringify({ rem: pre.rem.remaining, to: pre.dec && pre.dec.to })})`);
+
+    // ⑯a-x THE SECOND BELT, ALONE. Remove the r4 split and keep the r3 stamp
+    // ordering broken: this is the branch as the r3 verifier found it, and it
+    // reproduces the number that commit measured (80 % free on the 7d window
+    // alone, the pool staying on a member 95 % through its burst window).
+    const wax = mutantWorld('ax', [QMFILE, WFILE, CFILE, PFILE], {
+      [QMFILE]: [
+        ["  if (used == null) return 'unknown';", "  const resetsAt0 = posNum(win.resetsAt);\n  if (used == null || resetsAt0 == null) return 'unknown';"],
+        ["  const resetsAt = posNum(win.resetsAt);\n  if (resetsAt == null) return 'unknown';", '  const resetsAt = resetsAt0;'],
+        ['    for (const w of spendingWindows(l)) {', '    for (const w of countingWindows(l)) {'],
+      ],
+      [PFILE]: [['  if (!bucketStatesSpend(b)) return null;', '  if (!bucketCounts(b)) return null;']],
+    });
+    patchHit(wax, '⑯a-x removes BOTH belts (the r3 defect with the r4 split undone)');
+    const preX = world({ W: load(wax, WFILE), CAP: load(wax, CFILE), POOL: load(wax, PFILE) });
+    ok(preX.rem.remaining === 80,
+      `⑯a-x NEGATIVE CONTROL (both belts): the member reads ${preX.rem.remaining} % free on its 7d window alone — the burst window it is nearly through is invisible`);
+    ok(preX.dec === null || (preX.dec && preX.dec.to === null),
+      `⑯a-x NEGATIVE CONTROL (both belts): …and the pool stays on it (${JSON.stringify(preX.dec && preX.dec.reason)})`);
   }
 
   // ── ⑯b A STORED VERDICT MAY NOT OUTLIVE THE READING IT DESCRIBES ──────────
@@ -900,7 +954,7 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
       // any later write that does NOT touch the 5h bucket
       Q.CAP.captureRateLimitEvent({ cacheDir: dir, key: 'C', identityIds: ['C'], ev: { kind: 'sevenDay', status: 'allowed', utilization: 0.2, resetsAt: nowSec + 300000 }, now: NOW + 1000 });
       const c = rd(dir, 'C');
-      return { c, rem: POOL.accountRemaining(c, nowSec) };
+      return { c, rem: (Q.POOL || POOL).accountRemaining(c, nowSec), anchors: anchorBuckets(c) };
     };
     const r1 = b1({ W, CAP });
     ok(r1.c.fiveHour.state === undefined,
@@ -921,7 +975,8 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
       Q.CAP.captureRateLimitEvent({ cacheDir: dir, key: 'D', identityIds: ['D'], ev: { kind: 'sevenDay', status: 'allowed', utilization: 0.9, resetsAt: weekOut }, now: NOW + 2000 });
       Q.CAP.captureRateLimitEvent({ cacheDir: dir, key: 'D', identityIds: ['D'], ev: { kind: 'scoped', scopedName: 'fable', status: 'allowed', utilization: 1, resetsAt: weekOut }, now: NOW + 3000 });
       const c = rd(dir, 'D');
-      return { seeded, c, weekOut, rem: POOL.accountRemaining(c, nowSec), dl: POOL.weeklyDeadline(c, nowSec), rems: POOL.bucketRems(c, nowSec) };
+      const P = Q.POOL || POOL;
+      return { seeded, c, weekOut, rem: P.accountRemaining(c, nowSec), dl: P.weeklyDeadline(c, nowSec), rems: P.bucketRems(c, nowSec), anchors: anchorBuckets(c) };
     };
     const r2 = b2({ W, CAP });
     ok(r2.seeded.sevenDay.state === 'empty' && r2.seeded.scopedWeekly[0].state === 'empty',
@@ -930,6 +985,8 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
       `⑯b …after three real readings climb them, the spent model cap is worth 0 % (${JSON.stringify(r2.rem)})`);
     ok(r2.dl === r2.weekOut, `⑯b …the account has its weekly deadline back (${r2.dl})`);
     ok(r2.rems.length === 3, `⑯b …and all three buckets are reported again (${JSON.stringify(r2.rems.map((x) => (x.label || x.kind) + ' ' + Math.round(x.remaining)))})`);
+    ok(r2.anchors.sevenDay && r2.anchors.sevenDay.u === 0.9 && r2.anchors.scopedWeekly.length === 1,
+      `⑯b …and both climbed readings reach the ANCHOR stream (${JSON.stringify(r2.anchors)})`);
 
     // B3 — THE PRODUCER HALF'S OWN CASE, which the belt structurally cannot
     // catch: a window correctly stamped EMPTY, then re-stated by a real event
@@ -977,8 +1034,10 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
     patchHit(wBelt, '⑯b restores the unconditional stored-state preserve');
     const preBelt = { W: load(wBelt, WFILE), CAP: load(wBelt, CFILE) };
     const p1 = b1(preBelt);
-    ok(p1.c.fiveHour.state === 'unknown' && p1.rem.remaining === 80,
-      `⑯b NEGATIVE CONTROL (belt): the stale on-disk stamp NEVER heals — the 95 % bucket stays invisible and the member reads ${p1.rem.remaining} % free`);
+    ok(p1.c.fiveHour.state === 'unknown' && p1.anchors.fiveHour === null,
+      `⑯b NEGATIVE CONTROL (belt): the stale on-disk stamp NEVER heals, so the 95 % reading never becomes an ANCHOR (${JSON.stringify({ state: p1.c.fiveHour.state, anchor: p1.anchors.fiveHour })})`);
+    ok(p1.rem.remaining === 5,
+      `⑯b NEGATIVE CONTROL (belt): …while the r4 split holds the pool's remaining at ${p1.rem.remaining} % — a second belt, measured by ⑯b-x below`);
     // …and the belt is what makes ⑯b's headline case survive an unpatched
     // producer too, so it is measured on that shape as well.
     const wBoth = mutantWorld('b1x', [QMFILE, WFILE, CFILE], {
@@ -987,8 +1046,29 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
     });
     patchHit(wBoth, '⑯b removes BOTH halves (the branch as the verifier found it)');
     const p2 = b2({ W: load(wBoth, WFILE), CAP: load(wBoth, CFILE) });
-    ok(p2.rem.remaining === 90 && p2.dl === null && p2.rems.length === 1,
-      `⑯b NEGATIVE CONTROL (both halves): the spent Fable cap is INVISIBLE (${p2.rem.remaining} % free, deadline ${p2.dl}, ${p2.rems.length} bucket row) — inc-msof8i22 re-opened`);
+    ok(p2.dl === null && p2.anchors.sevenDay === null && p2.anchors.scopedWeekly.length === 0,
+      `⑯b NEGATIVE CONTROL (both halves): the stale EMPTY verdict rides onto the climbed numbers, so the member has NO weekly deadline (${p2.dl}) and neither reading anchors (${JSON.stringify(p2.anchors)}) — EDF cannot rank it and the estimator never learns`);
+
+    // ⑯b-x THE SECOND BELT, ALONE — the same shapes with the r4 split undone,
+    // which is what makes ⑯b's own controls measure only what ⑯b's fix
+    // protects. These are the numbers the r3 commit measured; they are
+    // reproduced here so the claim "the remaining is held by the OTHER belt"
+    // is a MEASUREMENT and not a reading of the diff.
+    const wbx = mutantWorld('b2x', [QMFILE, WFILE, CFILE, PFILE], {
+      [QMFILE]: [
+        ['if (STATES.includes(b.state) && !(usedPct > 0)) w.state = b.state;', 'if (STATES.includes(b.state)) w.state = b.state;'],
+        ['    for (const w of spendingWindows(l)) {', '    for (const w of countingWindows(l)) {'],
+      ],
+      [CFILE]: [['const restated = (b) => { const c = { ...b }; delete c.state; return c; };', 'const restated = (b) => ({ ...b });']],
+      [PFILE]: [['  if (!bucketStatesSpend(b)) return null;', '  if (!bucketCounts(b)) return null;']],
+    });
+    patchHit(wbx, '⑯b-x removes BOTH belts (the r3 defect with the r4 split undone)');
+    const pbx1 = b1({ W: load(wbx, WFILE), CAP: load(wbx, CFILE), POOL: load(wbx, PFILE) });
+    ok(pbx1.rem.remaining === 80,
+      `⑯b-x NEGATIVE CONTROL (both belts): the stale stamp makes the 95 % bucket invisible and the member reads ${pbx1.rem.remaining} % free`);
+    const pbx2 = b2({ W: load(wbx, WFILE), CAP: load(wbx, CFILE), POOL: load(wbx, PFILE) });
+    ok(pbx2.rem.remaining === 90 && pbx2.dl === null && pbx2.rems.length === 1,
+      `⑯b-x NEGATIVE CONTROL (both belts): the spent Fable cap is INVISIBLE (${pbx2.rem.remaining} % free, deadline ${pbx2.dl}, ${pbx2.rems.length} bucket row) — inc-msof8i22 re-opened`);
 
     // NEGATIVE CONTROL 2 — the producer half: the writer keeps a verdict it
     // just invalidated. Only this half catches the re-statement DOWN to 0 %,
@@ -1084,14 +1164,34 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
     // binds" is a question about now, so comparing a real-clock projection with
     // a `nowC` accessor would measure the leg's own inconsistency, not the
     // product's.
-    const optimistic = shapes.filter((s) => {
-      const a = QM.remaining(s, { nowSec: nowC }), v = POOL.accountRemaining(QM.toLegacyView(s, { nowSec: nowC }), nowC);
-      return a.known && v.known && v.remaining > a.remaining + 1e-9;
-    });
-    propShapes = shapes; propNow = nowC;
-    ok(shapes.length === 10, `⑯c PROPERTY scope is non-vacuous (${shapes.length} shapes, codex plan × model × claude × a rolled-over burst window)`);
+    // …and a set whose window states a RESET but no number. r4's own positive
+    // control caught the projection writing `utilization: 0` for it — "the
+    // vendor said nothing" rendered as "the vendor said zero" — which is a
+    // violation the ORIGINAL property could not see, because it compared two
+    // KNOWN answers and here the accessor is the one that says nothing. So the
+    // property grew a second clause (`moreOptimistic`), and the shape that
+    // exposed the blind spot is in the matrix beside it.
+    shapes.push(QM.makeLimitSet({
+      identity: 'mute', fetchedAt: T0, source: 'cli-usage',
+      limits: [QM.makeLimit({ limitId: 'plan', scope: 'plan', fetchedAt: T0, windows: [{ kind: '5h', usedPct: null, resetsAt: nowC + 3600, measuredAt: T0 }] })],
+    }));
+    // CLAIMING TO KNOW IS ITSELF AN OPTIMISM. `known:false` costs a member
+    // UNKNOWN_REMAINING_PCT; `known:true` at a number the set cannot support is
+    // a headroom the model never stated.
+    //
+    // WHAT THIS PROPERTY STRUCTURALLY CANNOT SEE, stated so the next round does
+    // not over-trust it: it compares two PROJECTIONS of one set, so an error
+    // both of them make is invisible here — and that is precisely the r4 defect
+    // (§⑯e), where the view and the accessor agreed that a free member had no
+    // reading. A property that bounds A against B guards the SEAM, never the
+    // shared rule underneath it; the rule itself needs a leg that names an
+    // answer, which ⑯e is.
+    const moreOptimistic = (a, v) => (v.known && !a.known) || (a.known && v.known && v.remaining > a.remaining + 1e-9);
+    const optimistic = shapes.filter((s) => moreOptimistic(QM.remaining(s, { nowSec: nowC }), POOL.accountRemaining(QM.toLegacyView(s, { nowSec: nowC }), nowC)));
+    propShapes = shapes; propNow = nowC; propOpt = moreOptimistic;
+    ok(shapes.length === 11, `⑯c PROPERTY scope is non-vacuous (${shapes.length} shapes, codex plan × model × claude × a rolled-over burst window × a numberless one)`);
     ok(!optimistic.length,
-      `⑯c PROPERTY: over every shape, the derived view is NEVER more optimistic than the accessor (${optimistic.length} violations)`);
+      `⑯c PROPERTY: over every shape, the derived view is NEVER more optimistic than the accessor — including by CLAIMING TO KNOW (${optimistic.length} violations)`);
 
     // NEGATIVE CONTROL: read fiveHour off the plan limit alone again.
     const wC = mutantWorld('c', [QMFILE], { [QMFILE]: [['const f5 = toBucket(bind5 || planW5);', 'const f5 = toBucket(planW5);']] });
@@ -1106,10 +1206,7 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
     const collapsed = { ...CODEXQ.normalizeCodexRateLimit(CODEX_PLAN, T0), ...CODEXQ.normalizeCodexRateLimit(sparkSpent, T0 + 3000) };
     ok(POOL.accountRemaining(collapsed, nowC).remaining === 10,
       '⑯c NEGATIVE CONTROL: …while the collapse this model REPLACED answered 10 % — the projection had made the answer worse');
-    const violPre = shapes.filter((s) => {
-      const a = QM.remaining(s, { nowSec: nowC }), v = POOL.accountRemaining(QMpre.toLegacyView(s, { nowSec: nowC }), nowC);
-      return a.known && v.known && v.remaining > a.remaining + 1e-9;
-    });
+    const violPre = shapes.filter((s) => moreOptimistic(QM.remaining(s, { nowSec: nowC }), POOL.accountRemaining(QMpre.toLegacyView(s, { nowSec: nowC }), nowC)));
     ok(violPre.length > 0, `⑯c NEGATIVE CONTROL: …and the PROPERTY itself goes red on the same matrix (${violPre.length} violations)`);
   }
 
@@ -1175,12 +1272,153 @@ console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped cou
     // defect walked straight through the guard written to prevent its whole
     // class. A property is worth exactly the shapes it is driven over, so the
     // matrix earning its keep is itself an assertion.
-    const violD = (propShapes || []).filter((s) => {
-      const a = QM.remaining(s, { nowSec: propNow }), v = POOL.accountRemaining(QMd.toLegacyView(s, { nowSec: propNow }), propNow);
-      return a.known && v.known && v.remaining > a.remaining + 1e-9;
-    });
-    ok(propShapes && propShapes.length === 10 && violD.length > 0,
+    const violD = (propShapes || []).filter((s) => propOpt(QM.remaining(s, { nowSec: propNow }), POOL.accountRemaining(QMd.toLegacyView(s, { nowSec: propNow }), propNow)));
+    ok(propShapes && propShapes.length === 11 && violD.length > 0,
       `⑯d …and ⑯c's PROPERTY, once its matrix carries a rolled-over window, goes red on this mutant too (${violD.length} violations over ${propShapes ? propShapes.length : 0} shapes) — it could not before`);
+  }
+
+  // ── ⑯e A FREE MEMBER IS NOT AN UNKNOWN ONE ────────────────────────────────
+  // The r4 verifier's finding, reproduced end to end before it was fixed. r3
+  // asked ONE predicate — "may this bucket name a deadline" — of BOTH questions
+  // a bucket answers, so a window the vendor reported at 0 % used was dropped
+  // from the REMAINING as well. A fully free member then read back to the pool
+  // as "no usage data", which is not neutral: it ranks at UNKNOWN_REMAINING_PCT
+  // (50), it is never `usable === true`, and it is not settleable — so a pool
+  // sitting on an EXHAUSTED member would not move onto it.
+  //
+  // The fix splits the two questions (`bucketStatesSpend` / `windowStatesSpend`
+  // beside `bucketCounts` / `countingWindows`). B-8b12 is untouched: an empty
+  // window still names no deadline, still never anchors, and still publishes no
+  // reset. The POSITIVE CONTROLS below are what make that a measurement.
+  console.log('\n  ⑯e a window the vendor reported at 0 % is 100 % free, not "no usage data"');
+  {
+    // PURE: the two predicates, and the P6 line between "said zero" and "said
+    // nothing" (`Number(null)` is 0 — which is why `num()` and not `Number()`).
+    ok(QM.windowStatesSpend({ usedPct: 0 }) === true && QM.bucketStatesSpend({ utilization: 0 }) === true,
+      '⑯e a stated 0 % IS a claim, in both spellings');
+    ok(QM.windowStatesSpend({ usedPct: null }) === false && QM.bucketStatesSpend({ utilization: null }) === false
+      && QM.bucketStatesSpend({}) === false && QM.bucketStatesSpend({ utilization: '' }) === false,
+      '⑯e POSITIVE CONTROL: …and a bucket with no number is not — `Number(null)` is 0, `num(null)` is null (P6)');
+    ok(QM.bucketCounts({ utilization: 0, state: 'empty' }) === false && QM.bucketCounts({ utilization: 0, state: 'unknown' }) === false,
+      '⑯e POSITIVE CONTROL: the DEADLINE predicate is unchanged — an empty window still names no deadline (B-8b12)');
+
+    // REACHABILITY, from the product's own parser. This is the ordinary shape,
+    // not a corner: the `· resets` clause of a claude panel line is optional
+    // and `refreshViaCliPanel` refuses to project the 5-hour one, so a
+    // brand-new account — which has no prior reset to carry forward either —
+    // comes back with BOTH plan buckets at 0 % and no reset anywhere.
+    const fresh = CLAUDEQ.parseCliUsageText('Current session:  0% used\nCurrent week (all models):  0% used', NOW);
+    ok(fresh && fresh.fiveHour.utilization === 0 && fresh.fiveHour.resetsAt === undefined
+      && fresh.sevenDay.utilization === 0 && fresh.sevenDay.resetsAt === undefined,
+      `⑯e REACHABILITY: a real panel for an untouched account parses to two reset-less 0 % buckets (${JSON.stringify(fresh)})`);
+
+    // PRODUCT, end to end, through the one write path: an EXHAUSTED current
+    // member and a brand-new one beside it.
+    const eWorld = (Q) => {
+      const dir = scratch();
+      const P = Q.POOL || POOL;
+      Q.W.writeCacheObject({ cacheDir: dir, key: 'NEW', obj: { ...fresh, fetchedAt: NOW }, measuredAt: NOW, source: 'cli-usage', backend: 'claude' });
+      Q.W.writeCacheObject({ cacheDir: dir, key: 'CUR', obj: { fiveHour: { utilization: 0.2, resetsAt: nowSec + 3600 }, sevenDay: { utilization: 0.96, resetsAt: nowSec + 86400 }, fetchedAt: NOW }, measuredAt: NOW, source: 'cli-usage', backend: 'claude' });
+      const caches = { NEW: rd(dir, 'NEW'), CUR: rd(dir, 'CUR') };
+      const verdicts = ['CUR', 'NEW'].map((id) => ({ id, v: P.quotaVerdict(caches[id], nowSec) }));
+      return {
+        caches, verdicts,
+        rem: P.accountRemaining(caches.NEW, nowSec),
+        dl: P.weeklyDeadline(caches.NEW, nowSec),
+        rems: P.bucketRems(caches.NEW, nowSec),
+        anchors: anchorBuckets(caches.NEW),
+        ranked: P.rankPoolMembers({ members: [{ id: 'CUR', name: 'Current' }, { id: 'NEW', name: 'BrandNew' }], readCache: (id) => caches[id] ?? null, nowSec }),
+        dec: P.decidePoolSwitch({ currentId: 'CUR', members: [{ id: 'CUR', name: 'Current' }, { id: 'NEW', name: 'BrandNew' }], readCache: (id) => caches[id] ?? null, nowSec, hot: true, explain: true }),
+        // THE ENGINE'S OWN GATE, applied verbatim (pinned below): a pool is
+        // usable only if some member's verdict is exactly `true`.
+        poolUsable: verdicts.find((x) => x.v.usable === true) || null,
+      };
+    };
+    const e = eWorld({ W, CAP });
+    ok(e.caches.NEW.fiveHour.state === 'unknown' && e.caches.NEW.sevenDay.state === 'unknown',
+      `⑯e SETUP: both buckets land stamped 'unknown' — untouched and just-started are genuinely indistinguishable without a reset (${JSON.stringify(e.caches.NEW.fiveHour)})`);
+    ok(e.rem.known && e.rem.remaining === 100,
+      `⑯e the free member reads 100 % remaining, KNOWN (${JSON.stringify(e.rem)})`);
+    ok(e.verdicts.find((x) => x.id === 'NEW').v.usable === true,
+      `⑯e …its verdict is usable (${JSON.stringify(e.verdicts.find((x) => x.id === 'NEW').v.reason)})`);
+    ok(e.poolUsable && e.poolUsable.id === 'NEW',
+      `⑯e …so the POOL has a usable member (${JSON.stringify(e.poolUsable && e.poolUsable.id)})`);
+    ok((e.ranked.find((r) => r.id === 'NEW') || {}).eff === 100,
+      `⑯e …it ranks on its real headroom, not on UNKNOWN_REMAINING_PCT (${JSON.stringify(e.ranked)})`);
+    ok(e.dec && e.dec.to === 'NEW' && e.dec.reason === 'exhausted',
+      `⑯e …and the pool LEAVES the exhausted member for it (${JSON.stringify({ to: e.dec && e.dec.to, why: e.dec && e.dec.reason })})`);
+
+    // POSITIVE CONTROLS — B-8b12 is not re-opened by any of that.
+    ok(e.dl === null,
+      `⑯e POSITIVE CONTROL: the free member still has NO weekly deadline — a reset-less/sliding window may not be ranked on (${e.dl})`);
+    ok(e.anchors.fiveHour === null && e.anchors.sevenDay === null,
+      `⑯e POSITIVE CONTROL: …and neither bucket ANCHORS: the estimator learns from windows that ran, not from ones that never opened (${JSON.stringify(e.anchors)})`);
+    ok(e.rems.length === 2 && e.rems.every((r) => r.remaining === 100 && r.resetsAt === 0),
+      `⑯e POSITIVE CONTROL: …the report states the headroom and publishes NO reset, so nothing downstream can turn one into a blockedUntil (${JSON.stringify(e.rems)})`);
+    // A bucket with NO number at all is still ignorance, not 100 %.
+    {
+      const dir = scratch();
+      W.writeCacheObject({ cacheDir: dir, key: 'MUTE', obj: { fiveHour: { resetsAt: nowSec + 3600 }, fetchedAt: NOW }, measuredAt: NOW, source: 'cli-usage', backend: 'claude' });
+      const mute = rd(dir, 'MUTE');
+      ok(POOL.accountRemaining(mute, nowSec).known === false,
+        `⑯e POSITIVE CONTROL: a bucket the vendor gave no number for is still UNKNOWN — the fix follows the STATED spend, it does not assume zero (${JSON.stringify(POOL.accountRemaining(mute, nowSec))})`);
+    }
+    // …and a genuinely SPENT account is still refused (the fix is a min, so a
+    // 100 %-free bucket can never lift another bucket's exhaustion).
+    ok(e.verdicts.find((x) => x.id === 'CUR').v.usable === false,
+      `⑯e POSITIVE CONTROL: the exhausted member is still refused (${JSON.stringify(e.verdicts.find((x) => x.id === 'CUR').v.reason)})`);
+
+    // WIRING PIN: the gate this leg models is the engine's, verbatim. If the
+    // engine stops asking `usable === true`, the sentence above stops being
+    // about the product.
+    const engSrc = fs.readFileSync(path.join(ROOT, 'src/server/usage-pool-engine.js'), 'utf8');
+    ok(engSrc.includes('const ok = verdicts.find((x) => x.v.usable === true);'),
+      '⑯e WIRING PIN: the pool gate really is `verdicts.find((x) => x.v.usable === true)` — a member reading `usable:null` can never satisfy it');
+
+    // THE MIGRATION, on the shape this instance actually holds. `usage-cache/
+    // __global_codex__.json` is the measured B-8b12 file — the Spark limit
+    // alone, both windows fresh — and running this branch's own backfill over a
+    // copy of the real directory flipped exactly that one file (12 scanned /
+    // 12 stamped / 31 limits / idempotent) from usable to "no usage data".
+    // Driven here on the corpus's anonymised twin.
+    {
+      const dir = scratch();
+      const legacy = { ...CODEXQ.normalizeCodexRateLimit(sparkAt(NOW), NOW), fetchedAt: NOW, source: 'codex-rate-limits' };
+      fs.writeFileSync(path.join(dir, '__global_codex__.json'), JSON.stringify(legacy));
+      const { backfillLimits } = require(path.join(ROOT, 'src/quota-model-migrate.js'));
+      const res = backfillLimits({ cacheDir: dir, archiveDir: path.join(dir, 'archive'), id: 'test', log: () => { } });
+      const after = rd(dir, '__global_codex__');
+      ok(res.stamped === 1 && Array.isArray(after.limits),
+        `⑯e MIGRATION: the backfill stamps the file (${JSON.stringify({ scanned: res.scanned, stamped: res.stamped, limits: res.limits })})`);
+      ok(POOL.quotaVerdict(after, nowSec).usable === true && POOL.weeklyDeadline(after, nowSec) === null,
+        `⑯e MIGRATION: …and the account it describes stays USABLE with no fabricated deadline (${JSON.stringify(POOL.quotaVerdict(after, nowSec).reason)})`);
+      migAfter = after;
+    }
+
+    // NEGATIVE CONTROL: ask the DEADLINE predicate about the REMAINING again —
+    // r3, with everything else on this branch intact.
+    const wE = mutantWorld('e', [QMFILE, WFILE, CFILE, PFILE], {
+      [QMFILE]: [['    for (const w of spendingWindows(l)) {', '    for (const w of countingWindows(l)) {']],
+      [PFILE]: [['  if (!bucketStatesSpend(b)) return null;', '  if (!bucketCounts(b)) return null;']],
+    });
+    patchHit(wE, '⑯e restores the single predicate (the deadline rule asked about the remaining)');
+    const POOLpre = load(wE, PFILE), QMpreE = load(wE, QMFILE);
+    const preE = eWorld({ W: load(wE, WFILE), CAP: load(wE, CFILE), POOL: POOLpre });
+    ok(preE.rem.known === false,
+      `⑯e NEGATIVE CONTROL: the free member reads "no usage data" (${JSON.stringify(preE.rem)})`);
+    ok(preE.verdicts.find((x) => x.id === 'NEW').v.usable === null && preE.poolUsable === null,
+      `⑯e NEGATIVE CONTROL: …its verdict is ${JSON.stringify(preE.verdicts.find((x) => x.id === 'NEW').v.reason)}, so the POOL has no usable member at all`);
+    ok((preE.ranked.find((r) => r.id === 'NEW') || {}).eff === POOLpre.UNKNOWN_REMAINING_PCT,
+      `⑯e NEGATIVE CONTROL: …it ranks at UNKNOWN_REMAINING_PCT instead of 100 (${JSON.stringify(preE.ranked)})`);
+    ok(preE.dec && preE.dec.to === null && preE.dec.reason === 'no-settleable',
+      `⑯e NEGATIVE CONTROL: …and the pool STAYS on the exhausted member (${JSON.stringify({ to: preE.dec && preE.dec.to, why: preE.dec && preE.dec.reason, from: preE.dec && preE.dec.fromRemaining })})`);
+    ok(POOLpre.quotaVerdict(migAfter, nowSec).usable === null,
+      `⑯e NEGATIVE CONTROL: …and the migrated real-shape file goes dark too (${JSON.stringify(POOLpre.quotaVerdict(migAfter, nowSec).reason)})`);
+    // The ACCESSOR half needs its own control: the pool reads the view today,
+    // but `remaining()` is the path every migrated reader will take.
+    const setE = W.limitsOfCache(e.caches.NEW, { identity: 'NEW' });
+    ok(QM.remaining(setE, { nowSec }).remaining === 100 && QMpreE.remaining(setE, { nowSec }).known === false,
+      `⑯e NEGATIVE CONTROL: …and the typed accessor moves with it (${JSON.stringify(QM.remaining(setE, { nowSec }))} vs ${JSON.stringify(QMpreE.remaining(setE, { nowSec }))})`);
   }
 }
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

@@ -351,34 +351,107 @@ function applicableLimits(set, { model = null, family = null } = {}) {
   return out;
 }
 
-// ── remaining / deadline (empty windows do not count) ───────────────────────
+// ── remaining / deadline: TWO QUESTIONS, TWO PREDICATES ─────────────────────
+//
+// A WINDOW THAT HAS NOT STARTED ANSWERS THEM DIFFERENTLY, AND r3 GAVE BOTH THE
+// SAME ANSWER (the r4 verifier's finding, reproduced end to end).
+//
+//   "WHEN DOES THIS BUDGET END?"  An empty window has no answer. Its reset is
+//       `now + duration` on every read (B-8b12: 144 distinct "reset times"
+//       across 149 consecutive reads of one bucket), so ranking on it makes it
+//       the earliest deadline forever and arms auto-resume on a number that
+//       will have moved by the time it fires. `bucketCounts`/`countingWindows`
+//       exist for this question and are UNCHANGED — deadline(), weeklyDeadline,
+//       the anchor stream, the window fingerprint and auto-resume's arm all ask
+//       it, and all of them are right to drop an empty window.
+//
+//   "HOW MUCH IS LEFT?"  An empty window has a precise answer: ALL of it. The
+//       vendor stated a spend of 0 %. Dropping that turns a definite claim into
+//       ignorance — and ignorance is not neutral here, it is `known:false`,
+//       which the pool ranks at UNKNOWN_REMAINING_PCT (50) and `quotaVerdict`
+//       reports as "no usage data" (`usable:null`).
+//
+// MEASURED HARM OF COLLAPSING THEM. A brand-new claude account whose panel says
+// "0 % used" on both plan buckets — the ordinary shape, because the `· resets`
+// clause of a panel line is optional and `refreshViaCliPanel` deliberately
+// refuses to project the 5-hour one — read back as "no usage data": remaining
+// 100 %/known → null/unknown, `quotaVerdict` usable true → null, `rankPoolMembers`
+// eff 100 → 50, and `decidePoolSwitch` off an EXHAUSTED member (4 % left) went
+// from `to:'new' reason:'exhausted'` to `to:null reason:'no-settleable'`. That
+// is a REGRESSION against the base commit and it is money: the pool keeps
+// spending on a spent member while a fully free one sits beside it. Running
+// this branch's OWN migration over a copy of this instance's usage-cache
+// (12 scanned / 12 stamped / 31 limits / idempotent) flips exactly one of the
+// twelve files — `__global_codex__.json`, the one whose every window is fresh,
+// i.e. the measured B-8b12 shape — from usable to "no usage data".
+//
+// AND INCLUDING THEM CANNOT MAKE AN ACCOUNT LOOK BETTER THAN IT IS: `remaining`
+// is a MIN over every applicable window, so a window at 100 % free can never
+// lift another limit's 5 %. It can only change `known:false` → `known:true`.
+// That is what B-9213 was actually about — a Spark push OVERWRITING the plan
+// limit — and the per-limit merge is what fixes it, not this filter. §⑫'s own
+// negative control has said so since r1: "an empty bucket is 100 % free, so it
+// never HID an exhaustion — the harm was always the deadline".
+//
+// HONEST BOUNDARY. A file holding ONLY an empty limit — which is exactly what
+// B-9213 left behind on this instance's `__global_codex__.json`, the plan limit
+// overwritten away — therefore reads USABLE. That is the pre-model behaviour
+// restored, not a new claim: it is what every release before this branch
+// answered, and `known:false` was never protection (the pool ranks an unknown
+// member at UNKNOWN_REMAINING_PCT and still offers it, while `quotaVerdictFor`
+// reports the whole POOL blocked). The thing that actually repairs that file is
+// the per-limit merge plus the backfill: the first real plan push restores the
+// plan limit and it binds from then on.
 
-/** DOES THIS BUCKET COUNT? The ONE predicate every reader outside this module
- *  asks about an empty window, in the LEGACY spelling too (the derived view
- *  stamps `state` on the bucket for exactly this). An 'empty' window is not a
- *  constraint and not a deadline; 'unknown' is a bucket the payload never
- *  described. Both are "no claim", and the difference between them is only ever
- *  reported, never acted on. */
+/** DOES THIS BUCKET COUNT — i.e. may it name a DEADLINE? The ONE predicate
+ *  every reader outside this module asks about an empty window, in the LEGACY
+ *  spelling too (the derived view stamps `state` on the bucket for exactly
+ *  this). An 'empty' window is not a deadline; 'unknown' is a bucket the
+ *  payload never described. Neither may be ranked on.
+ *
+ *  THIS IS NOT THE REMAINING QUESTION — see `bucketStatesSpend`. */
 function bucketCounts(b) {
   if (!b || typeof b !== 'object') return false;
   return b.state === undefined || b.state === 'running';
 }
 
-/** WINDOWS THAT MAKE A CLAIM. An 'empty' window is not a constraint (nothing
- *  has been spent in it) and not a deadline (its reset slides), so it is
- *  excluded from BOTH answers — that is the whole of the B-8b12 fix. An
- *  'unknown' window makes no claim either. */
+/** WINDOWS THAT NAME A DEADLINE. An 'empty' window's reset slides with the
+ *  clock and an 'unknown' window states no reset at all, so neither may enter
+ *  `deadline()` — that is the whole of the B-8b12 fix, and it is a rule about
+ *  the DEADLINE only. */
 function countingWindows(limit) { return windowsOf(limit).filter((w) => w && w.state === 'running'); }
 
-/** Remaining percent for a spend on this model = the MIN across every counting
- *  window of every applicable limit. `known:false` = this set cannot say, and
- *  callers must treat that as "no claim" (the pool's UNKNOWN_REMAINING_PCT
- *  rung), never as 0 and never as 100. */
+/** DOES THIS WINDOW STATE A SPEND? The remaining question's predicate, typed
+ *  spelling. `num()` and not `Number()`: `Number(null)` is 0, and "the vendor
+ *  said nothing" must never read as "the vendor said zero" (P6). */
+function windowStatesSpend(w) { return !!w && typeof w === 'object' && num(w.usedPct) != null; }
+
+/** The same question in the LEGACY spelling (`utilization`, 0..1) — the shape
+ *  `src/account-pool-auto.js` reads off the derived view. The pair lives here,
+ *  side by side, because one rule in two spellings drifts the moment they are
+ *  written in two files; scripts/test-quota-model.mjs drives both.
+ *
+ *  It is STRICTLY MORE CONSERVATIVE than the pre-model `bucketRemaining`, which
+ *  used `Number.isFinite(Number(b.utilization))` and therefore called
+ *  `utilization: null` a stated 0 %. Measured on this instance: 35 cache
+ *  buckets and 14,286 anchor buckets, ZERO of them missing or null — the shape
+ *  that behaves differently does not occur, and refusing it is the direction
+ *  that cannot invent headroom. */
+function bucketStatesSpend(b) { return !!b && typeof b === 'object' && num(b.utilization) != null; }
+
+/** WINDOWS THAT STATE A REMAINING. Every window whose spend the vendor stated,
+ *  whatever its deadline is worth. */
+function spendingWindows(limit) { return windowsOf(limit).filter(windowStatesSpend); }
+
+/** Remaining percent for a spend on this model = the MIN across every window
+ *  that STATES A SPEND, over every applicable limit. `known:false` = this set
+ *  cannot say, and callers must treat that as "no claim" (the pool's
+ *  UNKNOWN_REMAINING_PCT rung), never as 0 and never as 100. */
 function remaining(set, { model = null, family = null, nowSec = null } = {}) {
   const now = num(nowSec) != null ? num(nowSec) : Math.floor(Date.now() / 1000);
   let best = null, by = null, kind = null;
   for (const l of applicableLimits(set, { model, family })) {
-    for (const w of countingWindows(l)) {
+    for (const w of spendingWindows(l)) {
       const r = windowRemaining(w, now);
       if (r == null) continue;
       if (best == null || r < best) { best = r; by = l.limitId; kind = w.kind; }
@@ -389,8 +462,14 @@ function remaining(set, { model = null, family = null, nowSec = null } = {}) {
 
 /** Per-window remainings, tagged — the reporting shape the pool's honest
  *  "which bucket is actually spent" message is built from. Empty windows are
- *  REPORTED (with their state) so a panel can say "starts on first use", but
- *  they carry `counts:false` so no ranking rule can pick them up by accident. */
+ *  REPORTED (with their state) so a panel can say "starts on first use".
+ *
+ *  THE ROW ANSWERS BOTH QUESTIONS SEPARATELY (r4). `remaining` follows the
+ *  stated spend, so an untouched window says 100 % rather than nothing;
+ *  `counts` and `resetsAt` follow the DEADLINE predicate, so a sliding reset is
+ *  never published as an instant and no ranking rule can pick one up. Rows that
+ *  state neither are still emitted, all-null, because a limit the vendor
+ *  reported must stay visible. */
 function bucketReport(set, { model = null, family = null, nowSec = null } = {}) {
   const now = num(nowSec) != null ? num(nowSec) : Math.floor(Date.now() / 1000);
   const out = [];
@@ -399,7 +478,7 @@ function bucketReport(set, { model = null, family = null, nowSec = null } = {}) 
       out.push({
         limitId: l.limitId, scope: l.scope, label: l.name || l.limitId,
         kind: w.kind, state: w.state, counts: w.state === 'running',
-        remaining: w.state === 'running' ? windowRemaining(w, now) : null,
+        remaining: windowStatesSpend(w) ? windowRemaining(w, now) : null,
         resetsAt: w.state === 'running' ? (posNum(w.resetsAt) || 0) : 0,
       });
     }
@@ -579,7 +658,19 @@ function toLegacyView(set, { nowSec = null } = {}) {
   const plan = legacyWindowLimit(set);
   const toBucket = (w) => {
     if (!w) return null;
-    const b = { utilization: w.usedPct == null ? 0 : Math.max(0, Math.min(1, w.usedPct / 100)) };
+    // A WINDOW WITH NO STATED SPEND PROJECTS NO `utilization` (r4). Writing 0
+    // here fabricates the claim "the vendor says nothing has been spent" out of
+    // "the vendor said nothing" — the P6 line this module is built on — and the
+    // legacy readers cannot tell the two apart, because `utilization` is the
+    // only field they have. Reproduced by ⑯e's own positive control: a producer
+    // that stated only a reset came back off disk as `{utilization: 0}`, so the
+    // pool read 100 % free and KNOWN while the typed accessor beside it
+    // correctly answered "no claim" — the view MORE optimistic than the set,
+    // which is exactly what ⑯c exists to prevent (and could not see, because
+    // its property compared two KNOWN answers). The bucket is still emitted so
+    // a limit the vendor reported never disappears from a panel.
+    const b = {};
+    if (w.usedPct != null) b.utilization = Math.max(0, Math.min(1, w.usedPct / 100));
     // `usedPercent` + `windowMinutes` are the CODEX spelling; a claude bucket
     // has only `utilization`, and adding the other two changes what the file
     // looks like to every shape-detecting reader. Re-emit what was stated.
@@ -663,7 +754,10 @@ function toLegacyView(set, { nowSec = null } = {}) {
     if (!l || l.scope !== 'model') continue;
     const w = windowOfKind(l, '7d') || windowsOf(l).find((x) => isBudgetKind(x.kind)) || null;
     if (!w) continue;
-    const e = { name: l.name || l.limitId, utilization: w.usedPct == null ? 0 : Math.max(0, Math.min(1, w.usedPct / 100)) };
+    // Same rule as `toBucket`: a scoped window with no stated spend carries no
+    // `utilization` rather than a fabricated 0.
+    const e = { name: l.name || l.limitId };
+    if (w.usedPct != null) e.utilization = Math.max(0, Math.min(1, w.usedPct / 100));
     if (w.resetsAt) e.resetsAt = w.resetsAt;
     if (w.status) e.status = w.status;
     if (w.resetsAtEstimated) e.resetsAtEstimated = true;
@@ -982,6 +1076,7 @@ module.exports = {
   // accessors
   limitsOf, windowsOf, windowOfKind, planLimit, limitFor, applicableLimits, limitNamesModel,
   remaining, deadline, bucketReport, countingWindows, isBudgetKind, bucketCounts,
+  windowStatesSpend, bucketStatesSpend, spendingWindows,
   // merge
   mergeLimitSets, mergeLimit, mergeWindow,
   // panels

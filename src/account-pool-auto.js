@@ -39,7 +39,13 @@ const { loginUsable, loginSwitchTarget, loginRank, loginWallPhrase, loginBlocked
 // entire input. `src/quota-model.js` decides what an empty window is; this file
 // only asks. The stamp rides the bucket because the derived legacy view puts it
 // there — see toLegacyView.
-const { bucketCounts } = require('./quota-model.js');
+//
+// TWO QUESTIONS, TWO PREDICATES (r4). `bucketCounts` answers "may this bucket
+// name a DEADLINE" and gates `weeklyDeadline`; `bucketStatesSpend` answers "did
+// the vendor state a spend" and gates `bucketRemaining`. Asking the deadline
+// predicate about the remaining made a fully FREE member read back as "no usage
+// data" — see the essay in quota-model.js.
+const { bucketCounts, bucketStatesSpend } = require('./quota-model.js');
 
 const SWITCH_THRESHOLD_PCT = 5;
 // PER-BUCKET-KIND thresholds (2.268.2, user-designed: what matters is
@@ -71,11 +77,18 @@ const MIN_GAIN_PCT = 3;
 // so week-old readings are normal, not an error).
 function bucketRemaining(b, nowSec) {
   if (!b || typeof b !== 'object') return null;
-  // An EMPTY window makes no claim: nothing has been spent in it, and its
-  // "reset" is a sliding number. Reporting 100 % free would be true but
-  // useless; reporting it as a KNOWN bucket is what let one always-0 % limit
-  // decide an account's remaining. `known:false` is the honest answer.
-  if (!bucketCounts(b)) return null;
+  // A bucket the vendor never gave a number for makes no claim. An EMPTY one
+  // DOES: it was stated at 0 % used, so it is 100 % free, and that is a fact
+  // about headroom even though its sliding "reset" is worthless as a deadline
+  // (`weeklyDeadline` asks `bucketCounts` for exactly that, three lines down).
+  //
+  // r3 asked the DEADLINE predicate here, and a brand-new account — both plan
+  // buckets at 0 %, no reset, which is what a claude panel prints — came back
+  // `known:false`, i.e. "no usage data": ranked at 50 %, reported `usable:null`,
+  // and not settleable, so the pool STAYED on an exhausted member. Including it
+  // cannot go the other way: this is a MIN, so a 100 %-free bucket can never
+  // lift another bucket's 5 %.
+  if (!bucketStatesSpend(b)) return null;
   const reset = Number(b.resetsAt) || 0;
   if (reset && reset < nowSec) return 100;
   const u = Number(b.utilization);
@@ -122,7 +135,15 @@ function bucketRems(cache, nowSec) {
   // flatly wrong under the nested model — the truth is usually "every
   // member's <one model>'s weekly cap is spent, the 7-day budget still has
   // 40% left", which points at a completely different user action.
-  const push = (kind, b, label) => { const r = bucketRemaining(b, nowSec); if (r != null) out.push({ kind, remaining: r, label, resetsAt: Number(b?.resetsAt) || 0 }); };
+  // TWO QUESTIONS AGAIN, ON ONE ROW (r4). The row exists because the bucket
+  // states a REMAINING; its `resetsAt` may only be published when the bucket
+  // may name a DEADLINE. An empty window's "reset" slides with the clock, and
+  // this field is what `quotaVerdict` turns into `blockedUntil` — i.e. into an
+  // auto-resume arm time. Today a 100 %-free bucket can never be in the `dead`
+  // list that reads it, so this is safe by CONSTRUCTION rather than by that
+  // argument, which is the point: the argument would have to be re-made by
+  // every future reader of this field.
+  const push = (kind, b, label) => { const r = bucketRemaining(b, nowSec); if (r != null) out.push({ kind, remaining: r, label, resetsAt: bucketCounts(b) ? (Number(b?.resetsAt) || 0) : 0 }); };
   push('fiveHour', cache.fiveHour, '5h');
   push('weekly', cache.sevenDay, '7d');
   for (const b of Array.isArray(cache.scopedWeekly) ? cache.scopedWeekly : []) push('weekly', b, String(b?.name || 'model cap'));
