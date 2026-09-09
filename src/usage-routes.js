@@ -1051,7 +1051,16 @@ function summarizeCodexRateLimits() {
   if (gid) {
     const a = byAccount[gid], g = byAccount['__global_codex__'];
     const newest = (a && (!g || (a.fetchedAt || 0) > (g.fetchedAt || 0))) ? a : g;
-    if (newest) { byAccount[gid] = newest; byAccount['__global_codex__'] = newest; }
+    if (newest) {
+      // The typed SET travels with the winner too (quota-model-v2 composition
+      // verifier): `writeCacheObject` below persists `setOf[key]`, so leaving
+      // the loser's set under its key wrote the LOSER's stale limits beneath
+      // the WINNER's fetchedAt — and the freshness guard then refused every
+      // later correction, for good. One identity, one set.
+      const winKey = newest === a ? gid : '__global_codex__';
+      byAccount[gid] = newest; byAccount['__global_codex__'] = newest;
+      setOf[gid] = setOf['__global_codex__'] = setOf[winKey];
+    }
   }
   // The freshness guard below still decides whether this write PROMOTES the
   // file; it no longer decides the BUCKETS — those go through the one write

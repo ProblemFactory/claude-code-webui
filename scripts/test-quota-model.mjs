@@ -1732,11 +1732,16 @@ console.log('\n⑱ only a parse that ENUMERATED may retire a limit (r6)');
   process.on('exit', () => { for (const f of mutants18) { try { fs.unlinkSync(f); } catch { } } });
   /** A patched copy BESIDE the original (same directory, or its `../` requires
    *  do not resolve). Returns {path, hits} so the patch can be asserted to hit. */
+  // Every mutant gets its OWN file name: `require` caches by path, so two
+  // mutants of the same source written to one name would make the second
+  // `require` return the FIRST mutant — a negative control silently driving
+  // the wrong code (⑱g's pre-fix control read ⑱f's mutant that way).
+  let mutSeq = 0;
   const mutantBeside = (rel, patches) => {
     let src = fs.readFileSync(path.join(ROOT, rel), 'utf8');
     const hits = [];
     for (const [from, to] of patches) { hits.push(src.split(from).length - 1); src = src.split(from).join(to); }
-    const dst = path.join(ROOT, path.dirname(rel), MUT18 + path.basename(rel));
+    const dst = path.join(ROOT, path.dirname(rel), `${MUT18}${++mutSeq}-${path.basename(rel)}`);
     fs.writeFileSync(dst, src);
     mutants18.push(dst);
     return { path: dst, hits };
@@ -2049,6 +2054,82 @@ console.log('\n⑱ only a parse that ENUMERATED may retire a limit (r6)');
     const line = said.find((s) => s.includes('retiring')) || '';
     ok(/model:oldmodel \(100% 7d, running\)/.test(line),
       `⑱e the retirement names the claim it drops, not just the id (${JSON.stringify(line)})`);
+  }
+
+  // ── ⑱g THE CODEX SAME-ACCOUNT MERGE CARRIES THE SET WITH THE WINNER ───────
+  //
+  // Composition verifier of the quota-model-v2 merge (2026-09-09): the codex
+  // global↔named same-account merge re-pointed `byAccount` at the newest
+  // snapshot but left `setOf` PER KEY — and the write-through right below it
+  // persists `setOf[key]`. So the LOSER's file received the loser's stale
+  // limits beneath the WINNER's fetchedAt, and the freshness guard
+  // (`cur.fetchedAt >= snap.fetchedAt`) then refused every later correction,
+  // for good: the pool read the account at 50 % used while the truth was 92 %.
+  // Latent on this instance today (no cxs-* file), live the moment a ChatGPT
+  // account matching the machine login is added. Driven through the REAL
+  // setupUsage + summarizeCodexRateLimits with a real AccountManager; the link
+  // is made the way the product makes it (one email on both sides).
+  {
+    const { AccountManager } = require(path.join(ROOT, 'src/accounts.js'));
+    const usageMod = require(path.join(ROOT, 'src/usage-routes.js'));
+    const EMAIL = 'same-login@example.test';
+    const OLDER = T0, NEWER = T0 + 60000;
+    const planAt = (pct) => ({ ...CODEX_PLAN, primary: { usedPercent: pct, windowDurationMins: 10080, resetsAt: 1789509325 } });
+    const mkLinkedWorld = (usageModule) => {
+      const root = fs.mkdtempSync(path.join(os.tmpdir(), `vs-qm18g-${process.pid}-`));
+      tmpDirs.push(root);
+      const dataDir = path.join(root, 'data');
+      const am = new AccountManager({ dataDir });
+      const cx = am.createCodexSubscription({ name: 'Linked ChatGPT' }).id;
+      const realList = am.list.bind(am);
+      am.list = () => { const r = realList(); for (const a of r.accounts || []) if (a.id === cx) a.email = EMAIL; return r; };
+      am.codexGlobalStatus = () => ({ loggedIn: true, email: EMAIL });
+      const cacheDir = path.join(dataDir, 'usage-cache'); fs.mkdirSync(cacheDir, { recursive: true });
+      // The named account's file is the OLDER reading (50 % used); the machine
+      // login's file is the NEWER one (92 % used) — one quota, two files.
+      W.writeReading({ cacheDir, key: cx, set: CODEXQ.toLimitSet(planAt(50), { identity: cx, source: 'codex-rate-limits', fetchedAt: OLDER }), source: 'codex-rate-limits', backend: 'codex' });
+      W.writeReading({ cacheDir, key: '__global_codex__', set: CODEXQ.toLimitSet(planAt(92), { identity: '__global_codex__', source: 'codex-rate-limits', fetchedAt: NEWER }), source: 'codex-rate-limits', backend: 'codex' });
+      const u = usageModule.setupUsage({
+        app: { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} },
+        accounts: am, hosts: null, usageHistory: null, activeSessions: new Map(),
+        serverSetting: () => undefined, ensureDir: (d) => fs.mkdirSync(d, { recursive: true }),
+        USAGE_CACHE_FILE: path.join(dataDir, 'usage-cache.json'), USAGE_CACHE_DIR: cacheDir,
+        CODEX_SESSIONS_DIR: path.join(root, 'codex-sessions'), META_DIR: path.join(dataDir, 'session-meta'),
+        AVAILABLE_MODELS: [], BUFFERS_DIR: path.join(dataDir, 'session-buffers'),
+        probeUsageForAccountKey: async () => false, onMemberReadingFresh: () => ({}), CLAUDE_CMD: '/bin/false',
+      });
+      return { cx, cacheDir, u };
+    };
+    const planPct = (o) => {
+      const l = ((o && o.limits) || []).find((x) => x.limitId === 'codex');
+      const w = l && (l.windows || []).find((x) => x.kind === '7d');
+      return w ? w.usedPct : null;
+    };
+
+    const w = mkLinkedWorld(usageMod);
+    const s = w.u.summarizeCodexRateLimits();
+    ok(s.byAccount[w.cx] === s.byAccount.__global_codex__ && planPct(s.byAccount[w.cx]) === 92,
+      `⑱g the linked pair projects ONE snapshot — the newer 92 % (${planPct(s.byAccount[w.cx])})`);
+    const file = W.readCacheObject(w.cacheDir, w.cx);
+    ok(planPct(file) === 92 && file.fetchedAt === NEWER,
+      `⑱g the named account's FILE now holds the winner's numbers under the winner's fetchedAt (${planPct(file)} @ ${file && file.fetchedAt})`);
+    const file2 = W.readCacheObject(w.cacheDir, '__global_codex__');
+    ok(planPct(file2) === 92 && file2.fetchedAt === NEWER, "⑱g the machine login's own file is untouched by the merge");
+
+    // NEGATIVE CONTROL: the pre-fix merge — byAccount re-pointed, setOf left
+    // per key. The named account's file then carries 50 % under the newer
+    // fetchedAt, and no later write at or before that instant can correct it.
+    const mPre = mutantBeside('src/usage-routes.js',
+      [["      setOf[gid] = setOf['__global_codex__'] = setOf[winKey];\n", '']]);
+    hit18(mPre, '⑱g pre-fix merge (set not carried with the winner)');
+    const w2 = mkLinkedWorld(require(mPre.path));
+    w2.u.summarizeCodexRateLimits();
+    const f2 = W.readCacheObject(w2.cacheDir, w2.cx);
+    ok(planPct(f2) === 50 && f2.fetchedAt === NEWER,
+      `⑱g NEGATIVE CONTROL: without carrying the set, the file holds the LOSER's 50 % beneath the WINNER's fetchedAt — the shape the freshness guard then protects for good (${planPct(f2)} @ ${f2 && f2.fetchedAt})`);
+    const again = CODEXQ.toLimitSet(planAt(92), { identity: w2.cx, source: 'codex-rate-limits', fetchedAt: NEWER });
+    const guardBlocks = (Number(f2.fetchedAt) || 0) >= (Number(again.fetchedAt) || 0);
+    ok(guardBlocks, '⑱g NEGATIVE CONTROL: a correct reading at that same instant is exactly what the write-through freshness guard refuses');
   }
 }
 
