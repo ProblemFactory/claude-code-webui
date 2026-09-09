@@ -483,6 +483,18 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     return false;
   }
 
+  /** The pre-fire gate broke. It probes fresh quota, re-runs the pool decision
+   *  and re-reads the verdict, so an exception means NONE of that happened —
+   *  the refusal is the only honest answer, and it must be SAID (a money gate
+   *  that fails silently reads exactly like one that passed). Journal +
+   *  telemetry only: the guard's own inbox item covers the user-facing half,
+   *  and the loop breaker's in-chat budget belongs to the refusals that
+   *  describe this conversation's pacing. */
+  function gateFailedClosed(id, how, e) {
+    log(`[auto-resume] ${id}: pre-fire gate ${how} — refusing the continue (fail closed): ${(e && e.message) || e}`);
+    try { global.__vsEvent?.('spend-gate-error', 'auto-resume:' + how); } catch { }
+  }
+
   /** ONE fire path for BOTH callers — the timed tick and the immediate
    *  (pool-switch) fireNow. Two things used to differ between them and both
    *  differences were bugs: the immediate path skipped the pre-fire gate
@@ -568,11 +580,37 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     // armed sessions, and everything the gate does BEFORE its first await is
     // synchronous re-entry (measured: 1992 levels deep with the flag raised
     // one line too late).
+    //
+    // FAIL CLOSED (P8), THE THIRD LAYER. Both halves used to answer a broken
+    // gate with a billed turn — `catch { gate = true; }` and `.catch(() =>
+    // deliver())` — and design §1.4 only named the other two layers (the
+    // engine's own `catch { return true; }` and the server.js wiring lambda).
+    // Fixing those two MASKS this one in production, which is precisely why it
+    // has to be fixed here as well: the mask lives in two different files from
+    // the bug, and making the wiring lambda `async` (the natural refactor —
+    // the callee already is) removes both halves of it at once. Measured on
+    // the real module: a throwing beforeFire delivered 1 continue, a rejecting
+    // one delivered 1; with the gate answering `false`, 0.
+    // The ARM IS NOT DROPPED, exactly as for a `false` verdict: the promise
+    // still stands, it is the gate that is unavailable, and the next tick
+    // (30 s) asks again.
     session._arFiring = true;
     let gate = true;
-    try { gate = beforeFire ? beforeFire(id, session) : true; } catch { gate = true; }
+    try { gate = beforeFire ? beforeFire(id, session) : true; }
+    catch (e) { gateFailedClosed(id, 'threw', e); gate = false; }
     if (gate && typeof gate.then === 'function') {
-      gate.then((g2) => { if (g2 !== false) deliver(); }).catch(() => deliver()).finally(() => { session._arFiring = false; });
+      // TWO-ARG `then`, deliberately: the rejection handler must see ONLY the
+      // gate's own failure. A trailing `.catch` would also catch a throw from
+      // `deliver()` (save() on a full disk, an emit handler) and report it as
+      // "the gate rejected" — and master's shape answered that case by calling
+      // `deliver()` a SECOND time. A reason string is an assertion about the
+      // system; the delivery's own failure gets its own line and no retry.
+      gate.then(
+        (g2) => { if (g2 !== false) deliver(); },
+        (e) => { gateFailedClosed(id, 'rejected', e); },   // never deliver() from here
+      )
+        .catch((e) => { log(`[auto-resume] ${id}: delivering the continue threw after the gate allowed it: ${(e && e.message) || e}`); })
+        .finally(() => { session._arFiring = false; });
       return true;
     }
     const done = gate === false ? false : deliver();

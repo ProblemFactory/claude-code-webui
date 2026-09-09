@@ -908,7 +908,23 @@ const SETTINGS_SCHEMA = {
   },
 };
 
-// Ordered category list for UI rendering
+// Ordered category list for UI rendering.
+//
+// THIS LIST IS THE RENDER LOOP, NOT A HINT. SettingsUI._renderContent groups
+// every row by `schema.category` and then renders by iterating THIS ARRAY — a
+// category that is missing here is grouped into a bucket nobody reads, so its
+// rows are unreachable in the product AND invisible to search ("No settings
+// match your search."). Measured on this file before the fix: 118 settings,
+// 108 rendered, 10 dropped — the seven `Spending` rows (every money ceiling,
+// the overage consent and the EDF reserve floor, while three shipped strings
+// told the user to go to "Settings → Spending") and the three `OpenCode` rows,
+// which had been invisible since they shipped.
+// scripts/test-architecture.mjs §44 is the census that makes the next omission
+// fail the BUILD; adding a category here is the whole fix.
+// The ORDER follows docs/settings.md's "All Settings Reference" so the nav and
+// the manual read the same way top to bottom — a convention, not an enforced
+// invariant: §44 asserts MEMBERSHIP (which is what makes a setting reachable),
+// never the sequence.
 const SETTINGS_CATEGORIES = [
   t('Toolbar & Layout'),
   t('Window'),
@@ -916,8 +932,10 @@ const SETTINGS_CATEGORIES = [
   t('Chat'),
   t('Session'),
   t('Integration'),
+  t('Spending'),
   t('Claude'),
   t('Codex'),
+  t('OpenCode'),
   t('Sidebar'),
   t('Session Card'),
 ];

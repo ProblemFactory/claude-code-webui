@@ -233,17 +233,49 @@ console.log('\n§1 the pure decision (src/spend-authorizer.js)');
 // Grep-derived from the TRACKED source, exactly like the writer-sweep and NUL
 // censuses: the file set is a property (what git tracks under the server-side
 // roots), never a hand-written list, and the set it walked is PRINTED.
-console.log('\n§2 the census: every producer of a turn nobody typed is under the ceiling');
-
-// A producer PRIMITIVE = a way to put a user turn into a live session.
+//
+// PER SITE, NOT PER FILE (r3). Rounds 1-2 computed ONE verdict per file and
+// every primitive in it inherited that verdict, so a NEW producer added to any
+// of the four files that already ask the gate was invisible — the same class as
+// r2's "constructs the guard but never asks it", one level up, and those four
+// files are exactly where the next producer is most likely to land. Reproduced
+// verbatim on a scratch file holding a correctly gated Stop-nudge arbiter AND a
+// new ungated `formatChatInput` producer: verdict `GATED`, unwired count 0.
+//
+// A SITE IS GATED WHEN A GATE CALL IS STILL IN SCOPE ABOVE IT — you ask before
+// you spend, and the asking has to be in the same function. "In scope" is
+// decided by INDENTATION, not by a byte window: a window big enough for the
+// real code (measured: the delivery ladder's own gate sits 6,285 chars above
+// its last rung) is bigger than most files, so it would call the scratch file
+// above gated too and the control would be theatre. Three properties make the
+// measurement match the code as written:
+//   · comments are BLANKED first (offset-preserving, whole-line only — the
+//     conservative rule §9 already uses). auto-resume's JSDoc says
+//     `@param deps.authorizeSpend (id, session, identity) => …`, which satisfies
+//     a call-shaped regex: r2's "a CALL, never a mention" rule was true of the
+//     regex and false of the input it was run on.
+//   · an anchor may be a call to a LOCALLY GATED HELPER — auto-resume asks
+//     through `spendOk(…)` on the line directly above its send. Without this rung the
+//     one correctly gated site in that file reads unwired, and a census that
+//     reddens on correct code is a census somebody deletes.
+//   · a one-line `const x = (() => {…})()` is not an enclosure. Deriving the
+//     enclosing function from "the nearest header line above" picked exactly
+//     such a sibling in agent-routes and mislaid the real Stop-nudge gate.
+// HONEST BOUNDARY: `HEADER_LINE` is a heuristic, and an UNRECOGNISED header
+// falls back to module level — i.e. only a column-0 closer ends the scope, so
+// the error direction is PERMISSIVE (a gate can appear to cover a site it does
+// not). That is deliberate: the opposite error reddens correct code, and a
+// census that reddens on correct code is one somebody deletes. What the
+// controls pin is the shape a new producer actually takes — a function beside
+// a gated one, with a `}` between them.
 const PRIMITIVES = [
-  { id: 'user-frame', re: /formatChatInput\s*\(/, why: 'composes a USER message frame for a live session' },
-  { id: 'continue-send', re: /sendToSession\s*\(/, why: 'hands a session a user turn it did not ask for (auto-resume\'s continue)' },
-  { id: 'cli-inbox', re: /\b(postToPeer|postChannelEvent|peerPost)\s*\(/, why: "writes into the CLI's own cross-session inbox — idle ⇒ a billed turn" },
-  { id: 'rpc-peer-frame', re: /type:\s*'peer-message'/, why: "hands the wrapper a peer message — idle ⇒ turn/start" },
-  { id: 'deliver-ladder', re: /deliverToConversation\s*\(/, why: 'the delivery ladder itself (jobs notifications, agent messages)' },
-  { id: 'stop-nudge', re: /block:\s*true/, why: 'the Stop hook arbiter — block+reason IS an extra billed mini-turn' },
-  { id: 'reset-credit', re: /type:\s*'codex-reset-credit'/, why: 'consumes a stored reset credit (money already paid for)' },
+  { id: 'user-frame', re: /formatChatInput\s*\(/g, why: 'composes a USER message frame for a live session' },
+  { id: 'continue-send', re: /sendToSession\s*\(/g, why: 'hands a session a user turn it did not ask for (auto-resume\'s continue)' },
+  { id: 'cli-inbox', re: /\b(postToPeer|postChannelEvent|peerPost)\s*\(/g, why: "writes into the CLI's own cross-session inbox — idle ⇒ a billed turn" },
+  { id: 'rpc-peer-frame', re: /type:\s*'peer-message'/g, why: "hands the wrapper a peer message — idle ⇒ turn/start" },
+  { id: 'deliver-ladder', re: /deliverToConversation\s*\(/g, why: 'the delivery ladder itself (jobs notifications, agent messages)' },
+  { id: 'stop-nudge', re: /block:\s*true/g, why: 'the Stop hook arbiter — block+reason IS an extra billed mini-turn' },
+  { id: 'reset-credit', re: /type:\s*'codex-reset-credit'/g, why: 'consumes a stored reset credit (money already paid for)' },
 ];
 // GATED = the file ASKS THE GATE. It must be a CALL, never a mention: r2 found
 // `src/server/usage-pool-engine.js` reported GATED because it CONSTRUCTS the
@@ -252,33 +284,119 @@ const PRIMITIVES = [
 // passed. The census said "gated" about the one file that also happens to be
 // where the guard is built, so the producer inside it was invisible. Matching
 // the call shape means the construction line alone no longer satisfies it.
-const GATED_RE = /(?:authorizeSpend|spendGuard\.authorize|authorizeUnattendedSpend)\s*\(/;
+const GATED_RE = /(?:authorizeSpend|spendGuard\.authorize|authorizeUnattendedSpend)\s*\(/g;
+// A function HEADER line, and the name it declares. Only used to decide "which
+// function is this anchor in", so an over-match costs precision, never safety.
+const HEADER_LINE = /^(\s*)(?:(?:export\s+)?(?:async\s+)?function\s+[A-Za-z_$][\w$]*|(?:const|let|var)\s+[A-Za-z_$][\w$]*\s*=\s*(?:async\s*)?(?:function\b|\([^)]*\)\s*=>|[A-Za-z_$][\w$]*\s*=>))/;
+const HEADER_NAME = /(?:function\s+([A-Za-z_$][\w$]*)|(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=)/;
 // NOT a spend site — each entry says why, and an entry that stops matching
-// anything FAILS (a dead allowlist row hides the next real producer).
+// anything FAILS (a dead allowlist row hides the next real producer). Keyed by
+// (file, PRIMITIVE) since r3: a whole-file pass would re-open the hole this
+// round closed — a new `formatChatInput` in src/jobs.js must still be caught by
+// the row that excuses its `deliverToConversation` call.
 const ALLOW = [
-  { file: 'src/ws-handler.js', why: 'THE HUMAN PATH: a ws `input` message is the owner typing, and the codex reset-credit case is the owner clicking it. Owner-typed turns are never counted (D6) — this row IS that rule' },
-  { file: 'src/adapters/claude-code.js', why: 'a FORMATTER: builds the frame, never sends it' },
-  { file: 'src/adapters/codex.js', why: 'a FORMATTER: builds the frame, never sends it' },
-  { file: 'src/adapters/acp.js', why: 'a FORMATTER: builds the frame, never sends it' },
-  { file: 'src/peer-messaging.js', why: 'the PRIMITIVE (unix-socket write). Policy lives at the ladder that calls it — this file has no idea who asked' },
-  { file: 'src/agentd/agentd.js', why: 'the DEVICE half of a delivery the hub already authorized (the peer-post op)' },
-  { file: 'src/agentd/client.js', why: 'the hub-side RPC stub for that same op' },
-  { file: 'src/server/jobs-wiring.js', why: 'a pass-through that forwards to the gated ladder' },
-  { file: 'src/jobs.js', why: 'the jobs engine calls the gated ladder and stashes what it refuses (its own 30s floor is pacing, not money)' },
+  { file: 'src/ws-handler.js', prim: 'user-frame', why: 'THE HUMAN PATH: a ws `input` message is the owner typing, and the codex reset-credit case is the owner clicking it. Owner-typed turns are never counted (D6) — this row IS that rule' },
+  { file: 'src/adapters/claude-code.js', prim: 'user-frame', why: 'a FORMATTER: builds the frame, never sends it' },
+  { file: 'src/adapters/codex.js', prim: 'user-frame', why: 'a FORMATTER: builds the frame, never sends it' },
+  { file: 'src/adapters/acp.js', prim: 'user-frame', why: 'a FORMATTER: builds the frame, never sends it' },
+  { file: 'src/peer-messaging.js', prim: 'cli-inbox', why: 'the PRIMITIVE (unix-socket write). Policy lives at the ladder that calls it — this file has no idea who asked' },
+  { file: 'src/agentd/agentd.js', prim: 'cli-inbox', why: 'the DEVICE half of a delivery the hub already authorized (the peer-post op)' },
+  { file: 'src/agentd/client.js', prim: 'cli-inbox', why: 'the hub-side RPC stub for that same op' },
+  { file: 'src/server/jobs-wiring.js', prim: 'deliver-ladder', why: 'a pass-through that forwards to the gated ladder' },
+  { file: 'src/jobs.js', prim: 'deliver-ladder', why: 'the jobs engine calls the gated ladder and stashes what it refuses (its own 30s floor is pacing, not money)' },
+  // Two rows the per-SITE verdict made explicit. Both were covered before by
+  // "this file asks the gate SOMEWHERE", which is the very inference r3 removed.
+  { file: 'src/agent-routes.js', prim: 'deliver-ladder', why: 'agent messaging FORWARDS to the gated ladder (spendReason peer-message); the ladder authorizes every call, reason or not. The Stop nudge, in this same file, is gated at its own site' },
+  { file: 'src/server/conversation-deliver.js', prim: 'deliver-ladder', why: "the ladder's OWN header — the gate is the first thing in its body, which is what makes every rung below it (the cli-inbox and rpc-peer-frame sites) report GATED" },
 ];
+
+/** Blank whole-line comments, preserving every byte offset and line break.
+ *  Deliberately conservative — a trailing `// …` is left alone — because a
+ *  string-aware stripper would have to understand `'http://…'` and regex
+ *  literals to avoid eating real code. The shape it must catch is the JSDoc
+ *  block, and that is what it catches. */
+function stripLineComments(src) {
+  return src.split('\n').map((l) => (/^\s*(\/\/|\*|\/\*)/.test(l) ? ' '.repeat(l.length) : l)).join('\n');
+}
+
+/** Where the gate is in scope, for one file. */
+function gateScopes(code) {
+  const lines = code.split('\n');
+  const starts = [0];
+  for (let i = 0; i < code.length; i++) if (code[i] === '\n') starts.push(i + 1);
+  const lineNo = (i) => { let lo = 0, hi = starts.length - 1; while (lo < hi) { const m = (lo + hi + 1) >> 1; if (starts[m] <= i) lo = m; else hi = m - 1; } return lo; };
+  const bal = (l) => (l.match(/\{/g) || []).length - (l.match(/\}/g) || []).length;
+  const headers = [];
+  lines.forEach((l, n) => {
+    const m = HEADER_LINE.exec(l);
+    if (!m) return;
+    const nm = HEADER_NAME.exec(l);
+    headers.push({ line: n, indent: m[1].length, open: bal(l) > 0, name: (nm && (nm[1] || nm[2])) || null });
+  });
+  /** does a line between a and b close a block at or outside `ind`? */
+  const closes = (a, b, ind) => {
+    for (let n = a; n < b; n++) {
+      const l = lines[n];
+      if (!l.trim()) continue;
+      const lead = l.length - l.trimStart().length;
+      if (lead <= ind && /^[)}\]]/.test(l.trimStart())) return true;
+    }
+    return false;
+  };
+  /** the innermost function still OPEN at this line (null = module level) */
+  const enclosing = (ln) => {
+    for (let k = headers.length - 1; k >= 0; k--) {
+      const h = headers[k];
+      if (h.line > ln || !h.open) continue;      // below us, or a one-line declaration
+      if (closes(h.line + 1, ln, h.indent)) continue;  // it already closed
+      return h;
+    }
+    return null;
+  };
+  GATED_RE.lastIndex = 0;
+  const gates = [...code.matchAll(GATED_RE)].map((m) => m.index);
+  const helpers = new Set();
+  for (const g of gates) { const h = enclosing(lineNo(g)); if (h && h.name) helpers.add(h.name); }
+  const anchors = gates.map((i) => ({ i, kind: 'gate' }));
+  for (const nm of helpers) for (const m of code.matchAll(new RegExp('\\b' + nm + '\\s*\\(', 'g'))) if (!gates.includes(m.index)) anchors.push({ i: m.index, kind: nm + '()' });
+  anchors.sort((a, b) => a.i - b.i);
+  const gateFor = (site) => {
+    let via = null;
+    for (const a of anchors) {
+      if (a.i >= site) break;
+      const h = enclosing(lineNo(a.i));
+      if (!closes(lineNo(a.i) + 1, lineNo(site), h ? h.indent : 0)) via = a;
+    }
+    return via ? { kind: via.kind, line: lineNo(via.i) + 1 } : null;
+  };
+  return { gateFor, lineNo, helpers: [...helpers] };
+}
 
 /** The census, parameterized by ROOT so the negative control can run the very
  *  same code over a scratch tree (a census that cannot be driven over a tree
- *  with a known offender is a census nobody has ever seen go red). */
+ *  with a known offender is a census nobody has ever seen go red).
+ *  One row PER SITE: {file, prim, line, gated, via}. */
 function censusOver(root, files) {
-  const hits = [];   // {file, prim, gated}
+  const hits = [];
   for (const f of files) {
     let src = '';
     try { src = fs.readFileSync(path.join(root, f), 'utf8'); } catch { continue; }
-    const gated = GATED_RE.test(src);
-    for (const p of PRIMITIVES) if (p.re.test(src)) hits.push({ file: f, prim: p.id, gated });
+    const code = stripLineComments(src);
+    const S = gateScopes(code);
+    for (const p of PRIMITIVES) {
+      p.re.lastIndex = 0;
+      for (const m of code.matchAll(p.re)) {
+        const via = S.gateFor(m.index);
+        hits.push({ file: f, prim: p.id, line: S.lineNo(m.index) + 1, gated: !!via, via: via ? `${via.kind}@${via.line}` : null });
+      }
+    }
   }
   return hits;
+}
+/** The RETIRED, file-granular verdict — kept as a live negative control so the
+ *  blind spot r3 closed can be demonstrated rather than described. */
+function fileGranularGated(root, f) {
+  try { return new RegExp(GATED_RE.source).test(fs.readFileSync(path.join(root, f), 'utf8')); } catch { return false; }
 }
 function trackedServerSource() {
   const out = execFileSync('git', ['-C', REPO, 'ls-files', '-z', '--', 'src', 'server.js', 'data/bin'], { env: GIT_ENV, maxBuffer: 64 * 1024 * 1024 }).toString();
@@ -294,17 +412,26 @@ function trackedServerSource() {
       && ['server.js', 'src/server/auto-resume.js', 'src/server/conversation-deliver.js', 'src/agent-routes.js', 'src/server/usage-pool-engine.js'].every((f) => files.includes(f)),
       `${files.length} tracked server-side files`);
     const hits = censusOver(REPO, files);
-    const byFile = new Map();
-    for (const h of hits) { if (!byFile.has(h.file)) byFile.set(h.file, { gated: h.gated, prims: new Set() }); byFile.get(h.file).prims.add(h.prim); }
-    console.log('    producers found (' + byFile.size + '):');
-    for (const [f, v] of [...byFile].sort()) console.log(`      ${v.gated ? 'GATED   ' : 'allowed?'} ${f}  [${[...v.prims].join(', ')}]`);
-    const allowSet = new Set(ALLOW.map((a) => a.file));
-    const unwired = [...byFile].filter(([f, v]) => !v.gated && !allowSet.has(f)).map(([f]) => f);
-    ok('§2 every producer of an unattended turn is under the authorizer (or allowlisted WITH a reason)', unwired.length === 0, unwired.join(', '));
-    const deadAllow = ALLOW.filter((a) => !byFile.has(a.file));
-    ok('§2 no dead allowlist entry (a row that matches nothing hides the next real producer)', deadAllow.length === 0, deadAllow.map((a) => a.file).join(', '));
-    ok('§2 every allowlist row states WHY', ALLOW.every((a) => typeof a.why === 'string' && a.why.length > 20));
-    const gatedFiles = [...byFile].filter(([, v]) => v.gated).map(([f]) => f);
+    const allowKey = (h) => h.file + '#' + h.prim;
+    const allowSet = new Set(ALLOW.map((a) => a.file + '#' + a.prim));
+    console.log('    producer SITES found (' + hits.length + ' in ' + new Set(hits.map((h) => h.file)).size + ' files):');
+    for (const h of [...hits].sort((a, b) => (a.file + a.prim).localeCompare(b.file + b.prim)))
+      console.log(`      ${h.gated ? 'GATED   ' : allowSet.has(allowKey(h)) ? 'allowed ' : 'UNWIRED '} ${h.file}:${h.line}  [${h.prim}]${h.via ? '  ← ' + h.via : ''}`);
+    const unwired = hits.filter((h) => !h.gated && !allowSet.has(allowKey(h))).map((h) => `${h.file}:${h.line} [${h.prim}]`);
+    ok('§2 every SITE that can open an unattended turn is under the authorizer (or allowlisted WITH a reason)', unwired.length === 0, unwired.join(', '));
+    const deadAllow = ALLOW.filter((a) => !hits.some((h) => h.file === a.file && h.prim === a.prim));
+    ok('§2 no dead allowlist entry (a row that matches nothing hides the next real producer)', deadAllow.length === 0, deadAllow.map((a) => a.file + '#' + a.prim).join(', '));
+    ok('§2 every allowlist row states WHY, and names the ONE primitive it excuses', ALLOW.every((a) => typeof a.why === 'string' && a.why.length > 20 && PRIMITIVES.some((p) => p.id === a.prim)));
+    // THE PAIR KEY IS LOAD-BEARING ON THE REAL TREE, not only on a fixture:
+    // src/agent-routes.js holds a GATED site (the Stop nudge) and an allowed
+    // one (the forward to the ladder), and src/server/conversation-deliver.js
+    // the same. Under the retired file-granular verdict both files answered one
+    // word for every site in them — which is the defect this round closed.
+    const mixedFiles = [...new Set(hits.map((h) => h.file))]
+      .filter((f) => hits.some((h) => h.file === f && h.gated) && hits.some((h) => h.file === f && !h.gated));
+    ok('§2 …and files holding BOTH a gated and a non-gated site are reported per site (' + mixedFiles.join(', ') + ')',
+      mixedFiles.length >= 2 && mixedFiles.every((f) => fileGranularGated(REPO, f)), mixedFiles.join(', '));
+    const gatedFiles = [...new Set(hits.filter((h) => h.gated).map((h) => h.file))];
     // THE REASON TABLE, BOTH WAYS: every reason a producer passes must be
     // declared (an undeclared one is refused at runtime — §1 — so it would be a
     // silently dead producer), and every declared reason must have a producer
@@ -347,6 +474,56 @@ function trackedServerSource() {
       cHits3.length === 1 && cHits3[0].gated === false, JSON.stringify(cHits3));
     ok('§2 …and the retired regex would have called that same file gated (the blind spot, kept as a control)',
       /authorizeSpend|spendGuard|spend-authorizer/.test(fs.readFileSync(path.join(scratch, 'src/server/new-producer.js'), 'utf8')));
+
+    // ── r3's OWN BLIND SPOT: ONE gated producer + ONE new ungated producer in
+    // the SAME file. Under the file-granular verdict this file answered GATED
+    // and the new `formatChatInput` producer was reported nowhere — the exact
+    // shape a future producer takes when it lands in one of the four files that
+    // already ask the gate.
+    const mixed = path.join(scratch, 'src/server/mixed.js');
+    fs.writeFileSync(mixed, [
+      "'use strict';",
+      'function stopArbiter(s) {',
+      "  if (!spendGuard.authorize({ reason: 'stop-nudge', session: s }).ok) return null;",
+      "  return { block: true, reason: 'report your progress' };",
+      '}',
+      'function notifyOwner(session, text) {',
+      "  const { stdinPayload } = adapter.formatChatInput(text, 'x');",
+      "  session.pty.write(stdinPayload + '\\n');",
+      '}',
+      'module.exports = { stopArbiter, notifyOwner };',
+    ].join('\n'));
+    const mHits = censusOver(scratch, ['src/server/mixed.js']);
+    const mGated = mHits.filter((h) => h.gated).map((h) => h.prim);
+    const mUnwired = mHits.filter((h) => !h.gated).map((h) => h.prim);
+    ok('§2 NEGATIVE CONTROL (r3): a NEW ungated producer beside a gated one in the SAME file is reported UNWIRED',
+      mUnwired.length === 1 && mUnwired[0] === 'user-frame', JSON.stringify(mHits));
+    ok('§2 …while the correctly gated site in that same file still reads GATED (the fix is precision, not a blanket refusal)',
+      mGated.length === 1 && mGated[0] === 'stop-nudge', JSON.stringify(mHits));
+    ok('§2 …and the RETIRED file-granular verdict calls that whole file gated (the blind spot, reproduced not described)',
+      fileGranularGated(scratch, 'src/server/mixed.js') === true);
+
+    // A gate that exists only in a JSDoc block is a MENTION. r2 made the regex
+    // call-shaped; the input it ran on still carried `@param deps.authorizeSpend
+    // (id, session, identity) => …`, which IS call-shaped — so src/server/
+    // auto-resume.js would have read GATED even with its real gate deleted.
+    fs.writeFileSync(path.join(scratch, 'src/server/doc-only.js'), [
+      "'use strict';",
+      '/**',
+      ' * @param deps.authorizeSpend (id, session, identity) => {ok, why}',
+      ' *        THE SPEND CEILING — every producer must ask it.',
+      ' */',
+      'function notifyOwner(session, text) {',
+      "  const { stdinPayload } = adapter.formatChatInput(text, 'x');",
+      "  session.pty.write(stdinPayload + '\\n');",
+      '}',
+      'module.exports = { notifyOwner };',
+    ].join('\n'));
+    const dHits = censusOver(scratch, ['src/server/doc-only.js']);
+    ok('§2 NEGATIVE CONTROL (r3): a gate that exists only in a JSDoc block does not gate anything',
+      dHits.length === 1 && dHits[0].gated === false, JSON.stringify(dHits));
+    ok('§2 …and WITHOUT comment-stripping that same file reads gated (why the census blanks whole-line comments)',
+      fileGranularGated(scratch, 'src/server/doc-only.js') === true);
   }
 
   // WIRING PIN — the census proves a file ASKS; these prove server.js HANDS it
@@ -965,7 +1142,92 @@ console.log('\n§9 fail closed: an authorizer that throws spends nothing (P8)');
   ok('§9 the ladder: a throwing authorizer delivers nothing and says why (the caller stashes)',
     r.ok === false && r.refused === 'spend' && posted.length === 0, JSON.stringify(r));
 
-  // (c) the pre-fire gate itself — design §1.4 named BOTH sites as failing OPEN
+  // (c) THE PRE-FIRE GATE, THE THIRD LAYER — DRIVEN, not read.
+  // P8 is "money gates fail CLOSED, at EVERY layer", and design §1.4 named two
+  // (the engine's `catch { return true; }` and the server.js wiring lambda).
+  // auto-resume has a THIRD, its own, and round 2 verified the fix by GREPPING
+  // the two other files — so nothing ever drove this one. Measured on the real
+  // module at that commit: `beforeFire` throwing ⇒ 1 billed continue delivered,
+  // `beforeFire` returning a rejected promise ⇒ 1. It is masked in production
+  // (the engine's body is wholly inside its own try/catch, and the wiring
+  // lambda catches synchronous throws), but the mask lives in two other files
+  // and making that lambda `async` — the natural refactor, since the callee
+  // already is — removes both halves of it at once.
+  {
+    const gateRun = async (mod, beforeFire) => {
+      const r2 = tmpdir('vs-spend-gate-');
+      const sess = new Map(); const fires = [];
+      const g = mod.create({
+        dataDir: r2, activeSessions: sess, serverSetting: () => true, log: () => { },
+        sendToSession: (gid) => { fires.push(gid); return true; },
+        fireIdentity: () => ({ key: 'k', name: 'K' }), beforeFire,
+      });
+      const gs = { backend: 'claude', mode: 'chat', _webuiId: 'g1', _autoResume: true, name: 'c' };
+      sess.set('g1', gs);
+      g.armIfEnabled('g1', gs, Date.now() + 60_000, 'usage limit');
+      g.tick(Date.now() + 120_000);
+      await tick(60);
+      return { fires: fires.length, armed: !!g._armed.get('g1') };
+    };
+    const refuses = await gateRun(arMod, () => false);
+    const allows = await gateRun(arMod, () => true);
+    ok('§9 CONTROL: the gate is REACHED — it answers `false` and nothing is sent, `true` and one continue is (an unreached gate proves nothing)',
+      refuses.fires === 0 && allows.fires === 1, JSON.stringify({ refuses, allows }));
+    const threw = await gateRun(arMod, () => { throw new Error('boom'); });
+    const rejected = await gateRun(arMod, () => Promise.reject(new Error('boom')));
+    ok('§9 a pre-fire gate that THROWS spends nothing (was: `catch { gate = true; }` ⇒ one billed continue)',
+      threw.fires === 0, JSON.stringify(threw));
+    ok('§9 …and one that returns a REJECTED PROMISE spends nothing (was: `.catch(() => deliver())` ⇒ one billed continue)',
+      rejected.fires === 0, JSON.stringify(rejected));
+    ok('§9 …and BOTH keep the session armed (a broken gate is not a broken promise — the next tick asks again)',
+      threw.armed === true && rejected.armed === true, JSON.stringify({ threw, rejected }));
+
+    // NEGATIVE CONTROL: a PATCHED COPY of the real module with master's two
+    // shapes restored (P12 — and the patch must be asserted to have landed, or
+    // a control that silently stopped matching goes green forever). The copy
+    // may live in a tmpdir because this module requires only `fs`/`path`; a
+    // relative require would have to sit beside the original to resolve.
+    const arSrc = read('src/server/auto-resume.js');
+    ok('§9 NEGATIVE CONTROL scope: the module has no relative require, so a copy anywhere is the same module',
+      !/require\('\.\.?\//.test(arSrc));
+    let pre = arSrc;
+    // master's byte-exact shapes (git show 40ad936d:src/server/auto-resume.js)
+    const MASTER_PROMISE = 'gate.then((g2) => { if (g2 !== false) deliver(); }).catch(() => deliver()).finally(() => { session._arFiring = false; });';
+    const subs = [
+      ["catch (e) { gateFailedClosed(id, 'threw', e); gate = false; }", 'catch { gate = true; }'],
+      [`gate.then(
+        (g2) => { if (g2 !== false) deliver(); },
+        (e) => { gateFailedClosed(id, 'rejected', e); },   // never deliver() from here
+      )
+        .catch((e) => { log(\`[auto-resume] \${id}: delivering the continue threw after the gate allowed it: \${(e && e.message) || e}\`); })
+        .finally(() => { session._arFiring = false; });`, MASTER_PROMISE],
+    ];
+    let hits = 0;
+    for (const [from, to] of subs) { if (pre.includes(from)) { hits++; pre = pre.replace(from, to); } }
+    ok('§9 NEGATIVE CONTROL: both of master\'s shapes were re-applied to the copy (an unapplied patch is a green control)',
+      hits === 2 && /catch \{ gate = true; \}/.test(pre) && pre.includes(MASTER_PROMISE), `${hits}/2 substitutions`);
+    // …and they are MASTER's, byte for byte — not a shape this suite invented.
+    {
+      let masterSrc = '';
+      try { masterSrc = execFileSync('git', ['-C', REPO, 'show', '40ad936d:src/server/auto-resume.js'], { env: GIT_ENV, maxBuffer: 64 * 1024 * 1024 }).toString(); } catch { }
+      if (!masterSrc) console.log('  · SKIP: git could not read 40ad936d:src/server/auto-resume.js (the pre-fix bytes)');
+      else ok('§9 …and both restored shapes are byte-identical to master\'s (the control reproduces the SHIPPED defect, not an invented one)',
+        masterSrc.includes('catch { gate = true; }') && masterSrc.includes(MASTER_PROMISE));
+    }
+    const preDir = tmpdir('vs-spend-prefix-');
+    const preFile = path.join(preDir, 'auto-resume-prefix.cjs');
+    fs.writeFileSync(preFile, pre);
+    const preMod = require(preFile);
+    const preThrew = await gateRun(preMod, () => { throw new Error('boom'); });
+    const preRejected = await gateRun(preMod, () => Promise.reject(new Error('boom')));
+    ok('§9 NEGATIVE CONTROL: master\'s copy DELIVERS a billed continue on both — one per broken gate (this is the defect, reproduced)',
+      preThrew.fires === 1 && preRejected.fires === 1, JSON.stringify({ preThrew, preRejected }));
+  }
+
+  // …and the other two layers, which are PINNED rather than driven: the engine
+  // gate needs a whole pool world to reach and the server.js lambda is a
+  // literal inside the boot wiring. Both are named here so a reader knows
+  // which claim is a measurement and which is a read.
   ok('§9 the pre-fire gate fails CLOSED in the engine (was `catch { return true; }`)',
     /refusing the continue \(fail closed\)[\s\S]{0,200}return false;/.test(read('src/server/usage-pool-engine.js')));
   ok('§9 …and at the wiring site in server.js (one alone stayed green: a throw was answered with a billed turn at BOTH layers)',

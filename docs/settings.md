@@ -182,6 +182,19 @@ Every turn VibeSpace starts **without you** — the auto-continue after a usage 
 | `codex.defaultEffort` | enum | `''` | Default Codex reasoning effort for NEW Codex sessions — a resumed thread keeps the effort its own last `turn_context` ran at (B-6b6d) |
 | `codex.defaultExtraArgs` | text | `''` | Extra Codex CLI args appended when starting a Codex session |
 
+### OpenCode
+
+These three shipped without an entry in `SETTINGS_CATEGORIES`, which is the Settings panel's render loop,
+so they were never rendered, never searchable and never documented. Fixed 2026-09-09, together with the
+same omission that had made every `Spending` row above unreachable; `scripts/test-architecture.mjs` §44
+now fails the build if a category ever goes unlisted again.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `opencode.defaultModel` | combobox | `''` | A model id the agent offers (`provider/model`); the list fills from the agent once a session has started, empty keeps the agent default. NEW sessions only — a resumed conversation keeps the model OpenCode's own session record names (that needs the OpenCode background service; without it the default applies and the server log says which rung it used) |
+| `opencode.defaultPermissionMode` | enum | `''` | Default OpenCode session mode for new sessions: `build` executes tools per its permission rules, `plan` disallows edits |
+| `opencode.defaultExtraArgs` | text | `''` | Extra OpenCode CLI args appended when starting an OpenCode session |
+
 ### Sidebar
 
 | Setting | Type | Default | Description |

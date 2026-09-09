@@ -784,5 +784,78 @@ for (const [edge] of EXCEPTIONS) {
   // check may only read what a build reads; cross-file wiring is a suite's job.
 }
 
+// 44. THE SETTINGS CATEGORY CENSUS (2026-09-09). `SETTINGS_CATEGORIES` is not
+//     a hint about ordering — it IS SettingsUI's render loop. `_renderContent`
+//     groups every row by `schema.category` (creating a bucket for whatever it
+//     finds) and then renders by iterating that ARRAY, so a category nobody
+//     listed is grouped and dropped: its rows are unreachable in the product
+//     and invisible to the search box, which answers "No settings match your
+//     search." There is no second write path — `serverSetting()` reads the
+//     sparse data/settings.json, and only this UI writes it.
+//
+//     Measured before the fix: 118 settings, 108 rendered, 10 NEVER RENDERED —
+//     the seven `Spending` rows (every unattended-spend ceiling, the overage
+//     consent and the EDF reserve floor, while the pool's blocked notice, the
+//     spend guard's inbox item and the overage chip all told the user to open
+//     "Settings → Spending") plus three `OpenCode` rows that had been invisible
+//     since the day they shipped. Nothing was red: no suite compared the two
+//     sets, which is exactly why the second omission could ride in behind the
+//     first.
+//
+//     It lives HERE, in the build, because the defect is one missing array
+//     entry in a file every feature touches, and because it reads only
+//     src/lib/** — inside the partial-copy set the browser suites build (the
+//     §43 scar). The assert is the CONSEQUENCE ("every row renders"), not just
+//     set inclusion, and the UI's own coupling is pinned so the replay cannot
+//     drift away from the loop it stands for.
+{
+  const schemaMod = await import('../src/lib/settings-schema.js');
+  const { SETTINGS_SCHEMA, SETTINGS_CATEGORIES } = schemaMod;
+  const ui = read('src/lib/settings-ui.js');
+
+  /** SettingsUI._renderContent, verbatim in shape: group by category, then
+   *  render by walking the ordered list. Returns the paths that reach a
+   *  section. */
+  const renderedPaths = (schema, cats) => {
+    const grouped = {};
+    for (const cat of cats) grouped[cat] = [];
+    for (const [p, s] of Object.entries(schema)) {
+      const cat = s.category || 'Other';
+      if (!grouped[cat]) grouped[cat] = [];
+      grouped[cat].push(p);
+    }
+    const out = [];
+    for (const cat of cats) for (const p of grouped[cat] || []) out.push(p);
+    return out;
+  };
+
+  const all = Object.keys(SETTINGS_SCHEMA);
+  const cats = [...new Set(Object.values(SETTINGS_SCHEMA).map((s) => s.category))];
+  ok(all.length > 50 && cats.length > 5 && SETTINGS_CATEGORIES.length > 5,
+    `settings census scope is non-vacuous (${all.length} settings in ${cats.length} categories, ${SETTINGS_CATEGORIES.length} listed)`);
+  ok(/for \(const cat of SETTINGS_CATEGORIES\)/.test(ui) && /grouped\[cat\]/.test(ui),
+    'SettingsUI still RENDERS by iterating SETTINGS_CATEGORIES (the coupling this census stands for)');
+
+  const rendered = renderedPaths(SETTINGS_SCHEMA, SETTINGS_CATEGORIES);
+  const dropped = all.filter((p) => !rendered.includes(p));
+  ok(dropped.length === 0,
+    `every setting reaches a rendered section (${rendered.length}/${all.length}${dropped.length ? ' — DROPPED: ' + dropped.slice(0, 6).join(', ') : ''})`);
+  const unlisted = cats.filter((c) => !SETTINGS_CATEGORIES.includes(c));
+  ok(unlisted.length === 0, `every schema category is in SETTINGS_CATEGORIES (${unlisted.join(', ') || 'clean'})`);
+  // A listed category with no rows is a nav entry that can never appear — the
+  // dead-allowlist-row rule, applied to the other direction of the same list.
+  const empty = SETTINGS_CATEGORIES.filter((c) => !cats.includes(c));
+  ok(empty.length === 0, `no listed category is empty (${empty.join(', ') || 'clean'})`);
+
+  // NEGATIVE CONTROL: the same code, over a schema carrying a category nobody
+  // listed, must drop it — an assert that cannot go red is not an assert.
+  const ncSchema = { ...SETTINGS_SCHEMA, 'zz.synthetic': { type: 'boolean', default: false, label: 'x', description: 'x', category: 'Nobody Listed This' } };
+  const ncRendered = renderedPaths(ncSchema, SETTINGS_CATEGORIES);
+  ok(!ncRendered.includes('zz.synthetic') && ncRendered.length === rendered.length,
+    'NEGATIVE CONTROL: a row in an unlisted category is silently dropped by the render loop (this census can go red)');
+  ok(renderedPaths(ncSchema, [...SETTINGS_CATEGORIES, 'Nobody Listed This']).includes('zz.synthetic'),
+    'POSITIVE CONTROL: listing that category is the whole fix (one array entry)');
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);
