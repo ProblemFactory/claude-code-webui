@@ -168,27 +168,70 @@ console.log('\nTHE RULE\n    ' + G.SWEEP_RULE + '\n');
   //     READING the real home is fine (this suite does; test-codex-effort-meta
   //     measures the real corpus) — writing is not.
   const WRITES = ['mkdirSync', 'writeFileSync', 'appendFileSync', 'openSync', 'writeSync', 'rmSync', 'unlinkSync', 'copyFileSync', 'renameSync', 'symlinkSync', 'utimesSync', 'cpSync'];
+  // THIS CENSUS HAS BEEN WIDENED TWICE, both times because it resolved exactly
+  // the spellings its author had looked at. Recorded here because the SHAPE of
+  // the two misses is the same and the next one will be too:
+  //   ① the HOME spelling. The first version knew only `os.homedir()`, so the
+  //      one suite that genuinely writes under the real home spelled it
+  //      `process.env.HOME || os.homedir()` and the census printed a clean
+  //      sheet while missing its only true subject.
+  //   ② the TARGET spelling (this round). The write's first argument had to BE
+  //      the bound name or `path.join(<bound name>, …)`, so ONE hop of
+  //      aliasing defeated it: test-chat-e2e.mjs does
+  //      `const p = path.join(REAL_PROJECTS, d.name)` and then `fs.rmSync(p)` —
+  //      an `rm -rf` under the developer's real home that the census could not
+  //      see, while the assert below said "no suite writes under the REAL
+  //      ~/.claude". MEASURED before the fix: bound names ["REAL_PROJECTS"],
+  //      hits [].
+  // Both misses were "one more hop". So the resolver no longer stops at a hop
+  // count: it takes the FIXPOINT of "a name derived from a name already known
+  // to be rooted at the real home", and the write matcher asks whether the
+  // call's FIRST ARGUMENT mentions such a name at all rather than whether it is
+  // spelled one of two ways. Deliberately over-inclusive, and the cost was
+  // measured rather than assumed: over all 197 suites the transitive rule flags
+  // exactly one file the narrow one missed (test-chat-e2e, declared below) and
+  // no others.
+  const ESC = (n) => n.replace(/[.()$]/g, '\\$&');
   const realHomeWriters = (source) => {
-    // WHAT COUNTS AS "the real home" — widened the moment this census first ran
-    // for real: `os.homedir()` directly, AND the very common indirection
-    // `const home = process.env.HOME || os.homedir()`. The one suite that
-    // genuinely writes there spells it the second way, so the narrow version
-    // reported a clean sheet while missing its only true subject.
     const roots = new Set(['os.homedir()', 'homedir()']);
     for (const m of source.matchAll(/\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:process\.env\.HOME\s*\|\|\s*)?(?:os\.)?homedir\(\)/g)) roots.add(m[1]);
-    const rootAlt = [...roots].map((r) => r.replace(/[.()$]/g, '\\$&')).join('|');
+    const rootAlt = [...roots].map(ESC).join('|');
+    // SEED: `const NAME = path.join(<a real home>, … '.claude' …)`.
     const names = new Set();
     for (const m of source.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*path\.join\(\s*(?:` + rootAlt + String.raw`)[^;\n]*?['"` + '`' + String.raw`]\.claude['"` + '`' + String.raw`]`, 'g'))) names.add(m[1]);
+    // FIXPOINT: a path derived from one of those names is one of those names.
+    // Two derivation shapes cover what this repo actually writes: the known
+    // name as the HEAD of the right-hand side (plain alias, `X + '/y'`,
+    // `` `${X}/y` ``) and the known name ANYWHERE inside a path.join/resolve.
+    for (let pass = 0; pass < 8; pass++) {
+      const before = names.size;
+      for (const n of [...names]) {
+        const e = ESC(n);
+        for (const m of source.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:\`\$\{\s*)?` + e + String.raw`\b`, 'g'))) names.add(m[1]);
+        for (const m of source.matchAll(new RegExp(String.raw`\b(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*path\.(?:join|resolve)\([^;\n]{0,200}?\b` + e + String.raw`\b`, 'g'))) names.add(m[1]);
+      }
+      if (names.size === before) break;
+    }
     const hits = [];
     for (const n of names) {
-      const esc = n.replace(/\$/g, '\\$');
+      const e = ESC(n);
       for (const w of WRITES) {
-        // fs.writeFileSync(X, …) / fs.mkdirSync(path.join(X, …)) / fs.rmSync(X…
-        const re = new RegExp(`\\.${w}\\(\\s*(?:path\\.join\\(\\s*)?${esc}\\b`);
-        if (re.test(source)) hits.push(`${w}(${n})`);
+        // Does the call's FIRST argument mention the name? `[^,)]` cannot cross
+        // into a later argument, so `fs.writeFileSync(elsewhere, X)` (X as the
+        // CONTENT) is not a hit, while `fs.rmSync(X, …)`,
+        // `fs.mkdirSync(path.join(X, …))` and ``fs.writeFileSync(`${X}/y`, …)``
+        // all are.
+        if (new RegExp(`\\.${w}\\(\\s*[^,)]{0,200}?\\b${e}\\b`).test(source)) hits.push(`${w}(${n})`);
       }
     }
     return hits;
+  };
+  /** The census re-run over a source with one region cut out — how a write
+   *  exception is scoped to a BLOCK instead of to a whole file. */
+  const realHomeWritersOutside = (source, startMark, endMark) => {
+    const a = source.indexOf(startMark), b = source.indexOf(endMark);
+    if (a < 0 || b <= a) return { ok: false, hits: [], region: 0 };
+    return { ok: true, region: b - a, hits: realHomeWriters(source.slice(0, a) + source.slice(b + endMark.length)) };
   };
   // THE ONE EXEMPTION, with the property that replaces it. This suite's own
   // CONTROLS are synthetic sources spelled inline, so a text census finds the
@@ -197,22 +240,59 @@ console.log('\nTHE RULE\n    ' + G.SWEEP_RULE + '\n');
   // it, the exemption is paid for below: §4 (the only place this file touches
   // the real home) is extracted and asserted to contain NO write call at all.
   const CENSUS_SELF = 'test-fixture-isolation.mjs';
-  // THE DECLARED WRITE EXCEPTIONS. Exactly one suite really does plant a
-  // directory under the real ~/.claude, and it must: it tests the WIRE PROBE's
-  // residue contract, and the probe writes where the probe writes. Everything
-  // it plants carries the declared `vs-wire-probe-` prefix (so the sweep's own
-  // spare/flag rule governs it) and is removed in a `finally` plus an exit
-  // handler. Asserted LIVE and PAID FOR below — a dead exemption fails, like
-  // every other allowlist in this repo.
+  // THE DECLARED WRITE EXCEPTIONS. Two suites really do touch the real
+  // ~/.claude, and each must. Asserted LIVE and PAID FOR below — a dead
+  // exemption fails, like every other allowlist in this repo — and each pays
+  // with the property that actually bounds ITS damage, never with a note:
+  //   · test-stdout-registry PLANTS directories (it tests the wire probe's
+  //     residue contract, and the probe writes where the probe writes), so it
+  //     pays with the DECLARED PREFIX + a cleanup that survives a signal.
+  //   · test-chat-e2e DELETES, and only names it minted itself. It pays with a
+  //     REGION SCOPE: the exemption covers the block between its sentinels and
+  //     nothing else, and its three gates are pinned so a widened filter goes
+  //     red. A file-scoped exemption would have silently blessed every future
+  //     write in that file — the exemption is the dangerous half of a census,
+  //     so it gets the tighter property the shape allows.
   const WRITE_EXEMPT = [
     { file: 'test-stdout-registry.mjs', why: "tests the wire probe's residue contract, so it must plant where the probe plants; every dir it creates carries the declared vs-wire-probe- prefix and is removed in a finally + an exit handler" },
+    { file: 'test-chat-e2e.mjs', why: 'sweeps ITS OWN pre-fix leftovers out of the real home, exactly like the wire probe: a DELETE, gated on the declared fixture convention + this suite\'s own name + the shared staleness threshold, inside one sentinel-marked block that is the file\'s only real-home write' },
   ];
   const exemptWriters = new Set([CENSUS_SELF, ...WRITE_EXEMPT.map((e) => e.file)]);
   for (const e of WRITE_EXEMPT) {
     const t = src(e.file);
     ok(realHomeWriters(t).length > 0, `write exemption is LIVE: ${e.file} really writes under the real ~/.claude (${e.why})`);
+  }
+  {
+    const t = src('test-stdout-registry.mjs');
     ok(/vs-wire-probe-/.test(t) && /process\.on\('exit'/.test(t) && /finally\s*\{[^}]*rmCtl/.test(t),
-      `…and it is PAID FOR: ${e.file} plants only DECLARED-prefix names and removes them in a finally + an exit handler`);
+      '…and it is PAID FOR: test-stdout-registry.mjs plants only DECLARED-prefix names and removes them in a finally + an exit handler');
+  }
+  {
+    // PAYING FOR test-chat-e2e's exemption, in two halves.
+    const t = src('test-chat-e2e.mjs');
+    const START = '// >>> real-home sweep', END = '// <<< real-home sweep';
+    // ① SCOPE. Cut the declared block out and re-run the census: what is left
+    //    must be EMPTY. This is what keeps the exemption from covering the
+    //    whole file — a second real-home write anywhere else in this suite goes
+    //    red even though the suite is on the list.
+    const outside = realHomeWritersOutside(t, START, END);
+    ok(outside.ok && outside.hits.length === 0,
+      `…and it is PAID FOR ①: test-chat-e2e.mjs's exemption is scoped to its sentinel-marked sweep (${outside.region} chars); the REST of the file writes nothing under the real home`,
+      JSON.stringify({ found: outside.ok, hits: outside.hits }));
+    // ② THE GATES. The block may only delete this suite's own stale fixtures,
+    //    so all three filters must be in it. Widening any of them (dropping the
+    //    convention check, the suite-name check, or the age check) is what would
+    //    turn a self-sweep into an rm -rf of the developer's conversations.
+    const region = outside.ok ? t.slice(t.indexOf(START), t.indexOf(END)) : '';
+    const gates = {
+      convention: /isFixtureProjectDir\(/.test(region),
+      ownName: /includes\(\s*['"`]chat-e2e['"`]\s*\)/.test(region),
+      staleness: /FIXTURE_STALE_MS/.test(region),
+      deleteOnly: WRITES.filter((w) => new RegExp(`\\.${w}\\(`).test(region)).join(',') === 'rmSync',
+    };
+    ok(Object.values(gates).every(Boolean),
+      '…and it is PAID FOR ②: that sweep only DELETES, and only what passes the declared convention + its own suite name + the shared staleness threshold',
+      JSON.stringify(gates));
   }
   const writerOffenders = suites.filter((f) => !exemptWriters.has(f))
     .map((f) => ({ f, hits: realHomeWriters(src(f)) })).filter((x) => x.hits.length);
@@ -245,6 +325,33 @@ console.log('\nTHE RULE\n    ' + G.SWEEP_RULE + '\n');
     'CONTROL (a): a write under an ISOLATED home is not flagged');
   ok(realHomeWriters("const home = process.env.HOME || os.homedir();\nconst P = path.join(home, '.claude', 'projects');\nfs.mkdirSync(P, { recursive: true });").length === 1,
     'CONTROL (a): the INDIRECT spelling (const home = process.env.HOME || os.homedir()) is caught too — the narrow first version missed the one suite that really writes there');
+  // THE SECOND WIDENING'S CONTROLS. Each is the shape that defeated a previous
+  // version, kept forever as a negative control the way this repo keeps retired
+  // rules: the first is test-chat-e2e's own spelling, byte-for-byte.
+  ok(realHomeWriters("const P = path.join(os.homedir(), '.claude', 'projects');\nconst p = path.join(P, d.name);\nfs.rmSync(p, { recursive: true, force: true });").length === 1,
+    'CONTROL (a): ONE HOP of aliasing (const p = path.join(P, d)) is caught — this exact shape is an rm -rf under the real home that the shipped census reported as a clean sheet');
+  ok(realHomeWriters("const P = path.join(os.homedir(), '.claude', 'projects');\nconst q = path.join(P, a);\nconst r = path.join(q, b);\nfs.writeFileSync(r, '');").length === 1,
+    'CONTROL (a): TWO hops are caught as well — the resolver takes a fixpoint, so the rule is not "the author thought of one more level"');
+  ok(realHomeWriters("const P = path.join(os.homedir(), '.claude', 'projects');\nconst p = `${P}/x`;\nfs.writeFileSync(p, '');").length === 1,
+    'CONTROL (a): a TEMPLATE-LITERAL derivation is caught (path.join is not the only way to build a path)');
+  ok(realHomeWriters("const P = path.join(os.homedir(), '.claude', 'projects');\nfs.writeFileSync(`${P}/x`, '');").length === 1,
+    'CONTROL (a): …and the same spelling INLINE as the write target is caught');
+  ok(realHomeWriters("const P = path.join(os.homedir(), '.claude', 'projects');\nconst p = path.join(P, d);\nconst n = fs.readdirSync(p).length;\nconst s = fs.statSync(p);").length === 0,
+    'CONTROL (a): an aliased READ of the real ~/.claude is STILL not flagged — the widening did not turn every reader into an offender');
+  ok(realHomeWriters("const P = path.join(os.homedir(), '.claude', 'projects');\nfs.writeFileSync(path.join(scratchDir, 'log'), P);").length === 0,
+    'CONTROL (a): the real-home path used as CONTENT (a later argument) is not a write TO it — the matcher cannot cross into another argument');
+  // CONTROLS for the REGION SCOPE: it must catch a write outside the sentinels
+  // (that is its whole job) and must not be satisfiable by an absent block.
+  {
+    const inside = "const P = path.join(os.homedir(), '.claude', 'projects');\n// >>> real-home sweep\nconst p = path.join(P, d);\nfs.rmSync(p, {});\n// <<< real-home sweep\n";
+    const alsoOutside = inside + "const q = path.join(P, other);\nfs.rmSync(q, {});\n";
+    ok(realHomeWritersOutside(inside, '// >>> real-home sweep', '// <<< real-home sweep').hits.length === 0,
+      'CONTROL: a real-home write INSIDE the declared sentinels is covered by the exemption');
+    ok(realHomeWritersOutside(alsoOutside, '// >>> real-home sweep', '// <<< real-home sweep').hits.length === 1,
+      'CONTROL: a SECOND real-home write outside them is NOT — the exemption is scoped to the block, not to the file');
+    ok(realHomeWritersOutside(inside.replace('// <<< real-home sweep', ''), '// >>> real-home sweep', '// <<< real-home sweep').ok === false,
+      'CONTROL: a missing sentinel is a FAILURE, not an empty region that passes vacuously');
+  }
 
   // (b) THE ISOLATION CENSUS — THE DEFECT ITSELF, AS A PROPERTY OF THE SOURCE.
   //     Set = every suite that spawns `server.js` AND writes a transcript into

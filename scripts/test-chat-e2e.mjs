@@ -53,10 +53,21 @@ const wt = scratch('chat-e2e');
 const fakeHome = scratchHome('chat-e2e-home', fs);
 const REAL_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
 const realBefore = (() => { try { return new Set(fs.readdirSync(REAL_PROJECTS)); } catch { return new Set(); } })();
+// >>> real-home sweep (THE DECLARED WRITE EXCEPTION — do not widen)
 // SWEEP what earlier versions of this suite left in the REAL home (the wire
 // probe's r5/r6 contract, same threshold, same "spare a run in flight" rule).
 // A leftover younger than the threshold may be a CONCURRENT copy of this suite
 // — two worktrees pushing minutes apart really do overlap.
+//
+// This block is the ONLY place this suite writes under the developer's real
+// home, and it is a DELETE of names this suite itself minted. It is declared in
+// scripts/test-fixture-isolation.mjs's WRITE_EXEMPT and PAID FOR there, and the
+// payment is scoped to THESE SENTINELS, not to the file: the census is re-run
+// over this file with the region between them removed and must come back
+// EMPTY, so a second real-home write anywhere else in this suite goes red even
+// though the suite is "exempt". The three gates below (the declared fixture
+// convention, this suite's own name, and the shared staleness threshold) are
+// asserted there too — widen any of them and the gate goes red.
 const swept = [];
 {
   const sweptAt = Date.now();
@@ -69,6 +80,7 @@ const swept = [];
   }
   if (swept.length) console.log(`  swept ${swept.length} stale leftover(s) from earlier runs: ${swept.slice(0, 3).join(', ')}`);
 }
+// <<< real-home sweep
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + String(e).slice(0, 300) : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
