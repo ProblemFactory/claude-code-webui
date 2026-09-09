@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.369.80 — the whole fast tier is timezone-honest (test-quota-source was the second suite hardcoding this box's offset)
+
+- Same class as 2.369.79, one suite over: test-quota-source compared codex's zoneless "try again at …" sentence against a fixed `-07:00` in three asserts. Expectations now built in local time; **the entire fast tier was run under TZ=UTC on this box (75 suites, 281 s, ALL GREEN)**, so the Actions fast mirror has no remaining runner-zone reds to find one push at a time. Gate-only, nothing to update for.
+
 ## 2.369.79 — test-auto-resume's prose-reset expectation is timezone-honest (the .78 Actions fast mirror's only red)
 
 - Codex's exhaustion sentence ("try again at Sep 13th, 2026 8:36 PM") states no timezone and the parser resolves it in the SERVER's local zone by design (the wrapper that printed it runs on this machine). The leg compared against a fixed `-07:00` — this box's zone — so the UTC runner read the same sentence seven hours earlier. The expectation is now built in local time; 221/221 under TZ=UTC, America/Los_Angeles and Asia/Shanghai. Gate-only change, nothing to update for.

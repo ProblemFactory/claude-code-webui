@@ -173,7 +173,7 @@ What's contributing to your limits usage?`;
       const v = cx.signalFromStream({ type: 'event_msg', payload: { type: 'task_failed', error: WIRE, codexErrorInfo: info, resetsAt: null, rateLimits: null } });
       ok(`codex: ${info} — the spelling the wire really sends — is exhaustion`, v?.kind === 'exhausted', JSON.stringify(v).slice(0, 120));
       ok(`codex: …and its reset comes out of the CLI's own sentence, since the record states none (${info})`,
-        Math.abs(v.resetsAtSec * 1000 - Date.parse('2026-09-13T20:36:23-07:00')) < 61000, v && new Date(v.resetsAtSec * 1000).toISOString());
+        Math.abs(v.resetsAtSec * 1000 - new Date(2026, 8, 13, 20, 36, 23).getTime()) < 61000 /* local zone: the sentence states none and the parser uses the server's (2.369.80) */, v && new Date(v.resetsAtSec * 1000).toISOString());
     }
     // NOT exhaustion, each for a reason a continue would not fix — a closed set
     // that quietly grew would spend turns into walls that do not lift.
@@ -186,7 +186,7 @@ What's contributing to your limits usage?`;
     ok('codex: a message with no "try again at …" states NO reset (never an invented wait)', cx.parseCodexLimitReset('You have hit your usage limit.') === 0);
     ok('codex: …nor does a reset already in the past', cx.parseCodexLimitReset('try again at Jan 2nd, 2020 8:36 PM') === 0);
     ok('codex: …and the printed minute is truncated, so the parse rounds UP (late costs a tick, early costs a turn)',
-      cx.parseCodexLimitReset('try again at Sep 13th, 2026 8:36 PM', Date.parse('2026-09-07T00:00:00Z')) * 1000 === Date.parse('2026-09-13T20:37:00-07:00'));
+      cx.parseCodexLimitReset('try again at Sep 13th, 2026 8:36 PM', Date.parse('2026-09-07T00:00:00Z')) * 1000 === new Date(2026, 8, 13, 20, 37, 0).getTime());
   }
 
   // ── THE ENUM'S SHAPE, NOT JUST ITS SPELLING (2026-09-08 re-measurement) ──
