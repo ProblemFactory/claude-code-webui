@@ -1307,8 +1307,29 @@ class ChatView {
    *  (an item that left the queue with no explicit steer/remove RAN), applied
    *  to whatever this client has rendered. On an unknown we learned nothing, so
    *  a 'Queued' chip stays: retiring it would assert the message left a queue
-   *  we cannot see. A chip is a claim about the queue too. */
-  _setQueue(items, { known = true } = {}) {
+   *  we cannot see. A chip is a claim about the queue too.
+   *
+   *  `at` (2026-09-09 r2) is WHEN THIS STATEMENT ARRIVED, and the strip shows
+   *  the NEWEST statement rather than the last-EXECUTED one. Default `now`,
+   *  which is the truth for every caller that applies a frame as it lands —
+   *  but the epoch-changed re-attach DEFERS its payload by 0-500ms (2.338.0's
+   *  render stagger) while the resync THAT SAME ATTACH asked for is answered
+   *  in ~10ms, so the payload used to land LAST and overwrite the answer it
+   *  provoked. That is the mirror of the ghost row and it is PERMANENT for
+   *  that window: the ask is self-limiting (the server now knows its queue, so
+   *  it never asks again) — the row is on the wire, in the server, and
+   *  nowhere on screen. The same rule covers the known-vs-known twin: a steer
+   *  that empties the queue inside the stagger window must not be undone by
+   *  the deferred payload's older rows.
+   *
+   *  Deliberately NOT "known beats unknown": the pre-restart client's rows are
+   *  a KNOWN list from before the payload was produced, and clearing THEM is
+   *  the whole ghost fix. Recency is the only thing that separates the two. */
+  _setQueue(items, { known = true, at = performance.now() } = {}) {
+    // Monotonic (performance.now), because the only question ever asked of
+    // these two numbers is which of the two frames arrived first.
+    if ((this._queueStatedAt || 0) > at) return;
+    this._queueStatedAt = at;
     this._queue = Array.isArray(items) ? items : [];
     if (known) this._reconcileQueueChips(this._queue);
     this._chatInput?.setQueue(this._queue, this._queueCaps());
@@ -1555,7 +1576,19 @@ class ChatView {
     // carries its own `in meta` test all the same, because the fact it states
     // when ABSENT has to be spelled out: a payload from before the field is
     // read as KNOWN, which is the behaviour this branch always had.
-    if ('queue' in meta) this._setQueue(meta.queue, { known: ('queueKnown' in meta) ? meta.queueKnown !== false : true });
+    // …and WHEN this payload arrived, so a DEFERRED application of it cannot
+    // overwrite a statement that landed in the meantime (see _setQueue). The
+    // stamp rides on the frame itself — the payload IS the meta, and a second
+    // out-of-band channel beside it is the whitelist-drift class. It is NOT a
+    // fact about the session (nothing here is reset when it is missing): every
+    // caller that applies a frame the moment it lands leaves it off, and `now`
+    // is then the truth. Spelled with its own `in meta` test all the same —
+    // the absent case is a behaviour and behaviours get written down.
+    const rxTick = ('__rxTick' in meta) ? Number(meta.__rxTick) : NaN;
+    if ('queue' in meta) this._setQueue(meta.queue, {
+      known: ('queueKnown' in meta) ? meta.queueKnown !== false : true,
+      at: Number.isFinite(rxTick) ? rxTick : performance.now(),
+    });
     // Does the RUNNING wrapper serve the live style verb? Same shape as
     // queueSupported and the same reason (2.361.1/2.364.1): the harness caps
     // row is about the PROTOCOL, this is about the process that is running.
@@ -4440,6 +4473,13 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       if (msg.type !== 'attached' || msg.sessionId !== this.sessionId) return;
       this.ws.offGlobal(handler);
       if (gen !== this._reattachGen) return; // a newer reconnect cycle owns the view now
+      // WHEN THIS PAYLOAD ARRIVED (2026-09-09 r2). Everything in it is a
+      // snapshot of the server at THIS instant, and the epoch branch below
+      // hands that snapshot to a timer — so the instant has to travel WITH it,
+      // or a 300ms-old guess wins over an answer that landed at 10ms. Stamped
+      // once (the ws parses each frame once and dispatches the SAME object to
+      // every view, so this is a property of the frame, not of this view).
+      if (typeof msg.__rxTick !== 'number') msg.__rxTick = performance.now();
       if (this._chatInput) this._chatInput.setDisconnected(false);
       // Server normalizer was REBUILT (server restart): message IDs are a
       // plain per-normalizer counter, so the new numbering collides with what
@@ -4457,6 +4497,9 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         // synchronous marked+DOMPurify passes back-to-back froze the page.
         // A 0-500ms jitter splits them into separate tasks; the DOM wipe
         // happens inside _fullViewReset so nothing is torn meanwhile.
+        // …and by the time this runs the payload is up to half a second OLD —
+        // live state applied from it must be judged against `msg.__rxTick`
+        // (stamped above), never against "whatever ran last".
         setTimeout(() => { if (!this._disposed) this._fullViewReset(msg); }, Math.random() * 500);
         return;
       }

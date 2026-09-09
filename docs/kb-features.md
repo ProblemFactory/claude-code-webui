@@ -484,6 +484,14 @@ impossible rather than a review promise.
   refresh (fingerprint-deduped) can never retract a marker. Every other refusal
   keeps the row and wears the reason, because that message really is still
   queued.
+  A window that STAYED OPEN across the restart is the case that needed one more
+  rule: that path defers the whole payload behind a 0-500 ms render stagger,
+  while the wrapper answers in ~10 ms, so the placeholder used to land last and
+  wipe the row it had just asked for — and permanently, since the ask never
+  repeats. The strip now shows the NEWEST statement rather than the last one
+  executed, so a payload half a second old cannot overwrite the answer it
+  provoked (and a steer that empties the queue mid-stagger is not undone by it
+  either).
 - **The chip is re-applied when the capability flips.** `_queueSupported` starts
   false and both of its sources arrive AFTER the bubbles are on screen (the
   attach payload is applied at the END of `loadHistory`; a live wrapper's

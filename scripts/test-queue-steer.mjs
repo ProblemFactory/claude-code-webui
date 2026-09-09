@@ -231,7 +231,16 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   // every `meta.<key>` in this body and requires one (a partial meta must never
   // reset a fact), and spelling the absent case out is also how "an older
   // server's payload is KNOWN" stops being an implicit truth of `!== false`.
-  ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported, \('queueVerbs' in meta\) \? meta\.queueVerbs : undefined\);[\s\S]{0,600}if \('queue' in meta\) this\._setQueue\(meta\.queue, \{ known: \('queueKnown' in meta\) \? meta\.queueKnown !== false : true \}\);/.test(cv));
+  // Stated as ORDER + SHAPE rather than "these two lines within N characters":
+  // the claim is that the advert is applied FIRST, and a byte budget between
+  // them turns every added comment into a red suite (it did, twice).
+  {
+    const advert = cv.indexOf("if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined);");
+    const queue = cv.indexOf("if ('queue' in meta) this._setQueue(meta.queue, {");
+    ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST',
+      advert > 0 && queue > advert && /if \('queue' in meta\) this\._setQueue\(meta\.queue, \{\s*\n\s*known: \('queueKnown' in meta\) \? meta\.queueKnown !== false : true,/.test(cv),
+      JSON.stringify({ advert, queue }));
+  }
   // ONE WRITER for the capability, because a FLIP has a consequence (the
   // rendered chips must be re-applied — round-2's MAJOR). A bare assignment
   // anywhere else silently skips it.
@@ -4854,6 +4863,177 @@ console.log('— ⑬ the queue across a restart: a guess says so, and the wrappe
   }
 }
 
+// ── ⑬d THE DEFERRED PAYLOAD IS A STALE ONE (2026-09-09 r2) ────────────────
+// The MIRROR HALF, found by round 1's verifier. A window that stayed OPEN
+// across the restart never reaches ⑬c's same-epoch branch: a restart always
+// changes `normEpoch` (boot-restore stamps `Date.now()`), so `_reattach`
+// DEFERS the whole payload by `Math.random() * 500` ms — 2.338.0's render
+// stagger, which exists so N windows do not re-render their tails in one tick.
+// The resync that the SAME attach asked for is answered by the wrapper in
+// ~10ms. So the payload's `queueKnown:false` placeholder lands LAST and wipes
+// the answer it provoked.
+//
+// PERMANENT for that window, which is what makes it the ghost's mirror rather
+// than a blink: the ask is self-limiting, so the server — which by then holds
+// the row and hands it to the NEXT attach as a FACT — never asks again. A
+// message that will really run sits on the wire, in the server, and nowhere on
+// screen: no row to steer, remove or edit.
+//
+// FIXED BY RECENCY, never by "known beats unknown": the rows the placeholder
+// has to clear are themselves a KNOWN list (the pre-restart client's), and
+// clearing them is the whole of ⑬c. Both directions are measured here, and the
+// same rule turns out to cover a second instance of the class — see the
+// known-vs-known twin at the end.
+console.log('— ⑬d the deferred restart payload cannot overwrite the answer it asked for');
+{
+  const { ChatView } = await import(path.join(REPO, 'src/lib/chat-view.js'));
+  const cvSrc = read('src/lib/chat-view.js');
+  const SEVEN = ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'];
+  const REAL = { id: 'qReal', msgId: 'mq', preview: 'the real pending message', text: 'the real pending message', kind: 'user' };
+  const GHOST = { id: 'qGhost', msgId: 'mg', preview: 'the steered message', text: 'the steered message', kind: 'user' };
+
+  // ── the chain, pinned where this leg stops executing it ──────────────────
+  // The drive below runs the REAL `_reattach` and the REAL `_fullViewReset`;
+  // only `loadHistory` is stubbed (it is a DOM renderer). These pins are the
+  // two links that stub replaces, so "the payload reaches _applyLiveMeta" is
+  // read off the product rather than assumed — and ⑭ then runs the whole thing.
+  ok('the deferred reset hands the WHOLE payload to loadHistory (never a key-by-key copy)',
+    /_fullViewReset\(msg\) \{[\s\S]*?this\.loadHistory\(msg\.messages \|\| \[\], msg\.totalCount \|\| 0, msg\.isStreaming, msg\);/.test(cvSrc));
+  ok('…and loadHistory hands that meta to `_applyLiveMeta` (the link the stub stands in for)',
+    /\n    this\._applyLiveMeta\(meta\);\n/.test(cvSrc));
+  ok('the re-attach STAMPS the payload with its arrival BEFORE the epoch branch defers it (a stamp taken inside the timer would be the bug)',
+    (() => {
+      const stamp = cvSrc.indexOf("if (typeof msg.__rxTick !== 'number') msg.__rxTick = performance.now();");
+      const defer = cvSrc.indexOf('setTimeout(() => { if (!this._disposed) this._fullViewReset(msg); }, Math.random() * 500);');
+      return stamp > 0 && defer > stamp;
+    })());
+  ok('…and `_applyLiveMeta` reads THAT stamp for the queue, with its own `in meta` test (absent ⇒ now, which is the truth for every synchronous caller — and what test-auto-resume\'s carries-the-key sweep demands of every key read there)',
+    /const rxTick = \('__rxTick' in meta\) \? Number\(meta\.__rxTick\) : NaN;/.test(cvSrc)
+    && /at: Number\.isFinite\(rxTick\) \? rxTick : performance\.now\(\),/.test(cvSrc));
+
+  const payload = (over = {}) => ({
+    type: 'attached', sessionId: 'sess-open', normEpoch: 99,
+    chatStatus: {}, isStreaming: false, messages: [], totalCount: 0,
+    queue: [], queueKnown: false, queueSupported: true, queueVerbs: SEVEN, ...over,
+  });
+
+  // ONE drive: a live window, a REAL `_reattach`, an epoch that CHANGED, and a
+  // stagger PINNED to a chosen point of the product's own 0-500ms range (the
+  // defect is an ordering race — sampling it would make the control flaky and
+  // the assertion meaningless). `answer` is the wrapper's publication arriving
+  // on the ordinary meta-op path, exactly as the resync's answer does.
+  const drive = async (CV, { seedKnown = null, over = {}, answer = null, answerAt = 10, stagger = 0.99 }) => {
+    const strip = { items: null, calls: [] };
+    let handler = null;
+    const view = Object.assign(Object.create(CV.prototype), {
+      sessionId: 'sess-open', _normEpoch: 7, _readOnly: false, _disconnected: false, _disposed: false,
+      _queue: [], _queueSupported: true, _queueVerbsServed: SEVEN.slice(), _messages: [], _elements: new Map(),
+      _renderedMsgIds: new Set(), _total: 0, _canPaginate: false, _newMsgCount: 0,
+      _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+      _chatInput: { setQueue: (items) => { strip.items = items; strip.calls.push((items || []).length); }, setDisconnected() { }, setQueueOpResult() { } },
+      _renderers: { appendSystem() { } },
+      ws: { send() { }, onGlobal: (h) => { handler = h; }, offGlobal() { } },
+      _statusBar: { setResponseStyleLive() { }, setTurnState() { }, setAutoResume() { }, setSpawnOrigin() { }, setOutputStyle() { }, setOutputStylePending() { } },
+      applyStatus() { }, _onServerStreamLabel() { }, _hideTyping() { }, _reattachCatchUp() { },
+      _onToolsInProgress() { }, _drainPendingSteers() { }, _refreshQueueChips() { }, _applyQueueChipsNow() { },
+      // the ONE stub: loadHistory is a DOM renderer. Its queue-relevant act is
+      // the `_applyLiveMeta(meta)` pinned above, and that is what it does here.
+      loadHistory(_m, _t, _s, meta) { this._applyLiveMeta(meta); },
+      _messageList: { querySelectorAll: () => [] }, _resetGapAfterJump() { },
+    });
+    // The pre-restart client's rows, applied through the REAL `_setQueue` as a
+    // KNOWN list — seeding `_queue` by hand would leave the guard's own state
+    // unset and the clearing direction untested.
+    if (seedKnown) CV.prototype._setQueue.call(view, seedKnown, { known: true });
+    const realRandom = Math.random;
+    Math.random = () => stagger;
+    try {
+      CV.prototype._reattach.call(view, false);
+      if (typeof handler !== 'function') throw new Error('the re-attach armed no `attached` handler');
+      handler(payload(over));
+    } finally { Math.random = realRandom; }
+    if (answer) setTimeout(() => { try { CV.prototype._onMeta.call(view, { op: 'meta', subtype: 'queue', supported: true, verbs: SEVEN, items: answer }); } catch { } }, answerAt);
+    await new Promise((r) => setTimeout(r, Math.max(answerAt, stagger * 500) + 300));
+    // Stand the 20s no-reply ladder down (⑬c's note: it declares these
+    // half-built views dead inside ⑭'s minute otherwise).
+    view._reattachGen = (view._reattachGen || 0) + 1;
+    return { ids: (view._queue || []).map((r) => String(r?.id || '')), strip: strip.calls };
+  };
+
+  // The PRE-FIX module: the real source with ONLY the recency guard removed
+  // (the stamp still flows, so what is being measured is "last executed wins"
+  // — the behaviour every path had before this round).
+  const GUARD = '    if ((this._queueStatedAt || 0) > at) return;\n';
+  ok('the pre-fix control patches a REAL line of the product source', cvSrc.includes(GUARD));
+  const preCut = cvSrc.replace(GUARD, '');
+  ok('CONTROL: exactly one line was removed', preCut.length === cvSrc.length - GUARD.length);
+  const preCopy = path.join(REPO, 'src/lib', `.chat-view.stale-prefix-${process.pid}.js`);
+  fs.writeFileSync(preCopy, preCut);
+  let Pre = null;
+  try {
+    ({ ChatView: Pre } = await import(preCopy));
+
+    // ── ① THE DEFECT: the answer arrives at 10ms, the reset at ~495ms ───────
+    {
+      const now = await drive(ChatView, { answer: [REAL], answerAt: 10, stagger: 0.99 });
+      ok('THE FIX: a restart payload applied ~495ms after it arrived does NOT overwrite the wrapper\'s answer — the real pending row is still on the strip',
+        now.ids.join(',') === 'qReal', JSON.stringify(now));
+      const pre = await drive(Pre, { answer: [REAL], answerAt: 10, stagger: 0.99 });
+      ok('PRE-FIX: the same frames, the same order — the row is applied and then WIPED by the stale guess (the strip goes 1 → 0 and stays there)',
+        pre.ids.length === 0 && JSON.stringify(pre.strip) === '[1,0]', JSON.stringify(pre));
+    }
+    // ── ② …and it really is an ORDERING race, not a broken placeholder ──────
+    {
+      const now = await drive(ChatView, { answer: [REAL], answerAt: 200, stagger: 0.01 });
+      const pre = await drive(Pre, { answer: [REAL], answerAt: 200, stagger: 0.01 });
+      ok('CONTROL: with the reset FIRST and the answer second, both copies are right — which is why 1-in-N runs looked fine and the bug survived round 1',
+        now.ids.join(',') === 'qReal' && pre.ids.join(',') === 'qReal', JSON.stringify({ now, pre }));
+    }
+    // ── ③ THE GHOST IS STILL CLEARED (the direction "known wins" would break) ─
+    {
+      const now = await drive(ChatView, { seedKnown: [GHOST], answer: null, stagger: 0.99 });
+      ok('THE ⑬c FIX IS INTACT: a pre-restart KNOWN row, an unknown payload and NO answer — the ghost still goes (recency, not "known beats unknown")',
+        now.ids.length === 0, JSON.stringify(now));
+      const pre = await drive(Pre, { seedKnown: [GHOST], answer: null, stagger: 0.99 });
+      ok('…identically in the pre-fix copy, so ① measured the guard and not a placeholder this round disabled',
+        pre.ids.length === 0, JSON.stringify(pre));
+    }
+    // ── ④ the rule itself, both directions, on the ONE writer ───────────────
+    {
+      const mk = () => Object.assign(Object.create(ChatView.prototype), {
+        _queue: [], _queueSupported: true, _queueVerbsServed: SEVEN.slice(), _messages: [], _elements: new Map(),
+        _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+        _chatInput: { setQueue() { } }, _drainPendingSteers() { }, _refreshQueueChips() { },
+      });
+      const older = mk();
+      ChatView.prototype._setQueue.call(older, [GHOST], { known: true, at: 1000 });
+      ChatView.prototype._setQueue.call(older, [], { known: false, at: 2000 });
+      ok('a placeholder that arrived AFTER the known list clears it (the incident\'s own shape, stated as a rule)', older._queue.length === 0);
+      const newer = mk();
+      ChatView.prototype._setQueue.call(newer, [REAL], { known: true, at: 2000 });
+      ChatView.prototype._setQueue.call(newer, [], { known: false, at: 1000 });
+      ok('NEGATIVE CONTROL: a placeholder that arrived BEFORE it is ignored — one flag, one rule, two measurements',
+        newer._queue.map((r) => r.id).join(',') === 'qReal', JSON.stringify(newer._queue));
+    }
+    // ── ⑤ THE KNOWN-vs-KNOWN TWIN, which the same rule closes ───────────────
+    // Not the reported shape, and reachable: the payload can know its queue
+    // (any attach after the wrapper has published) while the user steers the
+    // row away INSIDE the 500ms stagger. "Last executed wins" then restores a
+    // message the wrapper has already sent — a ghost row again, from the other
+    // side. Nothing here is special-cased for it; it is the same comparison.
+    {
+      const now = await drive(ChatView, { over: { queue: [GHOST], queueKnown: true }, answer: [], answerAt: 10, stagger: 0.99 });
+      ok('a steer that empties the queue inside the stagger window is NOT undone by the deferred payload\'s older rows',
+        now.ids.length === 0, JSON.stringify(now));
+      const pre = await drive(Pre, { over: { queue: [GHOST], queueKnown: true }, answer: [], answerAt: 10, stagger: 0.99 });
+      ok('PRE-FIX: the same frames put the steered row BACK on the strip (the second instance of the class, measured)',
+        pre.ids.join(',') === 'qGhost', JSON.stringify(pre));
+    }
+  } finally {
+    try { fs.unlinkSync(preCopy); } catch { }
+  }
+}
+
 // ── ⑭ THE SAME QUESTION, END TO END: a real server, a real wrapper, a REAL
 //     RESTART and a real browser (2026-09-09) ────────────────────────────────
 // ⑬ measures every piece of the restart against a shape WE wrote down. This
@@ -5266,6 +5446,143 @@ process.stdin.on('data', (d) => {
               ok('FIXED: the same frame removes it', now.v._queue.length === 0 && (now.seen.items || []).length === 0, JSON.stringify(now.v._queue));
             } finally { try { fs.unlinkSync(copy); } catch { } }
           }
+        }
+
+        // ── ⑭b THE WINDOW THAT STAYED OPEN ACROSS THE RESTART ──────────────
+        // Everything above opens FRESH windows AFTER the reboot, so the payload
+        // is applied the moment it lands and always wins. The reported shape is
+        // the other one: the window was already open, a restart always changes
+        // `normEpoch`, and that branch DEFERS the payload behind 2.338.0's
+        // 0-500ms render stagger — while the resync that same attach asked for
+        // is answered in ~10ms. Two arms of ONE experiment, differing in one
+        // file: the same live sessions, the same real wrappers, the same real
+        // restart, the same pinned stagger, and the SAME sequence of calls into
+        // the client — only the outcome differs.
+        const ESBUILD = path.join(REPO, 'node_modules/.bin/esbuild');
+        const CVW = path.join(wt, 'src', 'lib', 'chat-view.js');
+        const CVW_PRISTINE = fs.existsSync(CVW) ? fs.readFileSync(CVW, 'utf8') : '';
+        const GUARD14 = '    if ((this._queueStatedAt || 0) > at) return;\n';
+        if (!fs.existsSync(ESBUILD)) {
+          ok('⑭b: esbuild is available to rebuild the worktree bundle (the arms differ by ONE source line, so each needs its own build)', false, ESBUILD);
+        } else if (!CVW_PRISTINE.includes(GUARD14)) {
+          ok('⑭b: the recency guard is a real line of the worktree copy of chat-view.js', false, CVW);
+        } else {
+          // The page must run the bytes we just built, not a cached bundle.
+          await cdp('Network.enable');
+          await cdp('Network.setCacheDisabled', { cacheDisabled: true });
+          const buildBundle = () => execFileSync(ESBUILD, ['src/client.js', '--bundle', '--outfile=public/bundle.js',
+            '--format=iife', '--platform=browser', '--target=es2020', '--loader:.css=css'], { cwd: wt, stdio: 'pipe' });
+          const sidJson = (s) => JSON.stringify(s);
+          // ONE arm: reload the page onto the freshly built bundle, re-open both
+          // windows, wait for the strips to reach their pre-restart truth,
+          // instrument `_setQueue` (a pass-through recorder — the ONE writer is
+          // where the two arms diverge), PIN the stagger to the top of the
+          // product's own range, and then really SIGKILL the server.
+          const arm = async (label, expectGuard) => {
+            await cdp('Page.navigate', { url: `http://127.0.0.1:${PORT}/` });
+            await until(() => evaljs('!!(window.app && window.app.ready && window.app.wm)').catch(() => false), 60000, 300);
+            await evaljs('window.app.ready.then(() => true)').catch(() => { });
+            // EXACTLY ONE window per session. The layout autosave re-opens the
+            // windows the earlier phase left behind, and the ask is
+            // SELF-LIMITING: whichever view attaches first gets `queueKnown:
+            // false`, provokes the resync and turns the fact on — every other
+            // view then receives a payload that already KNOWS, so the branch
+            // under test never runs in the one this arm is instrumenting (the
+            // first run of this leg measured exactly that, and read it as "the
+            // deferred payload never happened"). Only ids THIS leg created are
+            // closed — never a heuristic sweep of somebody's workspace.
+            const closed = await evaljs(`(() => {
+              const mine = ${JSON.stringify(sids)};
+              const ids = [];
+              for (const [winId, v] of window.app.sessions) if (v && mine.includes(v.sessionId)) ids.push(winId);
+              for (const id of ids) { try { window.app.wm.closeWindow(id); } catch (e) { } }
+              return ids.length;
+            })()`);
+            await sleep(400);
+            await openWin(A.sid, 'A', cwdOf('a'));
+            await openWin(B.sid, 'B', cwdOf('b'));
+            const views = await evaljs(`(() => {
+              const n = {};
+              for (const [, v] of window.app.sessions) if (v && v.sessionId) n[v.sessionId] = (n[v.sessionId] || 0) + 1;
+              return n;
+            })()`);
+            ok(`⑭b ${label}: exactly ONE window per session (${closed} restored duplicates closed) — the resync ask is self-limiting, so a second view would answer this arm's question instead`,
+              views?.[A.sid] === 1 && views?.[B.sid] === 1, JSON.stringify(views));
+            const settled = await until(async () => ((await strip(B.sid)).rows === 1 ? true : null), 60000, 250);
+            ok(`⑭b ${label}: both windows are open and B's real queued row is on the strip BEFORE the restart`,
+              !!settled && (await strip(A.sid)).rows === 0, JSON.stringify({ a: await strip(A.sid), b: await strip(B.sid) }));
+            // ROLL THE RING AGAIN — the premise, re-established rather than
+            // assumed. Every resync since the first roll wrote a FRESH
+            // `queue_changed` into that stdout, so by now the next rebuild
+            // would see one and the payload would be a FACT: the first run of
+            // this leg measured exactly that (one `known:true` call, no
+            // placeholder, both arms "passing" for the wrong reason). Same
+            // production mechanism as above: a long agent reply into the open
+            // turn, measured on the buffer file.
+            for (const s of ['a', 'b']) fs.writeFileSync(path.join(cwdOf(s), 'flood'), '1');
+            const rerolled = await until(() => [A, B].every((s) => !bufferFile(s.sid).includes('queue_changed')), 120000, 250);
+            ok(`⑭b ${label}: the ring is rolled again — neither buffer carries a \`queue_changed\`, so the reboot below really does rebuild a normalizer that has never heard one`,
+              !!rerolled, JSON.stringify([A, B].map((s) => ({ bytes: bufferFile(s.sid).length, queueRecords: (bufferFile(s.sid).match(/queue_changed/g) || []).length }))));
+            // WHICH CODE IS THE PAGE RUNNING? Read it off the loaded prototype —
+            // a caching question must never be answered by hoping.
+            const guardInPage = await evaljs(`(() => { const v = window.__q[${sidJson(B.sid)}];
+              return /_queueStatedAt \\|\\| 0\\) > at/.test(String(Object.getPrototypeOf(v)._setQueue)); })()`);
+            ok(`⑭b ${label}: the loaded client ${expectGuard ? 'HAS' : 'does NOT have'} the recency guard (read off the prototype the page is running)`,
+              guardInPage === expectGuard, String(guardInPage));
+            const armed = await evaljs(`(() => {
+              window.__calls = {};
+              for (const sid of [${sidJson(A.sid)}, ${sidJson(B.sid)}]) {
+                const v = window.__q[sid];
+                if (!v) return 'no view for ' + sid;
+                window.__calls[sid] = [];
+                const orig = v._setQueue.bind(v);
+                v._setQueue = function (items, opts) {
+                  window.__calls[sid].push({ n: (items || []).length, known: !opts || opts.known !== false });
+                  return orig(items, opts);
+                };
+              }
+              window.__realRandom = Math.random; Math.random = () => 0.99;
+              return Math.random() === 0.99 ? 'ok' : 'the stagger pin did not take';
+            })()`);
+            ok(`⑭b ${label}: \`_setQueue\` is instrumented and the 0-500ms stagger is PINNED near its top (the defect is an ordering race — sampling it would make this control a coin toss)`,
+              armed === 'ok', String(armed));
+            const b4 = await restart();
+            ok(`⑭b ${label}: the server was SIGKILLed and booted again — the browser window never closed`, !!b4.up, b4.log().slice(-400));
+            // both the answer AND the deferred payload have run
+            await until(async () => ((await evaljs(`(window.__calls[${sidJson(B.sid)}] || []).length >= 2`)) === true ? true : null), 90000, 200);
+            await sleep(2500);   // …and then the whole stagger window again, so what is read is the STEADY state
+            const calls = await evaljs('JSON.parse(JSON.stringify(window.__calls))');
+            const end = { a: await strip(A.sid), b: await strip(B.sid) };
+            await evaljs('Math.random = window.__realRandom; true');
+            return { calls: calls || {}, end };
+          };
+
+          // ARM 1 — PRE-FIX: the real worktree source with ONLY the guard line
+          // removed, built into the bundle the page loads.
+          fs.writeFileSync(CVW, CVW_PRISTINE.replace(GUARD14, ''));
+          ok('⑭b PRE-FIX: exactly one line was removed from the worktree copy of the product source',
+            fs.readFileSync(CVW, 'utf8').length === CVW_PRISTINE.length - GUARD14.length);
+          buildBundle();
+          const pre14 = await arm('PRE-FIX', false);
+          const bCallsPre = pre14.calls[B.sid] || [];
+          ok('⑭b PRE-FIX: the wrapper ANSWERED first (a known list with the real row) and the stale payload followed with its `queueKnown:false` placeholder — the order the incident produces',
+            bCallsPre.length >= 2 && bCallsPre[0].known === true && bCallsPre[0].n === 1 && bCallsPre.some((c) => c.known === false && c.n === 0),
+            JSON.stringify(bCallsPre));
+          ok('⑭b PRE-FIX: …and the strip ends EMPTY — a message that will really run, held by the wrapper, stated on the wire, and NOWHERE on screen (no row to steer, remove or edit; the ask is self-limiting, so nothing asks again)',
+            pre14.end.b.rows === 0, JSON.stringify(pre14.end));
+
+          // ARM 2 — FIXED: the same file, restored.
+          fs.writeFileSync(CVW, CVW_PRISTINE);
+          buildBundle();
+          const fix14 = await arm('FIXED', true);
+          const bCallsFix = fix14.calls[B.sid] || [];
+          ok('⑭b FIXED: the SAME two calls arrive in the SAME order — the deferred payload really did run, it was not skipped',
+            bCallsFix.length >= 2 && bCallsFix[0].known === true && bCallsFix[0].n === 1 && bCallsFix.some((c) => c.known === false && c.n === 0),
+            JSON.stringify(bCallsFix));
+          ok('⑭b FIXED: …and the row is STILL THERE in the steady state — a payload half a second old cannot overwrite the answer it asked for',
+            fix14.end.b.rows === 1 && /the b message/.test(fix14.end.b.texts.join(' ')) && fix14.end.b.red === 0, JSON.stringify(fix14.end));
+          ok('⑭b BOTH ARMS: session A — whose message really did leave the queue — ends EMPTY either way (the fix is about recency, not about keeping whatever was on screen)',
+            pre14.end.a.rows === 0 && fix14.end.a.rows === 0, JSON.stringify({ pre: pre14.end.a, fix: fix14.end.a }));
         }
       } catch (e) {
         ok('the ⑭ browser leg ran', false, String(e.message || e).slice(0, 400));
