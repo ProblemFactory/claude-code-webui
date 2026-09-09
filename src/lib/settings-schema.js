@@ -431,11 +431,18 @@ const SETTINGS_SCHEMA = {
     description: t('The personality new Codex chat sessions start with. Blank = leave it to your own ~/.codex/config.toml (this is the default; VibeSpace used to force "pragmatic" on every session). Unlike Claude, a running Codex session CAN be re-styled from the chat status bar — it applies from the next turn.'),
     category: t('Codex'), liveApply: true,
   },
+  // THE KEY IS A LEGACY SPELLING, THE FEATURE IS NOT (owner ruling 2026-09-08:
+  // auto-resume is generic). It is the instance default for EVERY harness that
+  // can both classify a limit and restart a turn — capsOf(backend).autoResume
+  // .supported — so the copy says so. The KEY keeps its 'claude.' prefix on
+  // purpose: renaming a persisted settings key is a migration, and this one is
+  // read by every session that already has a per-session override recorded
+  // against it (src/server/auto-resume.js globalDefault).
   'claude.autoResumeOnLimit': {
     type: 'boolean', default: false,
     label: t('Continue automatically when a usage limit resets'),
-    description: t('DEFAULT for new chat sessions: when the account is out of quota and there is no other account to switch to, wait for the reset and then continue the interrupted task by itself. Each session can override this in the chat status bar. Off by default because continuing spends quota without you being there.'),
-    category: t('Claude'), liveApply: true,
+    description: t('DEFAULT for new chat sessions on any agent that reports usage limits (Claude, Codex): when the account is out of quota and there is no other account to switch to, wait for the reset — or for the quota to come back early — and then continue the interrupted task by itself. Each session can override this in the chat status bar. Off by default because continuing spends quota without you being there.'),
+    category: t('Chat'), liveApply: true,
   },
   'codex.limitResetCredit': {
     type: 'enum', default: 'off', options: [

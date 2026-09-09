@@ -64,7 +64,10 @@ ok('a signed-out target self-heals to a live member at spawn', r2 && am.poolCurr
   ok("the eval's hot gate is capability-based (hot only where 'verified')", /const hot = !!a\.hot && poolCaps\.hotSwitch === 'verified';/.test(eng));
   ok('sealed orders + plan-C gate on capabilities, not backend ids', /if \(poolCaps\.sealedOrders\) pushSealedOrders/.test(eng) && /if \(!poolCaps\.planC\) break;/.test(eng));
   // ── reset-credit escape ladder (owner ask: reset vs switch choice) ──
-  ok('exhaustion ladder: ① reset credit (opt-in) → ② pool switch → ③ auto-resume', /if \(tryResetCredit\(tripped\?\.resetsAt\)\) return;[\s\S]{0,200}maybePoolAutoSwitch\(session\)/.test(eng) && /if \(tryResetCredit\(resets\)\) return;[\s\S]{0,120}maybePoolAutoSwitch\(session\)/.test(eng));
+  // 2026-09-08: both calls also hand over the LIMIT LANE they tripped, so a
+  // credit that fails arms a wait that names its own wall (an arm with no lane
+  // can never be reopened by a reading — see src/auto-resume-signal.js).
+  ok('exhaustion ladder: ① reset credit (opt-in) → ② pool switch → ③ auto-resume', /if \(tryResetCredit\(tripped\?\.resetsAt, arSignal\.laneOf\(w\.snap\)\)\) return;[\s\S]{0,200}maybePoolAutoSwitch\(session\)/.test(eng) && /if \(tryResetCredit\(resets, arSignal\.laneOf\(w2\?\.snap \|\| snap\)\)\) return;[\s\S]{0,120}maybePoolAutoSwitch\(session\)/.test(eng));
   ok("…auto-consume is OPT-IN (codex.limitResetCredit 'auto', default off) with a 10min retry floor", /serverSetting\('codex\.limitResetCredit'\) !== 'auto'\) return false;/.test(eng) && /_codexResetTriedAt && now - session\._codexResetTriedAt < 10 \* 60e3\) return false;/.test(eng));
   // round 4: the recovery call also CLASSIFIES itself — a redeemed credit
   // moved the LIMIT, it is not proof this conversation produced anything, so

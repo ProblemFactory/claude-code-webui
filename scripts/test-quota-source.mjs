@@ -154,6 +154,73 @@ What's contributing to your limits usage?`;
   for (const info of ['quota_exceeded', 'usage_not_included', 'workspace_owner_usage_limit_reached', 'workspace_member_usage_limit_reached', 'workspace_member_credits_depleted']) {
     ok(`codex: ${info} is exhaustion`, cx.signalFromStream({ type: 'task_failed', codex_error_info: info }).kind === 'exhausted');
   }
+  // ── THE SPELLING THE WIRE ACTUALLY SENDS (2026-09-08, the 32h codex stall) ──
+  // The names above are the HISTORICAL enum; measured over this instance's whole
+  // codex corpus they match ZERO records. RE-MEASURED 2026-09-08 17:5x PDT, the
+  // numbers being what a reader can reproduce today: `codex_error_info` takes
+  // exactly three values across ~/.codex/sessions — `usage_limit_exceeded`
+  // (102 records), `cyber_policy` (6), `unauthorized` (1) — and the historical
+  // regex matches NONE of them. The app-server's camelCase twin
+  // `usageLimitExceeded` is what the LIVE lane sends (its 0.153.4 schema
+  // documents the translation: "This translation layer make sure that we expose
+  // codex error code in camel case"); its record count in data/session-buffers
+  // is NOT reproducible from here — those buffers rotate, and the incident
+  // thread's own was replaced when the owner resumed it. EXCEEDED, not REACHED,
+  // so codex auto-resume never armed once.
+  {
+    const WIRE = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 13th, 2026 8:36 PM.";
+    for (const info of ['usageLimitExceeded', 'usage_limit_exceeded']) {
+      const v = cx.signalFromStream({ type: 'event_msg', payload: { type: 'task_failed', error: WIRE, codexErrorInfo: info, resetsAt: null, rateLimits: null } });
+      ok(`codex: ${info} — the spelling the wire really sends — is exhaustion`, v?.kind === 'exhausted', JSON.stringify(v).slice(0, 120));
+      ok(`codex: …and its reset comes out of the CLI's own sentence, since the record states none (${info})`,
+        Math.abs(v.resetsAtSec * 1000 - Date.parse('2026-09-13T20:36:23-07:00')) < 61000, v && new Date(v.resetsAtSec * 1000).toISOString());
+    }
+    // NOT exhaustion, each for a reason a continue would not fix — a closed set
+    // that quietly grew would spend turns into walls that do not lift.
+    for (const info of ['rateLimitExceeded', 'sessionBudgetExceeded', 'contextWindowExceeded', 'serverOverloaded'])
+      ok(`codex: ${info} is NOT a quota wall (a continue would land in the same second / hit the same budget)`, cx.signalFromStream({ type: 'task_failed', codexErrorInfo: info, error: 'x' }) === null);
+    // the enum can also ride NESTED (core writes it inside the turn's error)
+    ok('codex: a nested error object is read too (core writes {message, codex_error_info})',
+      cx.signalFromStream({ type: 'task_failed', error: { message: WIRE, codex_error_info: 'usage_limit_exceeded' } })?.kind === 'exhausted');
+    // and the prose parser states nothing it cannot read
+    ok('codex: a message with no "try again at …" states NO reset (never an invented wait)', cx.parseCodexLimitReset('You have hit your usage limit.') === 0);
+    ok('codex: …nor does a reset already in the past', cx.parseCodexLimitReset('try again at Jan 2nd, 2020 8:36 PM') === 0);
+    ok('codex: …and the printed minute is truncated, so the parse rounds UP (late costs a tick, early costs a turn)',
+      cx.parseCodexLimitReset('try again at Sep 13th, 2026 8:36 PM', Date.parse('2026-09-07T00:00:00Z')) * 1000 === Date.parse('2026-09-13T20:37:00-07:00'));
+  }
+
+  // ── THE ENUM'S SHAPE, NOT JUST ITS SPELLING (2026-09-08 re-measurement) ──
+  // CodexErrorInfo is a serde EXTERNALLY-TAGGED enum, so a variant carrying data
+  // arrives as a ONE-KEY OBJECT. VERBATIM from this instance's own live buffer
+  // (data/session-buffers/sess-13-1788764799305.buf — the incident thread):
+  //     "codexErrorInfo":{"responseStreamDisconnected":{"httpStatusCode":null}}
+  // Every fixture in this repo assumed a bare string, and `String({…})` is
+  // "[object Object]" — TRUTHY — so the object form never even reached the
+  // message ladder: it was read as an unknown enum and dropped. Whether
+  // `usageLimitExceeded` is itself a unit or a data variant in 0.153.4 could not
+  // be measured (no such record survives, and `codex app-server` is a REJECTED
+  // oracle: 7 INET connects incl. chatgpt.com:443, so asking it is banned), so
+  // BOTH shapes are read.
+  {
+    const WIRE2 = "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 13th, 2026 8:36 PM.";
+    const obj = cx.signalFromStream({ type: 'task_failed', error: WIRE2, codexErrorInfo: { usageLimitExceeded: {} } });
+    ok('codex: the EXTERNALLY-TAGGED object form of the exhaustion enum is exhaustion too', obj?.kind === 'exhausted' && obj.errorInfo === 'usageLimitExceeded', JSON.stringify(obj).slice(0, 140));
+    const withData = cx.signalFromStream({ type: 'task_failed', error: 'no prose here', codexErrorInfo: { usageLimitExceeded: { resetsAt: 1789356983 } } });
+    ok('codex: …and a reset carried INSIDE the variant is read (the http variants prove a variant can carry fields)', withData?.resetsAtSec === 1789356983, withData);
+    // THE MEASURED RECORD ITSELF, as a negative control: a transport hiccup is
+    // not a quota wall and not an auth failure — a continue would be a billed
+    // turn for nothing, and marking the account dead would route around a
+    // healthy one.
+    const live = cx.signalFromStream({ type: 'task_failed', error: 'Reconnecting... 1/5', codexErrorInfo: { responseStreamDisconnected: { httpStatusCode: null } }, resetsAt: null, rateLimits: null });
+    ok('codex: NEGATIVE CONTROL — the real object-form record from the incident buffer is neither a wall nor an auth failure', live === null, live);
+    ok('codex: an internally-tagged spelling names the VARIANT, never the tag field', cx.codexErrorEnum({ type: 'usageLimitExceeded' }).name === 'usageLimitExceeded');
+    ok('codex: an object that states no variant states nothing (never "[object Object]")', cx.codexErrorEnum({ a: 1, b: 2 }).name === '' && cx.codexErrorEnum(null).name === '' && cx.codexErrorEnum([1]).name === '');
+    ok('codex: the auth enum is read in the object form too (same field, same wire)', cx.classifyAuthFailure({ codexErrorInfo: { unauthorized: {} } }) === true);
+    // PRE-FIX CONTROL: the reader this release replaced, verbatim, on the same
+    // record — it is the whole reason the shape had to be measured.
+    const preFix = String({ usageLimitExceeded: {} } || '');
+    ok('codex: PRE-FIX CONTROL — String(enum) on the object form yields "[object Object]", which no vocabulary matches', preFix === '[object Object]' && cx.isExhaustionInfo(preFix) === false);
+  }
   const c5 = cx.signalFromStream({ type: 'event_msg', payload: { type: 'task_failed', error: 'Unauthorized', codexErrorInfo: 'unauthorized' } });
   ok('codex: the typed unauthorized enum → auth-failure', c5?.kind === 'auth-failure' && c5.errorInfo === 'unauthorized', c5);
   ok('codex: task_failed with no/other codex_error_info → null (a plain error is not a quota signal)', cx.signalFromStream({ type: 'task_failed', error: 'stream disconnected' }) === null && cx.signalFromStream({ type: 'task_failed', codexErrorInfo: 'other' }) === null);

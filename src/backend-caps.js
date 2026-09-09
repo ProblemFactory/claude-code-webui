@@ -223,6 +223,53 @@ const CLAUDE_WORKTREE = Object.freeze({ supported: true, flag: '--worktree', nam
 //             `read-permission-rules` stdin verb (⇒ the per-process advert
 //             gate applies, the 2.361.1/2.364.1 skew law). false = the server
 //             can answer without touching the session at all.
+// autoResume names the TWO harness-specific halves of "continue this
+// conversation by itself once its usage limit lifts" (owner ruling 2026-09-08:
+// "auto resume 应该是通用的, 只要支持 hook/注入的 harness 都支持, 形式可以不一样 —
+// 有些是发消息, 有些是 start turn 之类的固有指令"). Everything else about the
+// feature — the timer, the loop breaker, the notices, restart survival — is
+// VibeSpace's own and harness-neutral (src/server/auto-resume.js), so only
+// these two rows may differ per harness:
+//   signal — this harness's QuotaSignalSource can CLASSIFY a limit at all
+//            (quota.signalFromStream is not the NULL one). A harness with no
+//            quota concept can never be armed, and saying so here is what stops
+//            a surface from offering the toggle over nothing.
+//   resume — HOW a stopped turn is restarted, from a CLOSED set of forms. It is
+//            the descriptor's `resume.form`, and the descriptor's `resume
+//            .deliver(session, text, deps)` is what actually runs, so a new
+//            harness cannot inherit a verb it has not implemented:
+//              'message'    a user message on the CLI's own chat stdin
+//                           (claude: the wrapper forwards it as stream-json).
+//              'turn-start' the wrapper's app-server RPC lane — idle ⇒
+//                           turn/start (codex; a busy session is never fired at,
+//                           the fire path refuses while _isStreaming).
+//              'prompt'     ACP session/prompt through the shared acp-wrapper.
+//              null         no way to restart a turn (shell has no agent).
+//   supported — DERIVED (signal && resume): what a SURFACE may offer. Never
+//            hand-set; deriveAutoResume() below is the only producer and
+//            src/harnesses/index.js is the only caller, at registration, from
+//            the descriptor itself.
+// The row below every harness declares is the honest NOTHING; the registry
+// overwrites it with the derived value the moment the descriptor is validated,
+// and scripts/test-harness-contract.mjs re-derives every row from its
+// descriptor in both directions so a stale placeholder is a red test.
+const AUTO_RESUME_FORMS = Object.freeze(['message', 'turn-start', 'prompt']);
+const NO_AUTO_RESUME = Object.freeze({ signal: false, resume: null, supported: false });
+
+/** PURE. The autoResume caps row for one harness, from what its descriptor
+ *  actually implements. An UNDECLARED form THROWS rather than falling through:
+ *  a capability gate that accepts an input it does not recognise is how a
+ *  surface ends up offering a control nothing serves (2.361.4's
+ *  accept-and-ignore class). */
+function deriveAutoResume({ hasLimitSignal = false, resumeForm = null } = {}) {
+  const form = resumeForm == null ? null : String(resumeForm);
+  if (form !== null && !AUTO_RESUME_FORMS.includes(form)) {
+    throw new Error(`auto-resume: unknown resume form ${JSON.stringify(form)} — declare one of ${AUTO_RESUME_FORMS.join('|')} (or null) on the harness descriptor`);
+  }
+  const signal = !!hasLimitSignal;
+  return Object.freeze({ signal, resume: form, supported: signal && form !== null });
+}
+
 const QUEUE_VERBS = Object.freeze(['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all']);
 
 /** What a wrapper that advertises a queue but NAMES NO VERBS is taken to
@@ -282,6 +329,9 @@ const BACKEND_CAPS = {
     // user / project / local settings.json + permissions.allow|deny|ask).
     // No session needed and no live verb: the files ARE the answer.
     permissionRules: { source: 'settings-files', session: true, instance: true, liveVerb: false },
+    // PLACEHOLDER — src/harnesses/index.js writes the DERIVED row from the
+    // descriptor at registration (see deriveAutoResume above).
+    autoResume: NO_AUTO_RESUME,
   },
   codex: {
     pool: true,
@@ -324,6 +374,7 @@ const BACKEND_CAPS = {
     // instance'`; test-vendor-whitelist asserts THIS row and that entry agree,
     // so re-enabling it without re-measuring fails the build.
     permissionRules: { source: 'config-read', session: true, instance: false, liveVerb: true },
+    autoResume: NO_AUTO_RESUME, // placeholder — the registry derives it
   },
   shell: {
     pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false,
@@ -335,6 +386,7 @@ const BACKEND_CAPS = {
     responseStyle: { live: false, closed: true, values: [] }, // terminal-only: no agent to style
     worktree: NO_WORKTREE,
     permissionRules: { source: null, session: false, instance: false, liveVerb: false }, // no agent ⇒ no rules
+    autoResume: NO_AUTO_RESUME, // placeholder — the registry derives it (shell has neither half)
   },
   // ACP v1 harnesses (S8, design-harness-plugins §2.3): the agent holds its
   // own login/provider config — no pool, no quota probe, no credential
@@ -374,6 +426,7 @@ const BACKEND_CAPS = {
     // OpenCode does not give. liveVerb:false — the wrapper is not the source
     // (it answers 'unsupported-by-protocol'; the serve is).
     permissionRules: { source: 'serve-config', session: false, instance: true, liveVerb: false },
+    autoResume: NO_AUTO_RESUME, // placeholder — the registry derives it
   },
 };
 
@@ -382,7 +435,7 @@ const BACKEND_CAPS = {
 // row whose `steer` disagrees with its `queueVerbs`.
 for (const row of Object.values(BACKEND_CAPS)) row.inputModes = deriveInputModes(row.inputModes);
 
-const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false, streamProtocol: null, worktree: NO_WORKTREE, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, permissionRules: Object.freeze({ source: null, session: false, instance: false, liveVerb: false }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }) });
+const NO_CAPS = Object.freeze({ pool: false, hotSwitch: 'unverified', planC: false, sealedOrders: false, resetCredit: false, quotaProbe: null, fork: false, forkAtMessage: false, review: false, renameWriteback: false, streamProtocol: null, worktree: NO_WORKTREE, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: false, queueVerbs: [] }), turnState: null, inProgressTools: false, permissionRules: Object.freeze({ source: null, session: false, instance: false, liveVerb: false }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }), autoResume: NO_AUTO_RESUME });
 
 function capsOf(backend) {
   return BACKEND_CAPS[backend || 'claude'] || NO_CAPS;
@@ -550,4 +603,5 @@ function worktreeSpawnArgs({ backend, want, resume, fork }) {
 }
 
 module.exports = { BACKEND_CAPS, capsOf, setVerifiedCap, QUEUE_VERBS, LEGACY_QUEUE_VERBS, deriveInputModes, notificationDelivery,
+  AUTO_RESUME_FORMS, NO_AUTO_RESUME, deriveAutoResume,
   NO_WORKTREE, WORKTREE_REASONS, worktreeCaps, worktreeRefusal, worktreeSpawnArgs, worktreePick, worktreeLatchWrite };

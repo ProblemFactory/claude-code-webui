@@ -603,12 +603,20 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
     console.log('  SKIP: no claude CLI on PATH — the sdk_status↔compact_progress fork was not re-dumped (leg ⓓ still runs on the production-buffer fixtures)');
   } else {
     const hits = (needle) => { try { return Number(require('child_process').execFileSync('grep', ['-c', '-a', '-F', needle, bin], { encoding: 'utf8' }).trim()) || 0; } catch { return 0; } };
+    // The SHAPE, never the minifier's local names (2.369.78): `Oe.status` /
+    // `n.onInProgressToolUseIDs?.(e.op)` were the identifiers of ONE build
+    // (2.1.257); the Actions runner installs whatever `@anthropic-ai/claude-code`
+    // is current and its minifier picked other letters, so the leg was red on
+    // every mirror run while green here. A binary-dump assert must match what
+    // the code DOES (the property chain), with the local identifier as a wildcard.
+    const ID = '[A-Za-z_$][A-Za-z0-9_$]*';
+    const hitsRe = (re) => { try { return Number(require('child_process').execFileSync('grep', ['-c', '-a', '-E', re, bin], { encoding: 'utf8' }).trim()) || 0; } catch { return 0; } };
     ok('the SDK sink MAPS sdk_status → system/status with compact_result (this is where §2.11 gets its facts)',
-      hits('type:"system",subtype:"status",status:Oe.status') > 0 || hits('subtype:"status",status:Oe.status') > 0, 'sdk_status→system/status mapper not found');
+      hitsRe(`subtype:"status",status:${ID}\\.status`) > 0, 'sdk_status→system/status mapper not found');
     ok('…while compact_progress is CONSUMED by a host callback and never forwarded (the swallowing callback, named)',
       hits('case"compact_progress":') > 0, 'the onCompactEvent compact_progress case is gone — re-measure whether the record now reaches stdout');
     ok('…and set_in_progress_tool_use_ids goes to onInProgressToolUseIDs, not to the stream (why caps.inProgressTools is false)',
-      hits('n.onInProgressToolUseIDs?.(e.op)') > 0 || hits('onInProgressToolUseIDs?.(e.op)') > 0, 'the swallowing callback is gone — re-run the wire probe, the cap may be flippable');
+      hitsRe(`onInProgressToolUseIDs\\?\\.\\(${ID}\\.op\\)`) > 0, 'the swallowing callback is gone — re-run the wire probe, the cap may be flippable');
   }
 }
 {

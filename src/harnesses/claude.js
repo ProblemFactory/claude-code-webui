@@ -135,6 +135,22 @@ module.exports = {
     keychainSensitive: true,                   // darwin keychain service name hashes the env string ⇒ pools need Linux
     parseAuth: parseClaudeAuth,
   },
+  // AUTO-RESUME'S RESUME VERB (owner ruling 2026-09-08: auto-resume is generic,
+  // "形式可以不一样 — 有些是发消息, 有些是 start turn 之类的固有指令"). This is
+  // ONE of the two harness-specific halves; the other is quota.signalFromStream
+  // above. Everything else — the timer, the loop breaker, the notices, restart
+  // survival — is src/server/auto-resume.js and is harness-neutral.
+  //   FORM 'message': claude's continue is an ordinary USER MESSAGE. The wrapper
+  //   takes the adapter's stream-json chat-input frame on stdin and the CLI runs
+  //   it as if it had been typed — which is exactly what the CLI's own TUI
+  //   auto-continue does, so the conversation sees nothing new.
+  // `deps.sendChatInput` is the ORCH channel (server.js's sendToSession) — the
+  // descriptor names the verb, the orchestrator owns the socket, so this file
+  // stays SHARED and the daemon can still bundle it.
+  resume: {
+    form: 'message',
+    deliver: (session, text, deps) => !!deps.sendChatInput(session, text),
+  },
   settingsPrefix: 'claude',
   // CONTEXT INJECTION strategy (S6): the CLI's own hooks carry task context
   // (SessionStart), per-prompt notices (UserPromptSubmit) and the stop-time

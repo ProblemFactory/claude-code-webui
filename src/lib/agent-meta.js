@@ -44,7 +44,7 @@ export const BACKEND_META = {
     // inProgressTools is FALSE on every harness today: claude's record for it
     // never leaves the CLI's own host callback (backend-caps.js carries the
     // dump + the wire measurement), so nothing may draw an "executing" dot.
-    caps: { fork: true, forkAtMessage: true, review: false, renameWriteback: false, effort: true, autoResume: true, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] }, worktree: { supported: true, flag: '--worktree', named: true, requiresGitRepo: true, hookEscape: 'WorktreeCreate', landsIn: '.claude/worktrees/<name>', branchPrefix: 'worktree-' }, permissionRules: { source: 'settings-files', session: true, instance: true, liveVerb: false } },
+    caps: { fork: true, forkAtMessage: true, review: false, renameWriteback: false, effort: true, autoResume: { signal: true, resume: 'message', supported: true }, accounts: true, peerDelivery: 'cli-inbox', inputModes: deriveInputModes({ queue: true, queueVerbs: [] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: false, values: ['Concise', 'Explanatory', 'Learning', 'Proactive'] }, worktree: { supported: true, flag: '--worktree', named: true, requiresGitRepo: true, hookEscape: 'WorktreeCreate', landsIn: '.claude/worktrees/<name>', branchPrefix: 'worktree-' }, permissionRules: { source: 'settings-files', session: true, instance: true, liveVerb: false } },
     // One-line hint per response-style VALUE (same contract as effortHints:
     // English key, t() at render — the VALUE itself is protocol and is never
     // translated).
@@ -92,11 +92,15 @@ export const BACKEND_META = {
     // 0.153.4 makes it the CLI default when config.toml has no `model`, so the
     // dropdown must be able to name what the CLI would pick anyway.
     fallbackModels: ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'],
-    // autoResume: true since 2.368.20 — codex exhaustion arms the same module.
+    // autoResume: the DERIVED server row (src/backend-caps deriveAutoResume),
+    // mirrored key for key — test-harness-contract deep-compares it. `signal`
+    // = this harness can classify a limit at all, `resume` = HOW a stopped
+    // turn is restarted ('turn-start': the wrapper's app-server RPC lane),
+    // `supported` = what a surface may OFFER. Never a backend id anywhere.
     // fork: the thread-fork RPC exists but is unwired (flips when wired).
     // fork: true since 2.369.21 — thread/fork is wired end to end (wrapper
     // CODEX_WEBUI_FORK → thread/fork; server _forkRequested per caps).
-    caps: { fork: true, forkAtMessage: false, review: true, renameWriteback: true, effort: true, autoResume: true, quotaRefresh: 'session-rpc', accounts: true, peerDelivery: 'rpc-queue', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] }, worktree: NO_WORKTREE, permissionRules: { source: 'config-read', session: true, instance: false, liveVerb: true } },
+    caps: { fork: true, forkAtMessage: false, review: true, renameWriteback: true, effort: true, autoResume: { signal: true, resume: 'turn-start', supported: true }, quotaRefresh: 'session-rpc', accounts: true, peerDelivery: 'rpc-queue', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: true, closed: true, values: ['none', 'friendly', 'pragmatic'] }, worktree: NO_WORKTREE, permissionRules: { source: 'config-read', session: true, instance: false, liveVerb: true } },
     // codex Personality values (0.153.4 schema): protocol strings, hinted here.
     responseStyleHints: {
       none: 'no persona — the model\u2019s plain voice',
@@ -137,7 +141,7 @@ export const BACKEND_META = {
     brandColor: '#4ade80',
     fallbackModels: [],
     modelsFromAgent: true,
-    caps: { fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, accounts: false, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: true, values: [] }, worktree: NO_WORKTREE, permissionRules: { source: 'serve-config', session: false, instance: true, liveVerb: false } },
+    caps: { fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: { signal: false, resume: 'prompt', supported: false }, accounts: false, peerDelivery: 'stash-only', inputModes: deriveInputModes({ queue: true, queueVerbs: ['remove', 'reorder', 'edit'] }), turnState: 'authoritative', inProgressTools: false, responseStyle: { live: false, closed: true, values: [] }, worktree: NO_WORKTREE, permissionRules: { source: 'serve-config', session: false, instance: true, liveVerb: false } },
     settingsPrefix: 'opencode',
     permissionModes: ['build', 'plan'],
     // The STORE (stopped conversations: list/open/resume/fork) runs behind a
@@ -342,7 +346,7 @@ export function settingsPrefixFor(backend) {
 }
 
 /** Feature caps for a backend (all-false for unknown/shell — chrome shows nothing it can't do). */
-const NO_FEATURE_CAPS = Object.freeze({ fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: false, responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }), worktree: NO_WORKTREE, permissionRules: Object.freeze({ source: null, session: false, instance: false, liveVerb: false }) });
+const NO_FEATURE_CAPS = Object.freeze({ fork: false, forkAtMessage: false, review: false, renameWriteback: false, effort: false, autoResume: Object.freeze({ signal: false, resume: null, supported: false }), responseStyle: Object.freeze({ live: false, closed: true, values: Object.freeze([]) }), worktree: NO_WORKTREE, permissionRules: Object.freeze({ source: null, session: false, instance: false, liveVerb: false }) });
 export function backendFeatureCaps(backend) {
   return BACKEND_META[backend]?.caps || NO_FEATURE_CAPS;
 }
@@ -365,6 +369,16 @@ export function notificationDeliveryFor(backend) {
  *  scripts/test-harness-contract.mjs deep-compares it against the server row. */
 export function permissionRulesCaps(backend) {
   return (BACKEND_META[backend]?.caps || NO_FEATURE_CAPS).permissionRules || NO_FEATURE_CAPS.permissionRules;
+}
+
+/** The client mirror of the server's `autoResume` caps row (owner ruling
+ *  2026-09-08). EVERY surface that offers or explains auto-continue reads
+ *  THIS — the status-bar chip, the toggle, the settings copy — never a backend
+ *  id, so a harness that cannot be armed (no limit signal) or cannot be
+ *  continued (no resume verb) never gets a control nothing serves. The server
+ *  row is the source and test-harness-contract deep-compares them. */
+export function autoResumeCapsFor(backend) {
+  return backendFeatureCaps(backend).autoResume || NO_FEATURE_CAPS.autoResume;
 }
 
 /** Every backend's agent-memory path pattern (see BACKEND_META.claude). */

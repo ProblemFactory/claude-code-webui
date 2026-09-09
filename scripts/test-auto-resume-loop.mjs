@@ -58,7 +58,7 @@ process.on('exit', () => { for (const d of cleanup) { try { fs.rmSync(d, { recur
  *  the engine a wrapper that drops `noteRecovered`'s third argument is exactly
  *  the pre-round-4 call (`noteRecovered(id, why)` — no classification) with
  *  everything else, including both real producers, unchanged. */
-function mkWorld({ dir = null, healthy = true, ignoreWorkedFlag = false } = {}) {
+function mkWorld({ dir = null, healthy = true, ignoreWorkedFlag = false, arModule = null } = {}) {
   const root = dir || fs.mkdtempSync(path.join(os.tmpdir(), 'vs-arloop-'));
   if (!dir) cleanup.push(root);
   const dataDir = path.join(root, 'data');
@@ -83,7 +83,11 @@ function mkWorld({ dir = null, healthy = true, ignoreWorkedFlag = false } = {}) 
   const sessions = new Map();
   const notices = [], notes = [], events = [], fired = [];
   const obs = new Map();
-  const ar = create({
+  // `arModule` swaps in a PATCHED COPY of the product module (§4g's control):
+  // everything else in the world — the engine, the pool, both producers, the
+  // scripted CLI — is the shipped code, so the control differs in one named
+  // dimension and in nothing else.
+  const ar = (arModule || arMod).create({
     dataDir, activeSessions: sessions, serverSetting: () => true, log: (...a) => console.log(...a), // one journal: the capture below reads both modules' lines
     notify: (id, s2, text) => notes.push(text),
     sendToSession: (id, s2, text) => { fired.push({ id, text }); return true; },
@@ -861,7 +865,17 @@ if (!probe) {
     const raw = JSON.parse(fs.readFileSync(path.join(w.dataDir, 'auto-resume.json'), 'utf8'));
     return !!raw.fires?.[w.SID] && (raw.fires[w.SID].fails || []).some((f) => f.key === w.SPARE);
   })(), fs.readFileSync(path.join(w.dataDir, 'auto-resume.json'), 'utf8').slice(0, 400));
-  ok('…while the DISARM is unchanged: the timed wait is dropped exactly as before (a fire onto a session that is not waiting is the wasted turn this call has always prevented)', w.ar.statusFor(w.SID).armed === false, JSON.stringify(w.ar.statusFor(w.SID)));
+  // 2026-09-08: the DISARM on this reading is GONE, and that is the fix, not a
+  // regression. The session is walled on 5h; this reading is about 7d at 50 %
+  // and says NOTHING about the wall — dropping the wait on it silently broke a
+  // promise the user switched on. (For claude it was merely useless: readings
+  // only arrive while a turn is running, and that turn's own `result` disarms
+  // through 'turn completed normally'. For codex the app-server pushes them to
+  // an IDLE thread, which is exactly how the 32 h stall's conversation lost its
+  // wait.) The reading is now JUDGED instead: wrong bucket ⇒ nothing changes.
+  ok('…while the promise SURVIVES a reading that cannot judge the wall (5h wall, 7d reading — the silent-disarm class)', w.ar.statusFor(w.SID).armed === true, JSON.stringify(w.ar.statusFor(w.SID)));
+  ok('…and the arm records WHICH wall it is waiting on, so the edge can tell', w.ar.statusFor(w.SID).bucket === 'fiveHour');
+  ok('…and no continue was spent on it (the edge refused; the breaker never had to)', w.fired.length === 1, 'fired=' + w.fired.length);
   ok('…and the reading said nothing in the conversation', w.notes.length === notesBefore, JSON.stringify(w.notes.slice(notesBefore)));
 
   // RESTART, state 1: the quarantine is still refused by a fresh module
@@ -954,8 +968,14 @@ if (!probe) {
   // removed must fail the leg above (a guard nobody can delete and turn red is
   // not a guard — the B-3185 rule).
   const src = read('src/server/auto-resume.js');
-  const mutated = src.replace('if (worked) noteFireOutcome(id, true, why);', 'noteFireOutcome(id, true, why);');
-  ok('MUTATION CONTROL: the guard is one identifiable line', mutated !== src);
+  // …and the copy runs from a tmpdir, so its RELATIVE requires (the PURE
+  // fresh-window rule, the harness registry the resume verb comes from) are
+  // re-pointed at the real files. The MUTATION is still exactly one line — the
+  // control differs from the shipped module in the named dimension and in
+  // nothing else, which is the whole point of a negative control.
+  const mutated = src.replace('if (worked) noteFireOutcome(id, true, why);', 'noteFireOutcome(id, true, why);')
+    .replace(/require\('\.\.\//g, `require('${path.join(REPO, 'src')}/`);
+  ok('MUTATION CONTROL: the guard is one identifiable line', mutated !== src && !/require\('\.\.\//.test(mutated));
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-armut-')); cleanup.push(dir);
   const modPath = path.join(dir, 'auto-resume-mutated.cjs');
   fs.writeFileSync(modPath, mutated);
@@ -978,6 +998,80 @@ if (!probe) {
   const shipped = run(arMod), broken = run(mut);
   ok('…and with it removed a worked:false call wipes the record again (the pre-fix behaviour, reproduced from the product source)', broken.kept === false && broken.quarantined.length === 0, JSON.stringify(broken));
   ok('…while the shipped module keeps it (same call, same inputs)', shipped.kept === true && shipped.quarantined.length === 1, JSON.stringify(shipped));
+}
+
+// ── §4g THE NEW FIRE PATH, DRIVEN HERE (2026-09-08 r2) ─────────────────────
+// The fresh-window edge is a SECOND producer of billed continues, and this is
+// the suite that owns the billed rate. Round 1 shipped it with only source
+// greps here (§5's three mentions), so nothing in either tier ever drove it:
+// its own suite counted the WALL VERDICT (true whether or not a turn was
+// spent), and a sustained loop went green — 3 continues per rolling hour, for
+// the life of a watch that can stand for days.
+// Driven through the REAL producer (`recordRateLimitEvent`, the record this
+// instance sees ~20× per rejection), the REAL engine's shared reading edge and
+// the REAL pool, with the scripted CLI answering every continue with another
+// rejection. The measure is the only thing that costs money: `w.fired.length`.
+{
+  /** N passive readings that say the ARMED bucket is open, with the CLI
+   *  rejecting whatever they buy. Returns the billed continues.
+   *  THE CLOCK IS OURS between readings, and it has to be: the breaker's own
+   *  backoff (0 / 60 s / 5 min) and its 10-min same-identity quarantine are
+   *  wall-clock rules, so 40 readings inside one real second are bounded by
+   *  the BACKOFF whatever the edge does — the control would read 1 against 1
+   *  and prove nothing. Advancing 11 min after each rejection clears both and
+   *  leaves the HOURLY CAP as the breaker's last word, which is exactly the
+   *  measurement: with the edge un-guarded the readings keep buying turns up
+   *  to that cap, with the guard they buy ONE. The jump stays inside the hour
+   *  (3 fires = 33 min) so the fixture's own resets (R5 = +2 h) never pass. */
+  async function driveFreshWindow(w, readings = 40) {
+    const realNow = Date.now;
+    let skew = 0;
+    Date.now = () => realNow() + skew;
+    try {
+      w.reject();                                      // the user's own turn hit the 5h wall ⇒ armed on it
+      for (let i = 0; i < readings; i++) {
+        const before = w.fired.length;
+        w.eng.recordRateLimitEvent(w.session, {        // …and the window reads OPEN on that very bucket
+          type: 'rate_limit_event',
+          rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', utilization: 0.1, resetsAt: w.R5 },
+        });
+        await new Promise((r) => setTimeout(r, 5));    // the pre-fire gate is async
+        if (w.fired.length > before) {
+          w.reject();                                  // the CLI answers the continue with another rejection
+          skew += 11 * 60e3;                           // …and time passes (see above)
+        }
+      }
+      return w.fired.length;
+    } finally { Date.now = realNow; }
+  }
+  const good = mkWorld();
+  const nGood = await driveFreshWindow(good);
+  ok('THE FRESH-WINDOW EDGE IS BOUNDED WHERE IT IS WIRED: 40 real readings that all say the armed window is open buy at most one continue per wall, not one per reading',
+    nGood <= FIRE_MAX_IMMEDIATE, 'billed continues=' + nGood);
+  ok('…and the wait is still standing afterwards (bounding the spend must not silently drop the promise)',
+    good.ar.statusFor(good.SID).armed === true || good.ar._fires.has(good.SID), JSON.stringify(good.ar.statusFor(good.SID)));
+  // NEGATIVE CONTROL: the same world, the same 40 readings, against a copy of
+  // the product module with ONLY the edge's single-shot guard removed — round
+  // 1's code, reproduced from source, in the wiring it actually ships in.
+  const src = read('src/server/auto-resume.js');
+  const NEEDLE = "    if (r0 && r0.edgeSpent && r0.edgeSpent === wall) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };";
+  const rewired = src.replace(/require\('\.\.\//g, `require('${path.join(REPO, 'src')}/`);
+  const mutated = rewired.replace(NEEDLE, '    // PRE-FIX: no single-shot guard');
+  // THE SETUP ASSERT MUST SEE THE GUARD REPLACEMENT ITSELF. `mutated !== src`
+  // was satisfied by the require-rewrite alone, so when this needle drifted
+  // (r3 renamed `wallKeyOf(a)` to the hoisted `wall`) the "control" silently
+  // became a copy of the SHIPPED module and only the outcome assert noticed —
+  // an unpatched control is not a control, and its own setup line must say so.
+  ok('control setup: the guard is one identifiable block and the copy resolves its own requires',
+    mutated !== rewired && !/require\('\.\.\//.test(mutated) && !mutated.includes(NEEDLE));
+  const mdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-aredge-')); cleanup.push(mdir);
+  const mpath = path.join(mdir, 'auto-resume-preedge.cjs');
+  fs.writeFileSync(mpath, mutated);
+  const preMod = require(mpath);
+  const bad = mkWorld({ arModule: preMod });
+  const nBad = await driveFreshWindow(bad);
+  ok('NEGATIVE CONTROL (round 1): without it the same readings keep buying turns until the hourly cap, and the cap is the ONLY thing left — every hour, for the life of the wait',
+    nBad > nGood && nBad >= FIRE_MAX_IMMEDIATE, JSON.stringify({ preFix: nBad, shipped: nGood }));
 }
 
 // ── §5 WIRING PINS (2.355.0 law: a fix nobody calls is not a fix) ──────────
@@ -1023,10 +1117,47 @@ if (!probe) {
   const ar2src = read('src/server/auto-resume.js');
   ok('WIRING: the refusal notice is chosen by the REASON (the call site passes the check through; round 1 computed `chk` and dropped it)', /breakerNotice\(id, session, label \|\| key, kind, chk\)/.test(ar2src) && /function breakerNotice\(id, session, label, kind, chk\) \{[\s\S]{0,700}refusalNoticeFor\(\{[\s\S]{0,200}reason: chk && chk\.reason/.test(ar2src));
   ok('WIRING: a journal-only refusal spends no notice budget (the return is ABOVE the stamp)', /if \(!n\) return;[\s\S]{0,220}r\.notices\[n\.cls\] = now; save\(\);/.test(ar2src));
-  ok('WIRING: the identity is re-resolved INSIDE deliver (after the gate) and re-checked before spending', /const deliver = \(\) => \{[\s\S]{0,1400}const ident2 = identityFor\(id, session\) \|\| ident;[\s\S]{0,400}const chk2 = canFire\(id, key2, kind, now2\);[\s\S]{0,200}if \(!chk2\.ok\)/.test(ar2src) && /noteFired\(id, key2, kind, Date\.now\(\)\)/.test(ar2src) && /announce\(id, session, key2, kind, note\)/.test(ar2src));
+  ok('WIRING: the identity is re-resolved INSIDE deliver (after the gate) and re-checked before spending', /const deliver = \(\) => \{[\s\S]{0,1400}const ident2 = identityFor\(id, session\) \|\| ident;[\s\S]{0,400}const chk2 = canFire\(id, key2, kind, now2\);[\s\S]{0,200}if \(!chk2\.ok\)/.test(ar2src) && /noteFired\(id, key2, kind, Date\.now\(\), origin\)/.test(ar2src) && /announce\(id, session, key2, kind, note\)/.test(ar2src));
   // 2026-09-08: `cause` joined the inputs — the immediate path has a second
   // caller now (the new-member wake), and `kind:'now'` can no longer stand in
   // for "a pool switch". Pinned here so the card keeps naming what unblocked it.
+  // …and the ORIGIN of a reading-driven fire reaches the record it is spent on
+  // (2026-09-08 r2): the single-shot rule keys on the WALL, so if `origin` were
+  // dropped anywhere between noteQuotaReading and noteFired the guard would
+  // never arm and the loop would be back, silently.
+  ok('WIRING: a reading-driven fire carries its WALL to the record, and the shot is stamped AT THE DELIVERY (not at the rejection report — a caller that never reports one may not re-open the spend)',
+    /const fired = fireNow\(id, head, \{ via: 'reading', wall \}\);/.test(ar2src)
+    && /function fireNow\(id, why, \{ cause = null, via = null, wall = null \} = \{\}\)[\s\S]{0,400}attemptFire\(id, session, a, 'now', why, cause, via \? \{ via, wall \} : null\)/.test(ar2src)
+    && /function noteFired\(id, key, kind, now, origin = null\) \{[\s\S]{0,1400}if \(origin && origin\.via === 'reading' && origin\.wall\) r\.edgeSpent = origin\.wall;/.test(ar2src)
+    && !/if \(r\.last\.via === 'reading'/.test(ar2src));
+  // ── round 3: the async gate cannot be read as an outcome ────────────────
+  // `attemptFire` returns `true` for a gate that is merely IN FLIGHT, and the
+  // production gate is ALWAYS a Promise (server.js → `async
+  // beforeAutoResumeFire`). So the reading edge may not journal a continue from
+  // that return value, and a VETO must leave something behind or every push
+  // re-enters the gate for the life of the watch.
+  ok('WIRING (r3): the reading edge hands its own head to the fire and journals NOTHING itself — the line is written by the code that delivers',
+    /const head = `\$\{a\.watch \? 'watched' : 'armed'\} window reopened \(\$\{why\}\)`;\s*\n\s*const fired = fireNow\(id, head, \{ via: 'reading', wall \}\);/.test(ar2src)
+    && !/if \(fired\) log\(/.test(ar2src));
+  ok('WIRING (r3): a gate VETO is recorded where it is known — the async branch, the sync branch, and it holds the reading edge per WALL',
+    /gate\.then\(\(g2\) => \{ if \(g2 === false\) noteGateRefusal\(id, kind, origin\); else deliver\(\); \}\)/.test(ar2src)
+    && /if \(gate === false\) noteGateRefusal\(id, kind, origin\);/.test(ar2src)
+    && /function noteGateRefusal\(id, kind, origin\) \{[\s\S]{0,500}if \(origin && origin\.via === 'reading' && origin\.wall\) \{ r\.edgeHeld = \{ wall: origin\.wall, until: now \+ EDGE_HOLD_MS \}; changed = true; \}/.test(ar2src)
+    // …and the disk write is conditional: the no-hold paths (timed tick,
+    // pool-switch/wake fireNow) reach this on every attempt, so an
+    // unconditional save() is the same unbounded-effect-on-a-polled-path
+    // shape one layer down.
+    && /if \(changed\) save\(\);/.test(ar2src)
+    && /if \(r0 && r0\.edgeHeld && r0\.edgeHeld\.wall === wall && Date\.now\(\) < r0\.edgeHeld\.until\)/.test(ar2src));
+  // …and the pruner knows the hold can still refuse. `save()` deletes breaker
+  // records that "can no longer refuse anything" and runs on every arm, fire
+  // and refusal, so a field only the READER knows about is dropped at the next
+  // FIRE_WINDOW_MS boundary — measured, 27 gate asks per four hours instead of
+  // 24, before this clause existed. Every refusing field owes this predicate a
+  // clause; `edgeSpent` (r2) is the same rule's first instance.
+  ok('WIRING (r3): every field that can REFUSE is in the save() liveness predicate, or the pruner deletes it',
+    /\|\| \(!!r\.edgeSpent && armed\.has\(k\)\)/.test(ar2src)
+    && /\|\| \(!!\(r\.edgeHeld && r\.edgeHeld\.until > now\) && armed\.has\(k\)\);/.test(ar2src));
   ok('WIRING: the continue card is chosen from the ARM + whether the gate moved us + the caller\'s named CAUSE, in one place', /const moved = !!key && !!key2 && key2 !== key;[\s\S]{0,600}const note = continueNoticeFor\(\{ kind, armReason: a2\.reason, label: label2, moved, cause \}\);/.test(ar2src));
   // 'all-logins-expired' (2026-09-07) is the same class of fact — nowhere for
   // this conversation to go — so the breaker must hear it too, or it re-fires
@@ -1046,8 +1177,13 @@ if (!probe) {
     // file                              why                               worked  because
     ['src/server/usage-pool-engine.js', 'turn completed normally', true],   //  the turn ended with real output: WORK
     ['src/ws-handler.js', 'user sent a prompt', true],                      //  a human took the conversation over: WORK
-    ['src/server/usage-pool-engine.js', 'fresh non-rejected reading', false], // a bucket has room — says nothing about this session
-    ['src/server/usage-pool-engine.js', 'fresh non-limited codex reading', false], // …its codex twin
+    // 2026-09-08: the two READING producers no longer call noteRecovered
+    // directly — they route through ONE shared edge (noteQuotaReadingForResume)
+    // which keeps the round-4 classification for an un-armed session and asks
+    // an ARMED one whether the reading says the wall is gone. So the census has
+    // one row here with a non-literal `why` (it is the caller's word), and the
+    // literal whys are pinned separately below, one per producer.
+    ['src/server/usage-pool-engine.js', '<non-literal>', false],             //  the shared reading edge; its callers' whys are pinned below
     ['src/server/usage-pool-engine.js', 'codex reset credit consumed', false], // the LIMIT moved; the conversation produced nothing
     ['src/server/auto-resume.js', 'disabled', false],                       //  the feature was switched off under a live arm
   ];
@@ -1087,7 +1223,17 @@ if (!probe) {
   const table = new Set(AUDIT.map(([f, why, worked]) => `${f}|${why}|${worked}`));
   ok('AUDIT: every noteRecovered call site in src/ is classified in the table (an unclassified new caller fails here, not in production)', [...derived].every((k) => table.has(k)), 'unlisted: ' + [...derived].filter((k) => !table.has(k)).join(' ; '));
   ok('AUDIT: …and every row of the table is a real call site (no dead rows)', [...table].every((k) => derived.has(k)), 'dead rows: ' + [...table].filter((k) => !derived.has(k)).join(' ; '));
-  ok('AUDIT: the derivation actually found them all — 2 that claim WORK, 4 that do not', callSites.length === AUDIT.length && callSites.filter((c) => c.worked).length === 2, JSON.stringify(callSites));
+  ok('AUDIT: the derivation actually found them all — 2 that claim WORK, 3 that do not', callSites.length === AUDIT.length && callSites.filter((c) => c.worked).length === 2, JSON.stringify(callSites));
+  // …and the ONE non-literal row is not a hole: its callers are enumerated
+  // from the source with their own literal whys, so a NEW reading producer that
+  // forgets to route through the shared edge is caught here rather than in
+  // production (the round-4 rule, applied one level up).
+  {
+    const engSrc = read('src/server/usage-pool-engine.js');
+    const whys = [...engSrc.matchAll(/noteQuotaReadingForResume\([^;]*?'([^']+)'\)/g)].map((m) => m[1]).sort();
+    ok('AUDIT: every caller of the shared reading edge is enumerated with its own why', whys.join(' / ') === 'fresh non-limited codex reading / fresh non-rejected reading', JSON.stringify(whys));
+    ok('AUDIT: …and the shared edge is the ONLY thing that turns a reading into a noteRecovered', /function noteQuotaReadingForResume\(session, snapshot, why\)/.test(engSrc));
+  }
   ok('AUDIT: the two callers the loop breaker trusts are a completed TURN and the USER — nothing else may clear it', callSites.filter((c) => c.worked).map((c) => c.why).sort().join(' / ') === 'turn completed normally / user sent a prompt', JSON.stringify(callSites.filter((c) => c.worked)));
   ok('WIRING: the breaker is cleared ONLY under the classification, and the disarm below stays unconditional', /function noteRecovered\(id, why, \{ worked = true \} = \{\}\) \{[\s\S]{0,400}if \(worked\) noteFireOutcome\(id, true, why\);\s*\n\s*const a = armed\.get\(id\);/.test(ar2src) && !/^\s*noteFireOutcome\(id, true, why\);/m.test(ar2src));
 }

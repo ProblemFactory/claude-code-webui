@@ -203,7 +203,12 @@ const deepEq = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 // Client-only FEATURE flags: pure chrome with no server behaviour behind them.
 // A NEW client-only key fails here — that is the law ("a client-only row is
 // forbidden"), with today's four grandfathered BY NAME.
-const CLIENT_ONLY_OK = new Set(['effort', 'autoResume', 'accounts', 'quotaRefresh']);
+// 2026-09-08: 'autoResume' LEFT this list — it is a real server row now
+// (deriveAutoResume, written by the registry from the descriptor), so the deep
+// compare below enforces the mirror instead of grandfathering it. That is the
+// law working: a client-only flag is allowed only while nothing on the server
+// answers for it.
+const CLIENT_ONLY_OK = new Set(['effort', 'accounts', 'quotaRefresh']);
 for (const id of chatHarnessIds()) {
   const srv = capsOf(id), cli = BACKEND_META[id].caps || {};
   const drift = Object.keys(cli).filter((k) => (k in srv ? !deepEq(srv[k], cli[k]) : !CLIENT_ONLY_OK.has(k)));
@@ -481,6 +486,151 @@ const wsCreateSrc = fs.readFileSync(path.join(REPO, 'src/ws-create.js'), 'utf8')
   try { fs.rmSync(NOREPO, { recursive: true, force: true }); } catch { }
 }
 
+
+// ── AUTO-RESUME CONFORMANCE (owner ruling 2026-09-08: "auto resume 应该是通用的,
+// 只要支持 hook/注入的 harness 都支持, 形式可以不一样") ──────────────────────
+// The feature is VibeSpace's own and harness-neutral; only TWO facts differ per
+// harness and both are on the descriptor — quota.signalFromStream (how a LIMIT
+// shows up) and resume {form, deliver} (how a TURN is restarted). So every
+// registered harness gets the SAME conformance run: the caps row is re-derived
+// from the descriptor in both directions, a harness that can be continued
+// proves it CAN be (arm → fire, delivered through its OWN verb into a stub of
+// its own channel), and a harness that cannot is never armed and never offered.
+console.log('— auto-resume conformance (owner ruling 2026-09-08)');
+{
+  const { deriveAutoResume, AUTO_RESUME_FORMS, NO_AUTO_RESUME } = require(path.join(REPO, 'src/backend-caps.js'));
+  const reg = require(path.join(REPO, 'src/harnesses'));
+  const { NULL_QUOTA } = require(path.join(REPO, 'src/harnesses/null-quota.js'));
+  const arMod = require(path.join(REPO, 'src/server/auto-resume.js'));
+
+  // (a) THE ROW IS DERIVED, NOT DECLARED — recompute it from the descriptor and
+  // compare, so a hand-edited caps literal (or a stale placeholder the registry
+  // failed to overwrite) is red rather than a silent capability claim.
+  for (const id of reg.ids()) {
+    const h = reg.get(id);
+    const want = deriveAutoResume({
+      hasLimitSignal: !!h.quota && h.quota !== NULL_QUOTA && h.quota.signalFromStream !== NULL_QUOTA.signalFromStream,
+      resumeForm: h.resume ? h.resume.form : null,
+    });
+    ok(JSON.stringify(capsOf(id).autoResume) === JSON.stringify(want),
+      `${id}: caps.autoResume is DERIVED from the descriptor (${JSON.stringify(want)})`, JSON.stringify(capsOf(id).autoResume));
+    ok(want.resume === null || AUTO_RESUME_FORMS.includes(want.resume), `${id}: its resume form is in the closed set`);
+    ok(want.supported === (want.signal && want.resume !== null), `${id}: 'supported' is exactly signal AND a verb — never hand-set`);
+  }
+  ok(JSON.stringify(capsOf('gemini').autoResume) === JSON.stringify(NO_AUTO_RESUME), 'an UNREGISTERED backend answers the honest nothing (no fallthrough to claude)');
+  // the four measured rows, named, so a silent flip is visible in the diff
+  ok(capsOf('claude').autoResume.resume === 'message' && capsOf('codex').autoResume.resume === 'turn-start'
+    && capsOf('opencode').autoResume.resume === 'prompt' && capsOf('shell').autoResume.resume === null,
+    'the four harnesses each declare their OWN verb form (message / turn-start / prompt / none)');
+  ok(capsOf('opencode').autoResume.supported === false && capsOf('opencode').autoResume.resume === 'prompt',
+    'opencode CAN be continued but has no limit signal (ACP v1 exposes no subscription window) ⇒ not offered, honestly');
+
+  // (b) A DECLARED VERB REALLY WORKS: arm → fire, delivered through the
+  // harness's OWN deliver() into a stub of its OWN channel. Driven through the
+  // real module (its breaker, its gate, its persistence), never a paraphrase.
+  const mkAr = (backend, extra = {}) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-arconf-'));
+    const sent = [];
+    const sessions = new Map();
+    const ar = arMod.create({
+      dataDir: dir, activeSessions: sessions, serverSetting: () => true, log: () => { },
+      // THE STUB CHANNEL: whatever the harness's verb decides to do, it reaches
+      // the wire through exactly this one ORCH function (claude's chat stdin,
+      // the codex wrapper's rpc lane, the ACP wrapper's prompt) — so a verb
+      // that forgot to use it, or used something else, cannot pass.
+      sendToSession: (id, s, text) => { sent.push({ id, text, backend: s.backend }); return true; },
+      ...extra,
+    });
+    const s = { mode: 'chat', backend, pty: {}, _isStreaming: false, _autoResume: true };
+    sessions.set('s1', s);
+    return { ar, s, sent, dir, sessions };
+  };
+  for (const id of reg.ids()) {
+    const verb = reg.resumeVerb(id);
+    const w = mkAr(id);
+    const rec = w.ar.armIfEnabled('s1', w.s, Date.now() + 60000, 'usage limit', { lane: null, bucket: 'fiveHour' });
+    if (!verb) {
+      ok(rec === null && w.ar.statusFor('s1').armed === false, `${id}: declares NO resume verb ⇒ never armed (a promise nobody can keep is not made)`);
+      ok(w.ar.tick(Date.now() + 3600e3) === 0 && w.sent.length === 0, `${id}: …and nothing is ever fired at it`);
+      ok(w.ar.statusFor('s1').resume === null, `${id}: …and the status says so, so no surface offers the toggle`);
+    } else {
+      ok(!!rec, `${id}: declares the '${verb.form}' verb ⇒ the wait is armed`);
+      const fired = w.ar.tick(Date.now() + 60000 + 60000);
+      ok(fired === 1 && w.sent.length === 1 && w.sent[0].text === arMod.CONTINUE_PROMPT && w.sent[0].backend === id,
+        `${id}: …and the continue is DELIVERED through its own '${verb.form}' verb into that harness's channel`, JSON.stringify(w.sent));
+      ok(w.ar.statusFor('s1').armed === false, `${id}: …exactly once (the wait is spent)`);
+      ok(w.ar.statusFor('s1').resume === verb.form, `${id}: …and the status names the form the surfaces gate on`);
+    }
+    try { fs.rmSync(w.dir, { recursive: true, force: true }); } catch { }
+  }
+
+  // (c) A VERB THAT REFUSES IS NOT A DELIVERY. The fire path must believe the
+  // harness, not its own optimism: a deliver() that returns false leaves the
+  // wait armed for the next tick rather than reporting a continue nobody sent.
+  {
+    const w = mkAr('claude', { sendToSession: () => false });
+    w.ar.armIfEnabled('s1', w.s, Date.now() + 1000, 'usage limit', { bucket: 'fiveHour' });
+    ok(w.ar.tick(Date.now() + 60000) === 0 && w.ar.statusFor('s1').armed === true, 'a verb that could not deliver leaves the promise standing (never a phantom continue)');
+    try { fs.rmSync(w.dir, { recursive: true, force: true }); } catch { }
+  }
+
+  // (d) NO SURFACE MAY BRANCH ON A BACKEND ID around auto-resume. The census is
+  // derived from the source, not from a list somebody remembered to update, and
+  // it is proven on a PLANTED gate before it is trusted to report a clean tree.
+  {
+    // THE FILE SET IS DERIVED, NOT ENUMERATED (the cli-identity r7 law: a
+    // standing sweep is worth exactly the set it walked, and a hand-written
+    // list only ever polices the files its author already read — it missed 47
+    // real ones there). Every .js/.mjs under src/, server.js and data/bin/ that
+    // MENTIONS auto-resume is censused; the set is printed so the scope is
+    // visible, and it is pinned to still cover the four sites that carry the
+    // decision.
+    const MARK = /autoResume|auto-resume|armIfEnabled|noteQuotaReading|windowOpened|resumeVerb|autoResumeCapsFor/;
+    const ID_GATE = /backend\s*[!=]==\s*'(?:codex|claude|opencode|shell)'/;
+    const walk = (d, out = []) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isDirectory()) { if (!/node_modules|\.git/.test(f)) walk(f, out); } else if (/\.(js|mjs)$/.test(e.name)) out.push(f); } return out; };
+    // BUILD OUTPUTS ARE NOT SOURCES: data/bin/vibespace-agentd*.js is esbuild's
+    // bundle of the very src/ files censused below (gitignored since 2.369.75),
+    // so censusing it would police the same code twice and make the verdict
+    // depend on whether this tree has been built.
+    const GENERATED = /^data\/bin\/vibespace-agentd(-attach)?\.js$/;
+    const allFiles = [...walk(path.join(REPO, 'src')), path.join(REPO, 'server.js'), ...walk(path.join(REPO, 'data/bin'))];
+    const SITES = allFiles.map((f) => path.relative(REPO, f)).filter((f) => !GENERATED.test(f) && MARK.test(fs.readFileSync(path.join(REPO, f), 'utf8')));
+    // A gate that is NEAR an auto-resume mention but is not ABOUT it needs a
+    // reason, and a reason that stops matching is itself a failure (the dead
+    // allowlist rule from test-architecture).
+    const ALLOW = [{ file: 'src/lib/session-lifecycle.js', gate: "backend === 'claude'", why: 'tuiRenderer (a TERMINAL-mode setting) sits in the same createSession payload literal as the autoResume field — proximity, not a gate on this feature' }];
+    const offenders = [], allowHit = new Set();
+    for (const f of SITES) {
+      const txt = fs.readFileSync(path.join(REPO, f), 'utf8');
+      for (const m of txt.matchAll(new RegExp(MARK.source, 'g'))) {
+        const win = txt.slice(Math.max(0, m.index - 600), m.index + 600);
+        const g = ID_GATE.exec(win);
+        if (!g) continue;
+        const a = ALLOW.find((x) => x.file === f && x.gate === g[0]);
+        if (a) { allowHit.add(a.why); continue; }
+        offenders.push(`${f} :: ${g[0]}`);
+      }
+    }
+    console.log(`  · census scope: ${SITES.length} files mention auto-resume (${SITES.slice(0, 6).join(', ')}${SITES.length > 6 ? ', …' : ''})`);
+    ok(offenders.length === 0, 'CENSUS: no auto-resume site gates on a backend id (every one reads the caps row / the descriptor)', [...new Set(offenders)].join(' ; '));
+    for (const f of ['src/server/auto-resume.js', 'src/server/usage-pool-engine.js', 'src/lib/chat-status-bar.js', 'src/auto-resume-signal.js'])
+      ok(SITES.includes(f), `CENSUS scope covers ${f} (a sweep that can miss the deciding file is not a sweep)`);
+    ok(SITES.length >= 10, `CENSUS scope is non-vacuous (${SITES.length} files)`);
+    for (const a of ALLOW) ok(allowHit.has(a.why), `CENSUS allowlist entry still matches something (dead reason = red): ${a.file} — ${a.why}`);
+    ok(ID_GATE.test("if (session.backend === 'codex') return null;"), '…and the census can go red (proven on a planted gate, never a check that only ever passes)');
+    // WIRING PINS (2.355.0 law: a fix nobody calls is not a fix). Each names the
+    // ONE reader, so a surface that grows a private copy of the question — or
+    // reads the row back as a boolean, which it was until this release — is red.
+    const sb = fs.readFileSync(path.join(REPO, 'src/lib/chat-status-bar.js'), 'utf8');
+    ok(/autoResumeCapsFor\(this\._backend\)\.supported/.test(sb), 'WIRING: the status-bar chip is drawn from the DERIVED caps row, through the shared reader');
+    const arSrc = fs.readFileSync(path.join(REPO, 'src/server/auto-resume.js'), 'utf8');
+    ok(/if \(!verbFor\(session\)\) \{ log\(/.test(arSrc), 'WIRING: armIfEnabled refuses a harness with no resume verb (never a promise nobody can keep)');
+    ok(/const verb = verbFor\(session\);[\s\S]{0,400}verb\.deliver\(session, CONTINUE_PROMPT, \{ sendChatInput/.test(arSrc), 'WIRING: the ONE fire choke point runs the DESCRIPTOR\'s verb, handing it the ORCH channel');
+    ok((arSrc.match(/verb\.deliver\(/g) || []).length === 1, 'WIRING: …and there is exactly ONE of them (a second fire path is how the loop breaker — and the spend authorizer — get bypassed)');
+    const engSrc2 = fs.readFileSync(path.join(REPO, 'src/server/usage-pool-engine.js'), 'utf8');
+    ok((engSrc2.match(/noteQuotaReadingForResume\(/g) || []).length === 3, 'WIRING: ONE shared reading edge with exactly its two producers (claude + codex), never a per-harness answer', String((engSrc2.match(/noteQuotaReadingForResume\(/g) || []).length));
+  }
+}
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

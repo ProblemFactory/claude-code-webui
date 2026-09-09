@@ -42,6 +42,7 @@ function create({ app, rootDir, USAGE_CACHE_DIR, activeSessions, wss, WS_OPEN, g
 // conversations (headless instances degrade to hot behavior until a client
 // appears — the switch itself never waits on a browser).
 const { decidePoolSwitch, rankPoolMembers, poolBlockedNotice, conversationDisplayName, SWITCH_THRESHOLD_PCT: POOL_HARD_PCT } = require('../account-pool-auto.js');
+const arSignal = require('../auto-resume-signal.js'); // PURE: the limit LANE a snapshot is about + the fresh-window edge
 const { captureRateLimitEvent } = require('../rate-limit-capture.js'); // was a FREE IDENTIFIER since extraction #5 — passive rate_limit_event capture silently dead for 3 days (5th lost binding; the try/catch swallowed the ReferenceError into a log line). The PARSE now reaches the engine through the claude harness's quota.signalFromStream (S4) — one classifier per harness.
 // ── THE harness registry (S4, docs/design-harness-plugins.md §2.4): each
 // harness declares its QuotaSignalSource = normalize / signalFromStream /
@@ -1200,7 +1201,13 @@ function noteWallSignal(session, sig = {}) {
   // + its rejected event are ONE wall (a single turn must not satisfy the
   // ≥2-walls guard by itself)
   if (key && !sigs.some((s) => s.key === key)) noteWallOnAccount(key, session._webuiId);
-  sigs.push({ at: Date.now(), resetsAtMs: Number(sig.resetsAtMs) || 0, bucket: sig.bucket || null, scopedName: sig.scopedName || null, key, slot: !!sig.slot });
+  // THE LIMIT LANE (2026-09-08): which of the harness's windows this wall is
+  // about — the harness's own `snapshot.limitId`, null when it has one lane
+  // (claude). The armed wait carries it so the fresh-window edge can tell a
+  // reading about THIS wall from a reading about a sibling lane: a codex login
+  // reports `codex` and `codex_bengalfox` minute by minute on the same account,
+  // and the spark lane read 0 % for the whole 32 h the plan lane was spent.
+  sigs.push({ at: Date.now(), resetsAtMs: Number(sig.resetsAtMs) || 0, bucket: sig.bucket || null, scopedName: sig.scopedName || null, key, slot: !!sig.slot, lane: sig.lane || null });
   session._turnWorkAfterSig = 0;
 }
 /** Main-thread assistant output — work evidence for turn classification. */
@@ -1230,6 +1237,67 @@ function noteTurnEnd(session) {
   // signals allowed to clear the loop breaker (round 4); a continue that
   // actually landed reaches this same line as its own turn's result
   try { getAutoResume()?.noteRecovered?.(session._webuiId, 'turn completed normally'); } catch { }
+}
+
+/** A QUOTA READING ARRIVED FOR THIS SESSION — the harness-neutral half of the
+ *  2026-09-08 incident. Two facts, and which one applies depends only on
+ *  whether the session is WAITING:
+ *   · not waiting → the pre-existing disarm (`worked:false`: a passive reading
+ *     says a bucket has room and NOTHING about whether this conversation
+ *     produced anything, so it may drop a timed wait but never clear the loop
+ *     breaker — round 4 of the 130-fire incident). Unarmed this is a no-op,
+ *     which is what it always was.
+ *   · waiting → THE FRESH-WINDOW EDGE. The old code disarmed here too, and for
+ *     claude that was invisible: claude only emits readings while a turn is
+ *     running, so an armed session never saw one. codex's app-server pushes
+ *     `rate_limits_updated` to an IDLE thread — that is exactly the 21:55Z
+ *     record that should have woken the incident's conversation — so the same
+ *     line meant "silently break the promise and leave the session dead".
+ *     Now the reading is asked whether the wall is GONE (PURE windowOpened,
+ *     lane-aware) and, if so, the promise is KEPT through the normal fire path
+ *     (breaker + hourly cap + quarantine + pre-fire gate all still apply).
+ *  ONE implementation for every harness: the caller hands over its own
+ *  normalized snapshot, nothing here branches on a backend id. */
+const _readingEdgeSaid = new Map(); // webuiId → {why, at} — the last verdict this session's wait was journalled with
+const READING_EDGE_LOG_MS = 10 * 60e3;
+function noteQuotaReadingForResume(session, snapshot, why) {
+  const id = session && session._webuiId;
+  if (!id) return;
+  try {
+    const ar = getAutoResume();
+    if (!ar) return;
+    const st = ar.statusFor?.(id);
+    if (!st || !st.armed) { _readingEdgeSaid.delete(id); ar.noteRecovered?.(id, why, { worked: false }); return; }
+    const v = ar.noteQuotaReading?.(id, snapshot, why);
+    if (!v || v.open || v.why === 'not-armed') { if (v && v.open) _readingEdgeSaid.delete(id); return; }
+    // ONE LINE PER VERDICT, NOT ONE PER READING. A waiting codex session is
+    // pushed a `rate_limits_updated` every few seconds — measured on the
+    // incident thread's own buffer: 454 pushes in under two hours, 403 of them
+    // on the SIBLING lane — and a watch can stand for days, so journalling each
+    // refusal would bury the lines that mean something (the S9 round-6 rule: a
+    // degrade path that speaks once per fetch says nothing). The verdict is
+    // said when it CHANGES, and re-said at most every 10 min so a long wait
+    // still shows it is being judged rather than ignored.
+    const prev = _readingEdgeSaid.get(id);
+    const now = Date.now();
+    if (prev && prev.why === v.why && now - prev.at < READING_EDGE_LOG_MS) return;
+    _readingEdgeSaid.set(id, { why: v.why, at: now });
+    // TWO VERDICTS CARRY `wallOpen: true` AND EACH NEEDS ITS OWN SENTENCE —
+    // the generic line says the wall is still up, and for these two that is a
+    // false fact printed into the one channel this incident was diagnosed from.
+    //   already-refuted  the window really does read open; we decline to spend
+    //                    again because the CLI answered our last reading-driven
+    //                    continue with another limit rejection (r2)
+    //   gate-held        the window reads open, the PRE-FIRE GATE disagreed,
+    //                    and we are pacing the re-ask rather than re-running it
+    //                    on the producer's traffic (r3). The wait is intact and
+    //                    it will be asked again — say that, not "still limited".
+    console.log(v.why === 'already-refuted'
+      ? `[auto-resume] ${id}: the window reads open but a continue onto this wall was already refused — waiting for the reset`
+      : v.why === 'gate-held'
+        ? `[auto-resume] ${id}: the window reads open but the pre-fire gate still says blocked — re-asking on a timer, the wait stands`
+        : `[auto-resume] ${id}: reading did not reopen the wait (${v.why})`);
+  } catch (e) { console.warn('[auto-resume] reading edge failed:', e.message); }
 }
 
 const BUCKET_LABEL = { fiveHour: '5h', sevenDay: '7d' };
@@ -1352,6 +1420,15 @@ function onWalledTurn(session, sigs) {
     if (!ar?.armIfEnabled) return;
     const v = quotaVerdictFor(scope, { model, session });
     console.log(`[wall] ${id}: walled turn (scope ${scope}${demoted?.demoted ? `, demoted ${demoted.key}` : ''}) → ${v.usable === true ? 'usable via ' + (v.via || '?') : v.usable === false ? 'blocked until ' + (v.blockedUntil ? new Date(v.blockedUntil).toISOString() : 'unknown') : 'no data'}${v.divergent ? ` [billing ${nameOf(v.linked)}, OTel observed ${nameOf(v.observed)}]` : ''}`);
+    // WHICH WALL this arm is about (2026-09-08), for the fresh-window edge: the
+    // LANE the signals named (a codex login reports several — the sibling lane
+    // read 0 % through the whole 32 h stall) and the BUCKET with the FURTHEST
+    // reset, because an identity unblocks only when the LAST of its dead
+    // windows has reset (the c1206711 rule). Both null for a harness that
+    // states neither, which is the honest answer rather than a guess — and an
+    // arm with no bucket simply waits out its own timer.
+    const wallSig = (sigs || []).filter((s2) => s2 && s2.bucket).sort((x, y) => (y.resetsAtMs || 0) - (x.resetsAtMs || 0))[0] || null;
+    const armWall = { lane: (sigs || []).map((s2) => s2 && s2.lane).find(Boolean) || null, bucket: wallSig ? wallSig.bucket : null, scopedName: wallSig ? (wallSig.scopedName || null) : null };
     if (v.usable === true) {
       // a member is free: the session is idle-walled and nothing else will
       // move it — a NEAR fire re-enters work through the normal machinery
@@ -1370,14 +1447,14 @@ function onWalledTurn(session, sigs) {
         console.warn(`[wall] ${id}: INVARIANT VIOLATED — ${veto} (${nameOf(v.viaId)}) — not re-firing`);
         global.__vsEvent?.('wall-usable-is-rejector', String(v.viaId));
       } else {
-        ar.armIfEnabled(id, session, Date.now() + 45000, `switched to a usable account (${v.via || '?'})`);
+        ar.armIfEnabled(id, session, Date.now() + 45000, `switched to a usable account (${v.via || '?'})`, armWall);
         return;
       }
     }
     const evReset = Math.max(0, ...sigs.map((s2) => s2.resetsAtMs || 0));
     const target = v.blockedUntil || evReset;
     if (target > Date.now()) {
-      ar.armIfEnabled(id, session, target, v.reason || 'usage limit');
+      ar.armIfEnabled(id, session, target, v.reason || 'usage limit', armWall);
       // VERIFY the cache's word (inc-mtdsoj5f, userW: an ALIVE account read
       // dead-with-a-far-reset — "blocked until Aug-31" off stale data — until a
       // MANUAL refresh fixed it; a confident cache can lie exactly like an
@@ -1586,11 +1663,18 @@ function recordRateLimitEvent(session, msg) {
       // enters BLOCKED; a genuinely walled turn arms off quotaVerdict).
       try { noteWallSignal(session, { resetsAtMs: (Number(ev.resetsAt) || 0) * 1000, bucket: ev.kind, scopedName: ev.scopedName, key, slot: !!slot?.slotOk }); } catch { }
     } else if (r.wroteReading) {
-      // worked:false — a PASSIVE reading (the CLI emits one whenever quota
-      // info changes, ~20× per rejection here) says a bucket has room; it is
-      // no evidence this conversation produced anything, so it drops the
-      // timed wait but must NOT clear the loop breaker (round 4)
-      try { if (ev.status && ev.status !== 'rejected') getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-rejected reading', { worked: false }); } catch { }
+      // ONE reading edge for every harness (noteQuotaReadingForResume): drops
+      // an un-armed session's timed wait exactly as before, and asks an ARMED
+      // one whether this reading says the wall is gone. A `rate_limit_event`
+      // names ONE bucket, so the snapshot handed over is that bucket in the
+      // shared shape — claude states no limit lane, so the lane matches by
+      // construction and every claude reading is judged on its numbers alone.
+      if (ev.status && ev.status !== 'rejected') {
+        const snap = ev.kind === 'scoped'
+          ? { scopedWeekly: [{ name: ev.scopedName || '', utilization: ev.utilization, resetsAt: ev.resetsAt }] }
+          : { [ev.kind]: { utilization: ev.utilization, resetsAt: ev.resetsAt } };
+        noteQuotaReadingForResume(session, snap, 'fresh non-rejected reading');
+      }
       kickPoolEval();
     }
   } catch (e) { console.warn('[usage] rate_limit_event capture failed:', e.message); }
@@ -1650,7 +1734,7 @@ function recordCodexQuotaSignal(session, payload) {
     // stored reset unattended is the same consent class as auto-resume, so
     // default off) → ② pool switch → ③ auto-resume wait. One credit attempt
     // per limit event, 10min re-try floor.
-    const tryResetCredit = (resetsAtSec) => {
+    const tryResetCredit = (resetsAtSec, lane = null) => {
       try {
         if (serverSetting('codex.limitResetCredit') !== 'auto') return false;
         if (!session.pty || session.mode !== 'chat') return false;
@@ -1658,6 +1742,10 @@ function recordCodexQuotaSignal(session, payload) {
         if (session._codexResetTriedAt && now - session._codexResetTriedAt < 10 * 60e3) return false;
         session._codexResetTriedAt = now;
         session._codexLastResetsAt = Number(resetsAtSec) || 0;
+        // …and WHICH LANE it was: if the credit fails we arm from these two,
+        // and an arm with no lane can never be reopened by a reading (an
+        // unknown lane may not authorise a billed turn).
+        session._codexLastLane = lane || null;
         session.pty.write(JSON.stringify({ type: 'codex-reset-credit' }) + '\n');
         serverNotice(`codex-reset-${session._webuiId}-${now}`, `Codex hit a usage limit — trying a stored rate-limit reset credit before switching accounts.`);
         global.__vsEvent?.('codex-reset-credit-try', session._accountId || 'global');
@@ -1684,7 +1772,7 @@ function recordCodexQuotaSignal(session, payload) {
         global.__vsEvent?.('codex-reset-credit-failed', String(out || payload.error || 'unknown').slice(0, 60));
         maybePoolAutoSwitch(session);
         const resets = Number(session._codexLastResetsAt) || 0;
-        try { noteWallSignal(session, { resetsAtMs: resets * 1000, bucket: 'sevenDay', key: codexQuotaKeyFor(session) }); noteTurnEnd(session); } catch { }
+        try { noteWallSignal(session, { resetsAtMs: resets * 1000, bucket: 'sevenDay', key: codexQuotaKeyFor(session), lane: session._codexLastLane || null }); noteTurnEnd(session); } catch { }
       }
       return;
     }
@@ -1702,12 +1790,14 @@ function recordCodexQuotaSignal(session, payload) {
       global.__vsEvent?.('codex-rate-limits', `${w.key}${w.snap.rateLimitReachedType ? ':reached-' + w.snap.rateLimitReachedType : ''}`);
       if (sig.kind === 'exhausted') {
         const tripped = sig.tripped; // the window rate_limit_reached_type named
-        if (tryResetCredit(tripped?.resetsAt)) return; // outcome event continues the ladder
+        if (tryResetCredit(tripped?.resetsAt, arSignal.laneOf(w.snap))) return; // outcome event continues the ladder
         maybePoolAutoSwitch(session); // another ChatGPT account = seconds, not hours
-        try { noteWallSignal(session, { resetsAtMs: (Number(tripped?.resetsAt) || 0) * 1000, bucket: tripped && tripped === w.snap.fiveHour ? 'fiveHour' : 'sevenDay', key: w.key }); } catch { }
+        try { noteWallSignal(session, { resetsAtMs: (Number(tripped?.resetsAt) || 0) * 1000, bucket: tripped && tripped === w.snap.fiveHour ? 'fiveHour' : 'sevenDay', key: w.key, lane: arSignal.laneOf(w.snap) }); } catch { }
       } else {
-        // worked:false — the codex twin of the passive claude reading above
-        try { getAutoResume()?.noteRecovered?.(session._webuiId, 'fresh non-limited codex reading', { worked: false }); } catch { }
+        // the codex twin of the passive claude reading above — and the ONE
+        // channel that can reach an IDLE conversation, which is why the
+        // fresh-window edge exists (the 2026-09-08 incident's 21:55Z push)
+        noteQuotaReadingForResume(session, w.snap, 'fresh non-limited codex reading');
         kickPoolEval();
       }
       return;
@@ -1726,6 +1816,25 @@ function recordCodexQuotaSignal(session, payload) {
         // member's cache dead with the error's resets_at (or a bounded guess)
         const nowSec = Math.floor(Date.now() / 1000);
         const resets = sig.resetsAtSec;
+        // THE SYNTHESIZED SNAPSHOT'S LANE IS A DEFAULT, and it is the best
+        // evidence this record carries: the measured exhaustion record has
+        // `rateLimits: null`, so the plan lane `'codex'` is what we already
+        // write into this account's cache as its state, and the fresh-window
+        // edge is armed on it. If the true wall were a MODEL lane
+        // (`codex_bengalfox`) the consequence is bounded and self-correcting —
+        // a healthy `codex` reading fires ONCE and the edge is spent for this
+        // wall AT THE DELIVERY (auto-resume `edgeSpent`, cleared only by proof
+        // of work — deliberately not by our rejection report, which this
+        // module would have to be trusted to send); the timed path still
+        // delivers at the stated reset.
+        // THAT BOUND IS THE `edgeSpent` RULE AND NOTHING ELSE (r2): this
+        // comment used to credit the loop breaker's quarantine, which is TEN
+        // MINUTES, so the real ceiling was the hourly cap — 3 billed continues
+        // per rolling hour, every hour, for the life of the watch (measured:
+        // [3,3,3,3] over 4 simulated hours against the real modules). Do not
+        // restore that claim without re-measuring it.
+        // Inventing a lane we cannot read would be worse in the other
+        // direction (a wait no reading can ever open).
         const snap = sig.snapshot || {
           limitId: 'codex', sevenDay: { utilization: 1, usedPercent: 100, windowMinutes: 10080, resetsAt: resets > nowSec ? resets : nowSec + 24 * 3600, status: 'limited' },
           fiveHour: null, rateLimitReachedType: 'unknown', fetchedAt: Date.now(),
@@ -1737,9 +1846,9 @@ function recordCodexQuotaSignal(session, payload) {
         // claim a producer that did not produce it.
         const w2 = writeSnap(snap, 'limit-banner');
         global.__vsEvent?.('codex-usage-limit', info);
-        if (tryResetCredit(resets)) return; // ① reset credit first when opted in
+        if (tryResetCredit(resets, arSignal.laneOf(w2?.snap || snap))) return; // ① reset credit first when opted in
         maybePoolAutoSwitch(session);
-        try { noteWallSignal(session, { resetsAtMs: resets > nowSec ? resets * 1000 : 0, bucket: 'sevenDay', key: w2?.key || codexQuotaKeyFor(session) }); noteTurnEnd(session); } catch { }
+        try { noteWallSignal(session, { resetsAtMs: resets > nowSec ? resets * 1000 : 0, bucket: 'sevenDay', key: w2?.key || codexQuotaKeyFor(session), lane: arSignal.laneOf(w2?.snap || snap) }); noteTurnEnd(session); } catch { }
       } else if (sig.kind === 'auth-failure') {
         global.__vsEvent?.('codex-auth-failure', session._accountId || 'global'); // v1: surfaced, not auto-evicted (claude's evict is creds-path-specific)
       }

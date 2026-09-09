@@ -58,3 +58,8 @@ src/lib/build-version.js
 src/server/vs-wake-mut-*.js
 src/server/vs-wake-master-ar-*.js
 src/vs-wake-mut-*.js
+# scripts/test-auto-resume.mjs §12a writes PATCHED COPIES of
+# src/server/auto-resume.js beside the real one (they must be SIBLINGS or their
+# relative requires do not resolve). Unlinked on exit and swept at start, but a
+# SIGKILL can strand one — and a dirty tree is what the release gate REFUSES on.
+src/server/vs-aredge-mut-*.js
