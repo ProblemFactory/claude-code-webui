@@ -73,6 +73,43 @@ const { decidePoolSwitch } = require(path.join(REPO, 'src/account-pool-auto.js')
 const { capsOf, notificationDelivery } = require(path.join(REPO, 'src/backend-caps.js')); // §5b reads the LANE off the caps row, never a backend id
 const { setupAgentRoutes } = require(path.join(REPO, 'src/agent-routes.js'));
 
+// ── NEGATIVE CONTROLS ARE PATCHED COPIES OF THE REAL MODULE ─────────────────
+// A control written from memory tests the code I believe shipped; a control built
+// by replacing ONE expression in the real file tests the code that did. The
+// copy is a SIBLING of the original so its relative requires resolve, it is
+// unlinked on exit, gitignored, and stale copies of DEAD pids are swept at
+// start (a SIGKILL must never leave the tree dirty and block the release gate).
+// ONE implementation, because r5 needed the same machinery for the guard that
+// r4 needed for the ladder — and two hand-rolled sweeps is how the next one
+// leaks.
+const _mutants = [];
+process.on('exit', () => { for (const f of _mutants) { try { fs.unlinkSync(f); } catch { } } });
+for (const dir of ['src/server']) {
+  try {
+    for (const f of fs.readdirSync(path.join(REPO, dir))) {
+      const m = /^vs-spend-mut-(\d+)-/.exec(f);
+      if (!m || Number(m[1]) === process.pid) continue;
+      try { process.kill(Number(m[1]), 0); continue; } catch (e) { if (e.code === 'EPERM') continue; }
+      try { fs.unlinkSync(path.join(REPO, dir, f)); } catch { }
+    }
+  } catch { }
+}
+let _mutN = 0;
+/** A copy of `rel` with each [from, to] applied. Returns {mod, hits} or {err}:
+ *  a needle that no longer matches is an UNAPPLIED PATCH, i.e. a control that
+ *  would pass by doing nothing. */
+function mutantModule(rel, edits) {
+  let src = read(rel), hits = 0;
+  if (!src) return { err: 'could not read ' + rel };
+  for (const [from, to] of edits) {
+    if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 60) };
+    src = src.split(from).join(to); hits++;
+  }
+  const f = path.join(REPO, path.dirname(rel), 'vs-spend-mut-' + process.pid + '-' + (++_mutN) + '.js');
+  fs.writeFileSync(f, src); _mutants.push(f);
+  return { mod: require(f), hits, file: f };
+}
+
 // ── §1 THE PURE RULES ───────────────────────────────────────────────────────
 console.log('\n§1 the pure decision (src/spend-authorizer.js)');
 {
@@ -131,6 +168,59 @@ console.log('\n§1 the pure decision (src/spend-authorizer.js)');
   ok('§1 the 80% notice fires ONCE, at the crossing (10th of 12), naming the axis', warns.length === 1 && warns[0].scope === 'hour' && warns[0].used === 10, JSON.stringify(warns));
   ok('§1 …and its sentence names the account and both numbers', /A has used 10 of its 12 unattended turns this hour \(83%\)/.test(A.noticeText(warns[0])), A.noticeText(warns[0]));
 
+  // ── RESERVATIONS (r5): an authorization binds until somebody says what
+  // happened. The PURE half only has to answer "how much is in flight" — the
+  // guard owns the list, because a hold must NOT survive a restart (the
+  // in-flight delivery it stands for does not either).
+  {
+    const P1 = A.reservePending([], { id: 'h1', key: 'A', at: now });
+    const P2 = A.reservePending(P1, { id: 'h2', key: 'B', at: now });
+    ok('§1 a hold counts for its OWN identity and for the instance, never for a stranger',
+      A.pendingCounts(P2, 'A', now).identity === 1 && A.pendingCounts(P2, 'A', now).instance === 2
+      && A.pendingCounts(P2, 'C', now).identity === 0, JSON.stringify(A.pendingCounts(P2, 'A', now)));
+    ok('§1 …releasing is by id and never mutates the caller\'s list',
+      A.releasePending(P2, 'h1').length === 1 && P2.length === 2);
+    ok('§1 …and an unknown id is a no-op (releasing is the money-SAFE half of the pair)',
+      A.releasePending(P2, 'nope').length === 2);
+    const exp = A.expirePending(P2, now + A.RESERVE_TTL_MS + 1);
+    ok('§1 …while a hold nobody settled EXPIRES and is COUNTED (the census a grep cannot be)',
+      exp.live.length === 0 && exp.expired.length === 2);
+    // THE DECISION ITSELF: in-flight binds exactly like a charge, and the two
+    // are reported apart — a panel that says "N of M today" must keep saying
+    // turns that HAPPENED.
+    const withHolds = A.authorizeUnattendedSpend({
+      reason: 'auto-resume', identity: ID, state: A.emptyBudget(),
+      limits: { ...A.BUDGET_DEFAULTS, perIdentityHour: 2 },
+      pending: A.reservePending(A.reservePending([], { id: 'a', key: ID.key, at: now }), { id: 'b', key: ID.key, at: now }),
+      now,
+    });
+    ok('§1 two authorizations in flight fill a cap of two, before either is charged',
+      withHolds.ok === false && withHolds.why === 'hour-cap' && withHolds.counts.hour === 0 && withHolds.inFlight.identity === 2,
+      JSON.stringify({ why: withHolds.why, counts: withHolds.counts.hour, inFlight: withHolds.inFlight }));
+    ok('§1 …and it SAYS so, so the refusal is not mistaken for spend that happened',
+      /\(\+2 in flight\)/.test(withHolds.detail) && /has spent 0/.test(withHolds.detail), withHolds.detail);
+    ok('§1 …an EXPIRED hold binds nothing (the bound is a TTL, not a leak)',
+      A.authorizeUnattendedSpend({
+        reason: 'auto-resume', identity: ID, state: A.emptyBudget(),
+        limits: { ...A.BUDGET_DEFAULTS, perIdentityHour: 2 },
+        pending: A.reservePending([], { id: 'a', key: ID.key, at: now - A.RESERVE_TTL_MS - 1 }), now,
+      }).ok === true);
+    ok('§1 …and the instance ceiling counts holds from EVERY identity (that axis is not per-slot)',
+      A.authorizeUnattendedSpend({
+        reason: 'auto-resume', identity: ID, state: A.emptyBudget(),
+        limits: { ...A.BUDGET_DEFAULTS, perInstanceDay: 1 },
+        pending: A.reservePending([], { id: 'a', key: 'somebody-else', at: now }), now,
+      }).why === 'instance-cap');
+    ok('§1 …a hold list nobody passed is not a claim about anything (omitting it changes no decision)',
+      JSON.stringify(A.authorizeUnattendedSpend({ reason: 'auto-resume', identity: ID, state: A.emptyBudget(), now }))
+      === JSON.stringify(A.authorizeUnattendedSpend({ reason: 'auto-resume', identity: ID, state: A.emptyBudget(), pending: [], now })));
+    // The TTL is a RELATION, not a taste: it has to outlive the delivery
+    // ladder's own settle window (a frame waits up to SETTLE_TTL_MS for the
+    // wrapper's verdict) and stay far inside the shortest window the caps
+    // count, which is what lets pendingCounts answer one number per scope.
+    ok('§1 RESERVE_TTL_MS outlives a settling frame and stays far inside the hour it is counted in',
+      A.RESERVE_TTL_MS > 120 * 1000 && A.RESERVE_TTL_MS * 10 < A.HOUR_MS, String(A.RESERVE_TTL_MS));
+  }
   const pruned = A.pruneBudget({ identities: { x: [now - A.DAY_MS - 1, now - 5] }, instance: [now - A.DAY_MS - 1], notices: {} }, now);
   ok('§1 pruning drops everything older than a day and keeps the rest', pruned.identities.x.length === 1 && pruned.instance.length === 0);
   const src = { identities: { x: [now] }, instance: [now], notices: {} };
@@ -533,9 +623,16 @@ function trackedServerSource() {
   ok('§2 WIRING: the engine constructs the ONE guard and server.js re-exports it',
     /spendGuard,/.test(srv) && /const spendGuard = require\('\.\/spend-guard\.js'\)\.create\(\{/.test(read('src/server/usage-pool-engine.js')));
   ok('§2 WIRING: auto-resume is created WITH authorizeSpend + noteSpend',
-    /authorizeSpend: \(id, s, identity\) => spendGuard\.authorize\(\{ reason: 'auto-resume'/.test(srv) && /noteSpend: \(id, s, identity\) => spendGuard\.note\(/.test(srv));
-  ok('§2 WIRING: the delivery ladder is created WITH authorizeSpend + noteSpend',
-    /authorizeSpend: \(req\) => spendGuard\.authorize\(req\), noteSpend: \(rec\) => spendGuard\.note\(rec\)/.test(srv));
+    /authorizeSpend: \(id, s, identity, o\) => spendGuard\.authorize\(\{ reason: 'auto-resume'/.test(srv) && /noteSpend: \(id, s, identity, hold\) => spendGuard\.note\(/.test(srv));
+  // …and it FORWARDS the two halves r5 added, because dropping either is a
+  // silent behaviour change: without `hold` on the wire the pre-gate PROBE
+  // reserves a slot and the charging call refuses its own request (measured at
+  // cap 1/hour: zero continues ever fire), and without `releaseSpend` a send
+  // that fails keeps that slot booked for the hold's whole TTL.
+  ok('§2 WIRING: …and it forwards the PROBE flag and the release half (r5)',
+    /hold: !!\(o && o\.hold\)/.test(srv) && /releaseSpend: \(id, s, hold\) => spendGuard\.release\(\{ hold \}\)/.test(srv));
+  ok('§2 WIRING: the delivery ladder is created WITH authorizeSpend + noteSpend + releaseSpend',
+    /authorizeSpend: \(req\) => spendGuard\.authorize\(req\), noteSpend: \(rec\) => spendGuard\.note\(rec\), releaseSpend: \(rec\) => spendGuard\.release\(rec\)/.test(srv));
   ok('§2 WIRING: the agent routes (the Stop nudge lives there) receive the guard', /setupAgentRoutes\(\{[^)]*spendGuard,/.test(srv));
   // THE ENGINE'S OWN PRODUCER (r2). The other three consumers get the guard
   // handed to them by server.js and have a pin each; the codex reset credit
@@ -677,6 +774,84 @@ console.log('\n§3b an oat-only subscription serves turns, so the ceiling must n
   }
 }
 
+// ── §3d THE LEDGER IS PRUNED BEFORE ANYBODY CAN ANSWER THE LIMITS (r5) ──────
+// The guard is CONSTRUCTED by the pool engine, and server.js builds that engine
+// ~318 lines before `setupPersistence()` assigns `persistenceRouter.readSettings`
+// — so while the ledger is read off disk, `serverSetting` answers `undefined`
+// for every key and `A.budgetLimits()` hands back the DEFAULTS. Pruning is
+// IRREVERSIBLE and it FORGIVES MONEY: an owner day cap of 500 with 500 same-day
+// stamps on disk was cut to the default retention (264) on EVERY BOOT, and the
+// guard then authorized 236 more unattended turns today. This instance restarts
+// several times a day.
+console.log('\n§3d the boot load prunes with the widest retention, not with limits nobody can answer');
+{
+  // THE ORDERING IS THE DEFECT — pinned on the real files, because the leg
+  // below is only interesting while this stays true.
+  const srv = read('server.js');
+  const iEngine = srv.indexOf("require('./src/server/usage-pool-engine.js').create({");
+  const iSetup = srv.indexOf('setupPersistence({');
+  const iReader = srv.indexOf('persistenceRouter.readSettings ? persistenceRouter.readSettings()');
+  ok('§3d server.js builds the guard BEFORE the settings reader exists (the shape that makes this a defect)',
+    iEngine > 0 && iSetup > iEngine && iReader > 0 && /router\.readSettings\s*=/.test(read('src/routes/persistence.js')),
+    JSON.stringify({ engineAt: iEngine, setupAt: iSetup }));
+
+  // The production boot shape: a reader that answers NOTHING until setup runs.
+  const mkBoot = (mod, dir, stamps) => {
+    let ready = false;
+    const settings = {
+      'spend.unattendedPerIdentityHour': 200,   // out of the way: the DAY axis is what this measures
+      'spend.unattendedPerIdentityDay': 500,
+      'spend.unattendedPerInstanceDay': 500,
+    };
+    fs.writeFileSync(path.join(dir, 'spend-budget.json'),
+      JSON.stringify({ v: 1, budget: { v: 1, identities: { 'sub-A': stamps }, instance: stamps, notices: {} }, nudge: {} }));
+    const g = mod.create({
+      dataDir: dir, serverSetting: (k) => (ready ? settings[k] : undefined),
+      identityOf: () => ({ key: 'sub-A', name: 'A' }), getUserTodos: () => null, log: () => { },
+    });
+    ready = true;                     // …and now setupPersistence() has run
+    return g;
+  };
+  const now = Date.now();
+  // 500 spends spread across the last 20 h — the owner's day cap, exactly met
+  const stamps = Array.from({ length: 500 }, (_, i) => now - Math.round((i + 1) * (20 * 3600 * 1000 / 500)));
+  {
+    const g = mkBoot(guardMod, tmpdir('vs-spend-boot-'), stamps);
+    const v = g.authorize({ reason: 'auto-resume', identity: { key: 'sub-A', name: 'A' } });
+    ok('§3d the whole day survives the restart: 500 of 500 counted, so the 501st is REFUSED',
+      v.ok === false && v.why === 'day-cap' && v.counts.day === 500, JSON.stringify({ why: v.why, counts: v.counts }));
+  }
+  {   // NEGATIVE CONTROL: the same world with the pre-fix line restored
+    const m = mutantModule('src/server/spend-guard.js', [[
+      'state = A.pruneBudget(raw.budget || raw, Date.now(), A.LOAD_RETENTION);',
+      'state = A.pruneBudget(raw.budget || raw, Date.now(), A.budgetLimits(serverSetting));']]);
+    ok('§3d NEGATIVE CONTROL: the pre-fix line was re-applied to the copy (an unapplied patch is a green control)',
+      !m.err && m.hits === 1, m.err || '');
+    if (!m.err) {
+      const g = mkBoot(m.mod, tmpdir('vs-spend-boot-pre-'), stamps);
+      const v = g.authorize({ reason: 'auto-resume', identity: { key: 'sub-A', name: 'A' } });
+      ok('§3d NEGATIVE CONTROL: pruning with the DEFAULTS forgets 236 of them and authorizes the 501st',
+        v.ok === true && v.counts.day === A.stampCap(null) && A.stampCap(null) === 264,
+        JSON.stringify({ ok: v.ok, day: v.counts.day, defaultCap: A.stampCap(null) }));
+    }
+  }
+  // …and the wide retention is BOUNDED: it is the widest any offerable cap can
+  // count, never "keep everything" (memory is the cost of the safe direction,
+  // so the cost has to have a number).
+  ok('§3d LOAD_RETENTION is the schema-max retention, not unbounded',
+    A.stampCap(A.LOAD_RETENTION) === A.CAP_MAX.perInstanceDay + 64
+    && A.stampCap(A.LOAD_RETENTION) > A.stampCap(null), String(A.stampCap(A.LOAD_RETENTION)));
+  {
+    const dir = tmpdir('vs-spend-boot-cap-');
+    const many = Array.from({ length: 20000 }, (_, i) => now - i * 1000);
+    fs.writeFileSync(path.join(dir, 'spend-budget.json'),
+      JSON.stringify({ v: 1, budget: { v: 1, identities: { x: many }, instance: many, notices: {} } }));
+    const g = guardMod.create({ dataDir: dir, serverSetting: () => undefined, getUserTodos: () => null, log: () => { } });
+    ok('§3d …so a 20,000-stamp ledger loads bounded (the safe direction costs memory, and the memory is capped)',
+      g.snapshot().budget.identities.x.length <= A.CAP_MAX.perInstanceDay + 64, String(g.snapshot().budget.identities.x.length));
+  }
+}
+
 // ── §4 THE REAL AUTO-RESUME + THE REAL POOL ENGINE ──────────────────────────
 console.log('\n§4 the real auto-resume: the ceiling refuses what the loop breaker would allow');
 /** The world: one pooled member, one conversation, real symlinks, real engine
@@ -718,8 +893,12 @@ function mkWorld({ settings = {} } = {}) {
     sendToSession: (id, s2, text) => { fired.push({ id, text }); return true; },
     beforeFire: (id, s2) => { try { return eng.beforeAutoResumeFire(id, s2); } catch { return false; } },
     fireIdentity: (id, s2) => { try { return eng.fireIdentityFor(s2); } catch { return null; } },
-    authorizeSpend: (id, s2, identity) => eng.spendGuard.authorize({ reason: 'auto-resume', session: s2, sessionId: id, sessionName: s2 && s2.name, identity }),
-    noteSpend: (id, s2, identity) => eng.spendGuard.note({ reason: 'auto-resume', session: s2, identity }),
+    // MIRRORS server.js, including r5's probe flag and release half — a harness
+    // that drops `hold` makes the pre-gate probe reserve the slot the charging
+    // call then needs, and NOTHING ever fires (measured).
+    authorizeSpend: (id, s2, identity, o) => eng.spendGuard.authorize({ reason: 'auto-resume', session: s2, sessionId: id, sessionName: s2 && s2.name, identity, hold: !!(o && o.hold) }),
+    noteSpend: (id, s2, identity, hold) => eng.spendGuard.note({ reason: 'auto-resume', session: s2, identity, hold }),
+    releaseSpend: (id, s2, hold) => eng.spendGuard.release({ hold }),
   });
   const mkSession = (sid) => {
     const s = { backend: 'claude', mode: 'chat', _webuiId: sid, claudeSessionId: 'cid-' + sid, _accountId: P, _autoResume: true, _servedModel: 'claude-fable-5', _servedModelAt: Date.now(), pty: { write() { } }, name: sid };
@@ -983,25 +1162,7 @@ console.log('\n§5c the charge is debited to the identity the authorization reso
   // relative requires — ../backend-caps.js, ./wrapper-files.js — resolve only
   // from src/server/). Unlinked on exit, swept by PID at start, gitignored.
   const delPath = 'src/server/conversation-deliver.js';
-  const delSrc0 = read(delPath);
-  const mutants = [];
-  process.on('exit', () => { for (const f of mutants) { try { fs.unlinkSync(f); } catch { } } });
-  try {
-    for (const f of fs.readdirSync(path.join(REPO, 'src/server'))) {
-      const m = /^vs-spend-mut-(\d+)-/.exec(f);
-      if (!m || Number(m[1]) === process.pid) continue;
-      try { process.kill(Number(m[1]), 0); continue; } catch (e) { if (e.code === 'EPERM') continue; }
-      try { fs.unlinkSync(path.join(REPO, 'src/server', f)); } catch { }
-    }
-  } catch { }
-  let mutN = 0;
-  const mutantLadder = (edits) => {
-    let src = delSrc0, hits = 0;
-    for (const [from, to] of edits) { if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 60) }; src = src.split(from).join(to); hits++; }
-    const f = path.join(REPO, 'src/server/vs-spend-mut-' + process.pid + '-' + (++mutN) + '.js');
-    fs.writeFileSync(f, src); mutants.push(f);
-    return { mod: require(f), hits };
-  };
+  const mutantLadder = (edits) => mutantModule(delPath, edits);
 
   /** The world: a real guard whose `identityOf` ANSWER MOVES, a real ladder and
    *  a mid-turn codex session (so the rpc rung withholds and the charge
@@ -1108,8 +1269,15 @@ console.log('\n§5c the charge is debited to the identity the authorization reso
 
   {   // NEGATIVE CONTROL: a patched copy of the REAL ladder with r3's shipped
       // line restored — the defect, reproduced end to end.
-    const PRE = 'charged = { reason: spendReason, session, identity };';
-    const FIX = 'charged = { reason: spendReason, session, identity: (v && v.identity) || identity };';
+    // ONE DIMENSION AT A TIME (the negative-control law): the mutation restores
+    // r3's IDENTITY expression and keeps r5's `hold`, so what changes between
+    // the two worlds is the slot the charge names — nothing else. Dropping the
+    // hold as well would make the copy differ in two ways at once and the
+    // ladder would refuse its own second delivery for a reason that has nothing
+    // to do with r4.
+    const R3_LINE = 'charged = { reason: spendReason, session, identity };';
+    const PRE = 'charged = { reason: spendReason, session, identity, hold: (v && v.hold) || null };';
+    const FIX = 'charged = { reason: spendReason, session, identity: (v && v.identity) || identity, hold: (v && v.hold) || null };';
     const m = mutantLadder([[FIX, PRE]]);
     ok('§5c NEGATIVE CONTROL: the pre-fix line was re-applied to the copy (an unapplied patch is a green control)',
       !m.err && m.hits === 1, m.err || '');
@@ -1128,8 +1296,10 @@ console.log('\n§5c the charge is debited to the identity the authorization reso
       let shipped = '';
       try { shipped = execFileSync('git', ['-C', REPO, 'show', '4ceba626:' + delPath], { env: GIT_ENV, maxBuffer: 64 * 1024 * 1024 }).toString(); } catch { }
       if (!shipped) console.log('  · SKIP: git could not read 4ceba626:' + delPath + ' (the pre-fix bytes)');
-      else ok('§5c NEGATIVE CONTROL: the restored line is byte-identical to the SHIPPED one (the control reproduces r3, not an invention)',
-        shipped.includes(PRE) && !shipped.includes(FIX));
+      else ok('§5c NEGATIVE CONTROL: the restored expression is byte-identical to the SHIPPED one (the control reproduces r3, not an invention)',
+        shipped.includes(R3_LINE) && !shipped.includes(FIX)
+        && PRE.startsWith(R3_LINE.slice(0, -3)) && !PRE.includes('v.identity'),
+        JSON.stringify({ inShipped: shipped.includes(R3_LINE), pre: PRE }));
     }
   }
 
@@ -1168,8 +1338,9 @@ console.log('\n§5c the charge is debited to the identity the authorization reso
         // consumer that reads its first record re-decides the pool.
         sendToSession: (id) => { fired.push(id); live = { key: 'sub-BBB', name: 'BBB' }; return true; },
         fireIdentity: () => null,                     // the dep answers nothing: the guard resolves
-        authorizeSpend: (id, s, identity) => guard.authorize({ reason: 'auto-resume', session: s, sessionId: id, identity }),
-        noteSpend: (id, s, identity) => guard.note({ reason: 'auto-resume', session: s, identity }),
+        authorizeSpend: (id, s, identity, o) => guard.authorize({ reason: 'auto-resume', session: s, sessionId: id, identity, hold: !!(o && o.hold) }),
+        noteSpend: (id, s, identity, hold) => guard.note({ reason: 'auto-resume', session: s, identity, hold }),
+        releaseSpend: (id, s, hold) => guard.release({ hold }),
       });
       const s = { backend: 'claude', mode: 'chat', _webuiId: 'a1', _autoResume: true, name: 'c' };
       sessions.set('a1', s);
@@ -1192,6 +1363,320 @@ console.log('\n§5c the charge is debited to the identity the authorization reso
   // own guard, which is the census a grep over five call sites cannot be:
   // "no await in between" is a property of an arrangement of code, not of the
   // question being asked once.
+}
+
+// ── §5d AUTHORIZE AND CHARGE ARE NOT ONE INSTANT (r5) ───────────────────────
+// The ladder authorizes SYNCHRONOUSLY and charges after an awaited transport,
+// so N deliveries dispatched in one pass all read the same pre-charge counts
+// and every one of them is authorized. Reachable in production: src/jobs.js
+// fires `deliverToConversation` fire-and-forget from loops over `this.jobs`
+// (run-completion and the boot catch-up pass), and `/api/agent/msg/send` is a
+// concurrent HTTP route into the same ladder — while the 30 s `_notifyRate`
+// floor is keyed PER CONVERSATION and does not serialise across them. Nine
+// conversations can sit on ONE subscription, which is what makes the identity,
+// not the conversation, the thing being over-spent.
+console.log('\n§5d five deliveries dispatched in one pass cannot outrun the ceiling');
+{
+  const CIDS = ['cid-0', 'cid-1', 'cid-2', 'cid-3', 'cid-4'];
+  /** Five DISTINCT conversations, five live local sessions, ONE credential slot
+   *  (`identityOf` answers the same slot for all of them), and a transport that
+   *  AWAITS — the shipped rung-1 shape. */
+  const mkWorld = (guardModule = guardMod, ladderModule = deliverMod, hourCap = 2, { delayMs = 25, reachable = CIDS } = {}) => {
+    const dataDir = tmpdir('vs-spend-race-');
+    fs.mkdirSync(path.join(dataDir, 'session-buffers'), { recursive: true });
+    const settings = { 'spend.unattendedPerIdentityHour': hourCap };
+    const guard = guardModule.create({
+      dataDir, serverSetting: (k) => settings[k],
+      identityOf: () => ({ key: 'sub-A', name: 'Sub A' }), getUserTodos: () => null, log: () => { },
+    });
+    const activeSessions = new Map();
+    CIDS.forEach((c, i) => activeSessions.set('w' + i, { name: 'S' + i, backendSessionId: c, mode: 'chat', backend: 'claude' }));
+    const posted = [];
+    const deliver = ladderModule.create({
+      dataDir, activeSessions,
+      peerMsg: {
+        // `reachable` is what has an inbox; everything else falls through every
+        // rung to the STASH — the ladder's normal fallback, and the exit that
+        // opens no turn at all
+        findPeer: (cid) => (reachable.includes(cid) ? { socketPath: '/tmp/none-' + cid, name: 'p-' + cid } : null),
+        postToPeer: async (peer) => { await tick(delayMs); posted.push(peer.name); return { ok: true }; },
+        postChannelEvent: async () => ({ ok: false }),
+      },
+      getHosts: () => null, getConvIndex: () => null, serverSetting: () => undefined, emitPeerCard: () => { },
+      authorizeSpend: (req) => guard.authorize(req), noteSpend: (rec) => guard.note(rec),
+      releaseSpend: (rec) => guard.release(rec), log: () => { },
+    });
+    const charged = () => (guard.snapshot().budget.identities['sub-A'] || []).length;
+    return { guard, deliver, posted, charged };
+  };
+  const send = (W, cid) => W.deliver.deliverToConversation(cid, 'hi', { kind: 'peer', spendReason: 'job-notification' });
+
+  {   // THE INCIDENT: all five dispatched before any of them settles
+    const W = mkWorld();
+    const rs = await Promise.all(CIDS.map((c) => send(W, c)));
+    ok('§5d the ceiling holds under concurrency: 2 delivered, 3 refused by the budget',
+      rs.filter((r) => r.ok).length === 2 && rs.filter((r) => r.refused === 'spend').length === 3,
+      JSON.stringify(rs.map((r) => (r.ok ? r.lane : r.why))));
+    ok('§5d …and exactly the delivered ones were charged (a hold is not a stamp)',
+      W.charged() === 2 && W.posted.length === 2, JSON.stringify({ charged: W.charged(), posted: W.posted.length }));
+    ok('§5d …and nothing is left in flight afterwards (every hold was converted or given back)',
+      W.guard.snapshot().holdsOpen === 0 && W.guard.snapshot().holdsExpired === 0,
+      JSON.stringify(W.guard.snapshot()).slice(0, 160));
+  }
+  {   // CONTROL: the SAME world, one at a time — the answer must not depend on
+      // how the caller happens to schedule its deliveries
+    const W = mkWorld();
+    let okc = 0;
+    for (const c of CIDS) if ((await send(W, c)).ok) okc++;
+    ok('§5d CONTROL: sequentially the same world delivers the same 2 (concurrency is not a new policy)',
+      okc === 2 && W.charged() === 2, JSON.stringify({ okc, charged: W.charged() }));
+  }
+  {   // NEGATIVE CONTROL: the real guard with the reservation removed
+    const m = mutantModule('src/server/spend-guard.js', [[
+      `    if (v.ok && key && takeHold) {
+      const hold = \`h\${++holdSeq}\`;
+      pending = A.reservePending(pending, { id: hold, key, at: now });
+      return { ...v, hold };
+    }
+`, '']]);
+    ok('§5d NEGATIVE CONTROL: the pre-fix guard (no hold) was really built (an unapplied patch is a green control)',
+      !m.err && m.hits === 1, m.err || '');
+    if (!m.err) {
+      const W = mkWorld(m.mod);
+      const rs = await Promise.all(CIDS.map((c) => send(W, c)));
+      ok('§5d NEGATIVE CONTROL: without the hold all FIVE are authorized and charged against a cap of 2',
+        rs.every((r) => r.ok) && W.charged() === 5, JSON.stringify({ ok: rs.filter((r) => r.ok).length, charged: W.charged() }));
+    }
+  }
+  {   // A DELIVERY THAT REACHES NO RUNG OPENS NO TURN — the hold comes back, or
+      // the stash rung (the ladder's normal fallback) would burn the ceiling on
+      // messages that were merely queued for the next injection.
+      // BOTH conversations here carry a LIVE local session, so both resolve to
+      // the SAME credential slot: the unreachable one is what the identity
+      // dimension is being measured on, not a second bucket (the ladder charges
+      // a conversation it cannot see locally to a NAMED `__unattributed__`
+      // bucket, and a leg that used it would prove nothing about this one).
+    const W = mkWorld(guardMod, deliverMod, 1, { reachable: ['cid-1'] });
+    const r0 = await send(W, 'cid-0');
+    ok('§5d a delivery that reaches no rung is not a spend (it rides the next injection)',
+      r0.ok === false && !r0.refused, JSON.stringify(r0));
+    ok('§5d …and its hold was given back immediately', W.guard.snapshot().holdsOpen === 0 && W.charged() === 0);
+    const r1 = await send(W, 'cid-1');
+    ok('§5d …so the next REAL delivery on that same slot still has its budget (cap 1, first charge)',
+      r1.ok === true && W.charged() === 1, JSON.stringify({ r1: r1.ok, charged: W.charged() }));
+  }
+  {   // NEGATIVE CONTROL for that: the ladder with its ONE release point removed
+    const m = mutantModule('src/server/conversation-deliver.js', [[
+      `      if (!money.settled && charged && charged.hold && releaseSpend) {
+        try { releaseSpend(charged); } catch (e) { log('[deliver] releasing the spend hold failed:', e.message); }
+      }
+`, '']]);
+    ok('§5d NEGATIVE CONTROL: the release point was really removed from the copy',
+      !m.err && m.hits === 1, m.err || '');
+    if (!m.err) {
+      const W = mkWorld(guardMod, m.mod, 1, { reachable: ['cid-1'] });
+      await send(W, 'cid-0');
+      const r1 = await send(W, 'cid-1');
+      ok('§5d NEGATIVE CONTROL: without it a STASHED message keeps the slot booked and the real delivery is refused',
+        r1.ok === false && r1.refused === 'spend' && W.charged() === 0, JSON.stringify({ r1, charged: W.charged() }));
+    }
+  }
+}
+
+// ── §5e A PROBE MUST NOT HOLD, AND A WITHHELD FRAME MUST BE GIVEN BACK ──────
+console.log('\n§5e the two calls that must NOT consume the budget: the probe and the confirmed steer');
+{
+  // ① auto-resume asks the ceiling TWICE per fire — once before its pre-fire
+  // gate (so a spent budget stops us before we pay for the gate's quota probe)
+  // and once after, on the identity the continue actually lands on. If the
+  // first call reserved, the second would refuse its own request.
+  const mkAr = (arModule = arMod) => {
+    const dataDir = tmpdir('vs-spend-probe-');
+    const guard = guardMod.create({
+      dataDir, serverSetting: (k) => ({ 'spend.unattendedPerIdentityHour': 1 }[k]),
+      identityOf: () => ({ key: 'sub-A', name: 'A' }), getUserTodos: () => null, log: () => { },
+    });
+    const sessions = new Map();
+    const fired = [];
+    const ar = arModule.create({
+      dataDir, activeSessions: sessions, serverSetting: () => true, log: () => { },
+      sendToSession: (id) => { fired.push(id); return true; },
+      fireIdentity: () => ({ key: 'sub-A', name: 'A' }),
+      authorizeSpend: (id, s2, identity, o) => guard.authorize({ reason: 'auto-resume', session: s2, sessionId: id, identity, hold: !!(o && o.hold) }),
+      noteSpend: (id, s2, identity, hold) => guard.note({ reason: 'auto-resume', session: s2, identity, hold }),
+      releaseSpend: (id, s2, hold) => guard.release({ hold }),
+    });
+    const s = { backend: 'claude', mode: 'chat', _webuiId: 'a1', _autoResume: true, name: 'c' };
+    sessions.set('a1', s);
+    ar.armIfEnabled('a1', s, Date.now() + 60_000, 'usage limit');
+    ar.tick(Date.now() + 120_000);
+    return { guard, fired, charged: () => (guard.snapshot().budget.identities['sub-A'] || []).length };
+  };
+  {
+    const W = mkAr();
+    await tick(40);
+    ok('§5e the continue IS delivered with a cap of 1 (the pre-gate PROBE took no slot)',
+      W.fired.length === 1 && W.charged() === 1, JSON.stringify({ fired: W.fired.length, charged: W.charged() }));
+    ok('§5e …and the charge converted its hold rather than leaving one behind',
+      W.guard.snapshot().holdsOpen === 0 && W.guard.snapshot().holdsExpired === 0);
+  }
+  {   // NEGATIVE CONTROL: the real auto-resume with the probe asking for a hold
+    const m = mutantModule('src/server/auto-resume.js', [[
+      'if (!spendOk(id, session, ident, kind, null, { hold: false })) return false;',
+      'if (!spendOk(id, session, ident, kind, null, { hold: true })) return false;']]);
+    ok('§5e NEGATIVE CONTROL: the probe was really made to reserve in the copy',
+      !m.err && m.hits === 1, m.err || '');
+    if (!m.err) {
+      const W = mkAr(m.mod);
+      await tick(40);
+      ok('§5e NEGATIVE CONTROL: a probe that holds makes the charging call refuse its OWN request — nothing ever fires',
+        W.fired.length === 0 && W.charged() === 0, JSON.stringify({ fired: W.fired.length, charged: W.charged() }));
+    }
+  }
+
+  // ② the rpc rung PREDICTS a steer into a turn already running and withholds
+  // the charge. The hold stays open until the wrapper answers, because the
+  // frame may still become a billed turn — and it is given back only when the
+  // wrapper CONFIRMS the steer.
+  const mkSteer = () => {
+    const dataDir = tmpdir('vs-spend-steer-hold-');
+    fs.mkdirSync(path.join(dataDir, 'session-buffers'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'session-buffers', 'w1.json'), JSON.stringify({ caps: { peerMessage: true } }));
+    const guard = guardMod.create({
+      dataDir, serverSetting: (k) => ({ 'spend.unattendedPerIdentityHour': 12 }[k]),
+      identityOf: () => ({ key: 'slot-A', name: 'Alpha' }), getUserTodos: () => null, log: () => { },
+    });
+    const S = { backend: 'codex', mode: 'chat', _webuiId: 'w1', backendSessionId: 'cid-1', _isStreaming: true, pty: { write() { } }, name: 'busy' };
+    const deliver = deliverMod.create({
+      dataDir, activeSessions: new Map([['w1', S]]),
+      peerMsg: { findPeer: () => null, postToPeer: async () => ({ ok: false }), postChannelEvent: async () => ({ ok: false }) },
+      getHosts: () => null, getConvIndex: () => null, serverSetting: () => undefined, emitPeerCard: () => { },
+      authorizeSpend: (req) => guard.authorize(req), noteSpend: (rec) => guard.note(rec),
+      releaseSpend: (rec) => guard.release(rec), log: () => { },
+    });
+    return { guard, deliver, charged: () => (guard.snapshot().budget.identities['slot-A'] || []).length };
+  };
+  {
+    const W = mkSteer();
+    await W.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    ok('§5e a predicted-free frame keeps its hold OPEN while the wrapper has not answered (it may still open a turn)',
+      W.guard.snapshot().holdsOpen === 1 && W.charged() === 0, JSON.stringify(W.guard.snapshot()).slice(0, 120));
+    W.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'steered' });
+    ok('§5e …and a CONFIRMED steer gives it back (it opened no turn, so it must not bind the ceiling)',
+      W.guard.snapshot().holdsOpen === 0 && W.charged() === 0);
+  }
+  {
+    const W = mkSteer();
+    await W.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    W.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'queued' });
+    ok('§5e CONTROL: a steer that fell back to the queue is a turn — the hold becomes a CHARGE, not a release',
+      W.charged() === 1 && W.guard.snapshot().holdsOpen === 0, JSON.stringify({ charged: W.charged(), open: W.guard.snapshot().holdsOpen }));
+  }
+  {   // A MODE-LESS ANSWER IS NOT AN ANSWER ABOUT OUR FRAME (r2 round 2) and the
+      // money half must not weaken that: two of the wrapper's three `ok:false`
+      // emitters describe an EARLIER message, so consuming on them made a
+      // billed `thread/queue/add` free. The frame therefore keeps its hold —
+      // it is STRANDED, and the backstops are the settle sweep below and the
+      // guard's own TTL, never a release we were not entitled to make.
+    const W = mkSteer();
+    const t0 = Date.now();
+    await W.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    const verdict = W.deliver.settleRpcDelivery('cid-1', { ok: false, text: 'a queued item Stop dropped' });
+    ok('§5e CONTROL: a mode-less answer settles nothing, so the frame is neither charged nor released',
+      verdict === 'not-ours' && W.charged() === 0 && W.guard.snapshot().holdsOpen === 1,
+      JSON.stringify({ verdict, charged: W.charged(), open: W.guard.snapshot().holdsOpen }));
+    // …and when a later answer sweeps the stranded frame, its hold goes back
+    W.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'steered', now: t0 + 121 * 1000 });
+    ok('§5e …and the stranded frame\'s hold is given back the moment we KNOW it was stranded',
+      W.charged() === 0 && W.guard.snapshot().holdsOpen === 0, JSON.stringify(W.guard.snapshot()).slice(0, 120));
+  }
+  // THE TTL IS NOT AN OPINION: it must outlive the ladder's own settle window,
+  // or a frame whose wrapper answers late finds its hold already expired — and
+  // it must stay far below the shortest window the caps count, or one number
+  // per scope (pendingCounts) would be a second, unwindowed accounting.
+  ok('§5e the hold TTL outlives the ladder\'s settle window and stays inside the shortest cap window',
+    A.RESERVE_TTL_MS > 120 * 1000 && A.RESERVE_TTL_MS < A.HOUR_MS / 2, String(A.RESERVE_TTL_MS));
+  // THE DEFAULT IS THE SAFE DIRECTION, and the exception is explicit. A caller
+  // that says nothing about `hold` gets one — a producer added later that
+  // forgets the flag over-counts for one TTL (recoverable) instead of walking
+  // through the ceiling (not).
+  {
+    const dir = tmpdir('vs-spend-default-hold-');
+    const g = guardMod.create({ dataDir: dir, serverSetting: () => undefined, getUserTodos: () => null, log: () => { } });
+    const v = g.authorize({ reason: 'peer-message', identity: { key: 'k', name: 'k' } });
+    ok('§5e an authorize that says nothing about holding DOES hold', v.ok === true && !!v.hold && g.snapshot().holdsOpen === 1);
+    const p2 = g.authorize({ reason: 'peer-message', identity: { key: 'k', name: 'k' }, hold: false });
+    ok('§5e …and only an explicit probe does not', p2.ok === true && !p2.hold && g.snapshot().holdsOpen === 1);
+  }
+  // …and the ONLY site that asks for a probe is the one that asks twice about
+  // the same intended turn. A second `hold: false` anywhere is a producer that
+  // gave itself an exemption from the ceiling, which is the whole point.
+  {
+    let files = [];
+    try { files = trackedServerSource(); } catch { }
+    const probes = [];
+    for (const f of files) {
+      const code = stripLineComments(read(f));
+      for (const m of code.matchAll(/hold:\s*false/g)) probes.push(`${f}:${code.slice(0, m.index).split('\n').length}`);
+    }
+    ok('§5e the ONLY probe in the tracked server source is auto-resume\'s pre-gate question',
+      probes.length === 1 && probes[0].startsWith('src/server/auto-resume.js:'), probes.join(', ') || 'none found');
+  }
+
+  // EVERY CHARGE THAT BUILDS ITS OWN PAYLOAD MUST CARRY THE HOLD — a census,
+  // not a promise. A producer that hands `note()` an object literal without
+  // `hold` leaves its own reservation open for the whole TTL, so it refuses the
+  // NEXT unattended turn on that slot for three minutes: money-safe, wrong, and
+  // exactly the shape `holdsExpired` counts in production but no reviewer sees.
+  // (A site that forwards a `rec` the ladder built is not a payload site — the
+  // hold rides inside it, which is why the rule is about literals.)
+  {
+    let files = [];
+    try { files = trackedServerSource(); } catch { }
+    // optional chaining is the real shape at the Stop nudge (`spendGuard?.note?.(`)
+    const NOTE_CALL = /(?:spendGuard|guard)\s*(?:\?\.|\.)\s*note\s*(?:\?\.)?\(\s*\{|noteSpend\s*\(\s*\{/g;
+    const missing = [];
+    let sites = 0;
+    for (const f of files) {
+      const code = stripLineComments(read(f));
+      for (const m of code.matchAll(NOTE_CALL)) {
+        // the call's own text: from the `{` to its matching `}` (these payloads
+        // are one-liners in every producer; a depth walk keeps it honest)
+        let i = code.indexOf('{', m.index), depth = 0, end = i;
+        for (; end < code.length; end++) {
+          if (code[end] === '{') depth++;
+          else if (code[end] === '}') { depth--; if (!depth) break; }
+        }
+        const call = code.slice(i, end + 1);
+        sites++;
+        if (!/\bhold\b/.test(call)) missing.push(`${f}:${code.slice(0, m.index).split('\n').length}`);
+      }
+    }
+    ok('§5e the charge census is non-vacuous (it found every producer that builds its own payload)',
+      files.length > 50 && sites >= 3, `${sites} note-payload sites in ${files.length} files`);
+    ok('§5e every charge that builds its own payload carries the hold it is converting',
+      missing.length === 0, missing.join(', '));
+    // CONTROL: the rule can go red — the same walk over a payload without it
+    const scratch = "  spendGuard?.note?.({ reason: 'stop-nudge', session: s, identity: auth && auth.identity });";
+    NOTE_CALL.lastIndex = 0;
+    ok('§5e CONTROL: a payload WITHOUT the hold is caught by that same rule (r4\'s shipped line, verbatim)',
+      NOTE_CALL.test(scratch) && !/\bhold\b/.test(scratch));
+    NOTE_CALL.lastIndex = 0;
+  }
+
+  // …and the census the guard publishes is REACHABLE: an authorization nobody
+  // converts or releases must be countable, or every "holdsExpired === 0"
+  // above says nothing.
+  {
+    const dir = tmpdir('vs-spend-hold-census-');
+    const g = guardMod.create({ dataDir: dir, serverSetting: () => undefined, identityOf: () => ({ key: 'k', name: 'k' }), getUserTodos: () => null, log: () => { } });
+    const t0 = Date.now();
+    g.authorize({ reason: 'peer-message', identity: { key: 'k', name: 'k' }, now: t0 });
+    ok('§5e CONTROL: an authorization nobody settles is OPEN…', g.snapshot().holdsOpen === 1);
+    g.authorize({ reason: 'peer-message', identity: { key: 'k', name: 'k' }, now: t0 + A.RESERVE_TTL_MS + 1000 });
+    ok('§5e …and past the TTL it is counted as EXPIRED, not silently forgotten',
+      g.snapshot().holdsExpired === 1, JSON.stringify(g.snapshot()).slice(0, 120));
+  }
 }
 
 // ── §6 THE REAL STOP-NUDGE ROUTE ────────────────────────────────────────────

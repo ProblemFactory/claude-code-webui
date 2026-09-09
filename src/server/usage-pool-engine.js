@@ -1789,7 +1789,7 @@ function recordCodexQuotaSignal(session, payload) {
         session.pty.write(JSON.stringify({ type: 'codex-reset-credit' }) + '\n');
         // CHARGE WHAT YOU AUTHORIZED (r4): the slot the verdict resolved, handed
         // back — never a session for the guard to resolve a second time.
-        try { spendGuard.note({ reason: 'codex-reset-credit', session, identity: av && av.identity }); } catch (e) { console.warn('[codex] spend accounting failed:', e.message); }
+        try { spendGuard.note({ reason: 'codex-reset-credit', session, identity: av && av.identity, hold: av && av.hold }); } catch (e) { console.warn('[codex] spend accounting failed:', e.message); }
         serverNotice(`codex-reset-${session._webuiId}-${now}`, `Codex hit a usage limit — trying a stored rate-limit reset credit before switching accounts.`);
         global.__vsEvent?.('codex-reset-credit-try', session._accountId || 'global');
         return true;

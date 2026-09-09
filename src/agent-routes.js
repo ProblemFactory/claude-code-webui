@@ -698,7 +698,11 @@ app.get('/api/agent/stop-check', (req, res) => {
     // — it is the same RULE, stated at every pair, because "no await in
     // between" is a property of this arrangement of the code and not of the
     // question being asked once.
-    try { spendGuard?.note?.({ reason: 'stop-nudge', session: s, identity: auth && auth.identity }); } catch { }
+    // …and `hold` converts the reservation that verdict opened (r5) instead of
+    // leaving it to time out beside the stamp it already produced. There is no
+    // await between the two lines here, so this pair has no release path — the
+    // only way out is a throw, which the guard's own TTL covers.
+    try { spendGuard?.note?.({ reason: 'stop-nudge', session: s, identity: auth && auth.identity, hold: auth && auth.hold }); } catch { }
     // Per-hook custom text (2.88.0): user extra rides at the top of the nudge.
     const extra = customExtra('agents.stopNudgeExtra', 500);
     // Steps list only ENABLED tools (2.211.0) — status is guaranteed on here.

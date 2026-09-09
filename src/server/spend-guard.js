@@ -11,6 +11,19 @@
 // not consume budget — and, symmetrically, a turn that DID happen must be
 // charged even if the caller then fails to render a card.
 //
+// …AND THE TWO PHASES ARE NOT ONE INSTANT (r5, reproduced). Whatever a producer
+// does in between is invisible to the ledger, so five deliveries dispatched in
+// one synchronous pass all read the same pre-charge counts and all five are
+// authorized against a cap of two. `authorize()` therefore HOLDS what it
+// authorized (`v.hold`, an in-memory reservation that binds exactly like a
+// charge) until `note()` converts it, `release()` gives it back, or it times
+// out at A.RESERVE_TTL_MS. A hold is deliberately not a stamp: the ladder's
+// stash rung — its normal fallback for an unreachable conversation — opens no
+// turn, and a charge there would be a turn that never happened.
+// HOLDS ARE NOT PERSISTED, on purpose: a restart kills the in-flight
+// deliveries they stand for, and a hold that outlived its producer would refuse
+// real turns for its whole TTL after every boot.
+//
 // PERSISTENCE IS THE POINT. `data/spend-budget.json` survives a restart for the
 // same reason the armed auto-resume waits do: a release restart that hands the
 // automatic spenders a fresh hourly budget is not a ceiling, it is a
@@ -53,15 +66,27 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
     if (raw && typeof raw === 'object') {
-      // sized from the LIVE limits (r2): retention is a function of the caps,
-      // never a constant below them
-      state = A.pruneBudget(raw.budget || raw, Date.now(), A.budgetLimits(serverSetting));
+      // PRUNE WIDE AT LOAD (r5, reproduced) — see A.LOAD_RETENTION. Retention is
+      // a function of the caps (r2), but HERE THE CAPS ARE NOT KNOWABLE:
+      // server.js builds this guard ~318 lines before `setupPersistence()`
+      // assigns `persistenceRouter.readSettings`, so `serverSetting` answers
+      // `undefined` for every key and `A.budgetLimits()` hands back the
+      // DEFAULTS. With an owner day cap of 500 and 400 same-day stamps on disk,
+      // that cut the ledger to 264 on EVERY BOOT and forgave 136 unattended
+      // turns each time. Dropping a stamp is irreversible and forgives money;
+      // keeping one costs bounded memory. The first `note()` re-prunes with the
+      // live limits.
+      state = A.pruneBudget(raw.budget || raw, Date.now(), A.LOAD_RETENTION);
       if (raw.nudge && typeof raw.nudge === 'object') nudge = raw.nudge;
     }
   } catch { }
   const spoke = new Map();   // journal dedup: `${reason}|${key}|${why}` -> ts
   let chargesUnhinted = 0;   // charges that made this module resolve the identity itself (see identityFor)
   let lastUnhintedLog = 0;
+  let pending = [];          // the live HOLDS (see the header) — in memory only
+  let holdSeq = 0;
+  let holdsExpired = 0;      // CENSUS: holds nobody converted or gave back
+  let lastHoldLog = 0;
   let timer = null;
   const writeNow = () => {
     try { writeJsonAtomic(file, { v: 1, budget: state, nudge }); }
@@ -72,6 +97,25 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
 
   const limits = () => A.budgetLimits(serverSetting);
   const overagePolicy = () => (serverSetting('spend.allowOverageTurns') === true ? 'allow' : 'refuse');
+
+  /** Retire the holds whose producer never came back. THE COUNT IS A CENSUS,
+   *  not garbage collection: a hold that timed out is a site that authorized a
+   *  spend and never said whether it happened — the shape a grep over the call
+   *  sites cannot see, and the same kind of production counter as
+   *  `chargesUnhinted`. scripts/test-spend-paths.mjs §5d drives all five
+   *  producers and asserts it stays 0. */
+  function sweepHolds(now) {
+    if (!pending.length) return;
+    const { live, expired } = A.expirePending(pending, now);
+    if (!expired.length) return;
+    pending = live;
+    holdsExpired += expired.length;
+    if (now - lastHoldLog > REFUSE_LOG_MS) {
+      lastHoldLog = now;
+      log(`[spend] ${expired.length} authorization hold(s) expired with no charge and no release (${holdsExpired} so far) — a producer authorized a turn and never said what happened`);
+    }
+    try { global.__vsEvent?.('spend-hold-expired', String(expired.length)); } catch { }
+  }
 
   /** THE ONE READER of `cache.overage` / `cache.spend` (design §1.4: both had
    *  zero consumers). Everything that asks "is real money being spent on this
@@ -141,14 +185,31 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
   /** THE GATE. Every producer of a turn nobody typed calls this BEFORE it
    *  spends, and nothing else may decide. Returns the PURE verdict; the side
    *  effects of a refusal (journal + telemetry + inbox) happen here, once. */
-  function authorize({ reason, session = null, sessionId = null, sessionName = null, identity: identityHint = null, now = Date.now() } = {}) {
+  function authorize({ reason, session = null, sessionId = null, sessionName = null, identity: identityHint = null, hold: takeHold = true, now = Date.now() } = {}) {
+    sweepHolds(now);
     const identity = identityFor(session, identityHint);
     const key = identity && identity.key;
     const v = A.authorizeUnattendedSpend({
       reason, identity, state, limits: limits(),
       overage: overageFor(key), overagePolicy: overagePolicy(),
-      credential: credentialFor(key), spendControl: spendControlFor(key), now,
+      credential: credentialFor(key), spendControl: spendControlFor(key),
+      pending, now,
     });
+    // AN "ALLOWED" ANSWER HOLDS ITS SLOT (r5). The caller carries `hold` back
+    // to `note()` (it became a turn) or to `release()` (it did not); an answer
+    // nobody carries back expires at A.RESERVE_TTL_MS and is counted.
+    // A PROBE MUST NOT HOLD (r5, reproduced). `hold: false` asks whether this
+    // spend WOULD be allowed without taking a slot for it. auto-resume asks the
+    // ceiling TWICE per fire — once before its pre-fire gate, so a spent budget
+    // stops us before we pay for the gate's quota probe, and once after, on the
+    // identity the continue actually lands on. Measured with the real module at
+    // cap 1/hour: with the first call reserving, the second refused its own
+    // request and NOTHING ever fired. The charging call is the one that holds.
+    if (v.ok && key && takeHold) {
+      const hold = `h${++holdSeq}`;
+      pending = A.reservePending(pending, { id: hold, key, at: now });
+      return { ...v, hold };
+    }
     if (v.ok) return v;
     const sig = `${reason}|${key || '?'}|${v.why}`;
     const last = spoke.get(sig) || 0;
@@ -179,8 +240,12 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
   }
 
   /** Charge a spend that actually happened. The identity is the one
-   *  `authorize()` resolved and put on its verdict — see identityFor. */
-  function note({ reason = null, identity: identityHint = null, session = null, now = Date.now() } = {}) {
+   *  `authorize()` resolved and put on its verdict — see identityFor; `hold` is
+   *  the reservation that verdict opened, converted here into the stamp. */
+  function note({ reason = null, identity: identityHint = null, session = null, hold = null, now = Date.now() } = {}) {
+    sweepHolds(now);
+    // convert, never double-count: the stamp below IS this hold's outcome
+    if (hold) pending = A.releasePending(pending, hold);
     if (!(identityHint && identityHint.key) && session) {
       // The charge is re-deriving the slot. Not fatal (the answer is usually
       // the same one), so it charges — a dropped charge is the money-unsafe
@@ -204,6 +269,20 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
       fileInbox(text, `Reason of the latest turn: ${reason || 'unattended'}\nScope: ${r.warn.scope}\nUsed: ${r.warn.used} of ${r.warn.limit}`, 'normal');
     }
     return r.warn;
+  }
+
+  /** GIVE BACK an authorization that did not become a turn — the ladder's
+   *  stash rung, a send that failed, a steer the wrapper confirmed was folded
+   *  into a turn already running. Idempotent, and a `hold` this guard never
+   *  issued is a no-op: releasing is the money-SAFE half of the pair, so it
+   *  must never be able to throw its way into a producer's error path.
+   *  @returns true when a live hold was actually given back */
+  function release({ hold = null, now = Date.now() } = {}) {
+    sweepHolds(now);
+    if (!hold) return false;
+    const before = pending.length;
+    pending = A.releasePending(pending, hold);
+    return pending.length !== before;
   }
 
   // ── The Stop nudge's PERSISTED cooldown (D8) ───────────────────────────────
@@ -231,9 +310,12 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
   }
 
   return {
-    authorize, note, overageFor, spendControlFor, nudgeRec, noteNudge, flush,
+    authorize, note, release, overageFor, spendControlFor, nudgeRec, noteNudge, flush,
     limits, overagePolicy,
-    snapshot: () => ({ budget: A.pruneBudget(state, Date.now(), limits()), nudge: { ...nudge }, chargesUnhinted }),
+    snapshot: () => ({
+      budget: A.pruneBudget(state, Date.now(), limits()), nudge: { ...nudge },
+      chargesUnhinted, holdsOpen: A.expirePending(pending, Date.now()).live.length, holdsExpired,
+    }),
     _file: file,
   };
 }

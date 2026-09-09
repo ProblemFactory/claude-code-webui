@@ -88,6 +88,22 @@ function stampCap(limits) {
 // as the number the suite names; it is no longer a ceiling on what can be
 // counted.
 const MAX_STAMPS = stampCap(null);
+// THE RETENTION A READER THAT CANNOT YET KNOW THE LIMITS MUST USE (r5,
+// reproduced). Pruning is IRREVERSIBLE and it FORGIVES MONEY, so it may only be
+// done with limits somebody can actually answer — and at BOOT nobody can:
+// server.js builds the guard ~318 lines before `setupPersistence()` assigns
+// `persistenceRouter.readSettings`, so `serverSetting` answers `undefined` for
+// every key and `budgetLimits()` hands back the DEFAULTS. Measured: an owner
+// day cap of 500 with 400 same-day stamps on disk was cut to the default
+// retention (264) on every boot, so the guard then authorized 236 more
+// unattended turns today instead of 100 — and this instance restarts several
+// times a day. The two costs are not symmetric: over-retention is bounded
+// memory (this is the widest any offerable cap can count — CAP_MAX +
+// STAMP_HEADROOM stamps), under-retention is money. The first `note()`
+// re-prunes with the live limits.
+const LOAD_RETENTION = Object.freeze({
+  perIdentityDay: CAP_MAX.perIdentityDay, perInstanceDay: CAP_MAX.perInstanceDay,
+});
 
 /** PURE. Normalise the four numbers, whatever the settings store holds.
  *  0 is an EXPLICIT choice ("no unattended turns on this axis at all"), which
@@ -154,6 +170,78 @@ function spendCounts(state, identityKey, now = Date.now()) {
     dayOldest: day.length ? Math.min(...day) : 0,
     instanceOldest: instanceDay.length ? Math.min(...instanceDay) : 0,
   };
+}
+
+// ── RESERVATIONS: AUTHORIZE AND CHARGE ARE NOT ONE INSTANT (r5, reproduced) ──
+// The two-phase contract (authorize answers, note charges) is what keeps an
+// authorization that never became a turn from eating budget. It also opens a
+// window: everything a producer does between the two is invisible to the
+// ledger, so N deliveries dispatched in one pass all read the same pre-charge
+// counts and every one of them is authorized. MEASURED with the real guard and
+// the real delivery ladder, cap 2/hour, five conversations on ONE credential
+// slot dispatched synchronously (src/jobs.js fires `deliverToConversation`
+// fire-and-forget from a loop over `this.jobs`, and `_notifyRate`'s 30 s floor
+// is keyed PER CONVERSATION so it does not serialise across them): 5 delivered,
+// 0 refused, 5 turns charged against a cap of 2. Sequentially: 1.
+//
+// So an authorization HOLDS what it authorized. A hold counts against the caps
+// exactly like a charge until it is converted (`note`), given back (`release`)
+// or times out. It is deliberately NOT a stamp: a stamp is a turn that
+// happened, and the stash rung — the ladder's normal fallback for an
+// unreachable conversation — opens no turn at all.
+//
+// TTL: a hold must outlive the longest legitimate gap between authorize and
+// charge, which is the ladder's own SETTLE_TTL_MS (120 s — a frame written on
+// the rpc rung waits for the wrapper's `peer_message_result` before it is known
+// to have opened a turn). 3 minutes is that plus margin, and it is far below
+// HOUR_MS, which is why the counts below need no windowing: a live hold is
+// inside every window this module counts. Both relations are asserted in
+// scripts/test-spend-paths.mjs §1 — a hold that expires before the ladder can
+// settle it re-opens this defect, and one that outlived an hour would be a
+// second, unwindowed accounting.
+const RESERVE_TTL_MS = 3 * 60 * 1000;
+const RESERVE_CAP = 2000;   // bounded: a producer that never settles must not grow this without limit
+
+/** PURE. How much this identity (and the instance) has AUTHORIZED but not yet
+ *  charged. One number per scope, not a window: see RESERVE_TTL_MS. */
+function pendingCounts(pending, identityKey, now = Date.now(), ttlMs = RESERVE_TTL_MS) {
+  let identity = 0, instance = 0;
+  for (const p of (Array.isArray(pending) ? pending : [])) {
+    if (!p || !(now - (Number(p.at) || 0) < ttlMs)) continue;
+    instance++;
+    if (identityKey && p.key === identityKey) identity++;
+  }
+  return { identity, instance };
+}
+
+/** PURE. Add one hold. Returns a NEW list (never mutates the caller's). */
+function reservePending(pending, { id, key, at = Date.now() } = {}, { cap = RESERVE_CAP } = {}) {
+  const list = Array.isArray(pending) ? pending.slice() : [];
+  if (!id || !key) return list;
+  list.push({ id: String(id), key: String(key), at: Number(at) || 0 });
+  return list.length > cap ? list.slice(-cap) : list;
+}
+
+/** PURE. Drop one hold by id — the same call for "it became a turn" and for
+ *  "it did not", because the ledger's stamp is what records the difference. */
+function releasePending(pending, id) {
+  const list = Array.isArray(pending) ? pending : [];
+  if (!id) return list.slice();
+  const want = String(id);
+  return list.filter((p) => p && p.id !== want);
+}
+
+/** PURE. Split holds into the live ones and the ones that timed out. The
+ *  expired half is a CENSUS, not garbage: a hold nobody converted or released
+ *  is a producer that authorized a spend and never said what happened, which is
+ *  exactly the shape a grep over the call sites cannot see. */
+function expirePending(pending, now = Date.now(), ttlMs = RESERVE_TTL_MS) {
+  const live = [], expired = [];
+  for (const p of (Array.isArray(pending) ? pending : [])) {
+    if (!p) continue;
+    (now - (Number(p.at) || 0) < ttlMs ? live : expired).push(p);
+  }
+  return { live, expired };
 }
 
 // HOW OLD AN OVERAGE RECORD MAY BE AND STILL REFUSE A TURN (r2, reproduced).
@@ -285,18 +373,27 @@ function spendControlText(cache, opts = undefined) {
  *  @param overagePolicy 'refuse' (default, D3b) | 'allow'
  *  @param credential  {serves: 'yes'|'no'|'unknown'} — login/credential state
  *  @param spendControl spendControlState(cache), or null (unknown)
- *  @returns {ok, why, detail, retryAfter, counts, limits, reason, identity}
+ *  @param pending     the live HOLDS (see RESERVE_TTL_MS): authorizations that
+ *        have not yet become a charge. They bind exactly like charges — that is
+ *        what makes the ceiling hold across producers running concurrently.
+ *  @returns {ok, why, detail, retryAfter, counts, inFlight, limits, reason, identity}
  */
 function authorizeUnattendedSpend({
   reason, identity = null, state = null, limits = BUDGET_DEFAULTS,
   overage = null, overagePolicy = 'refuse', credential = null,
-  spendControl = null, now = Date.now(),
+  spendControl = null, pending = null, now = Date.now(),
 } = {}) {
   const L = { ...BUDGET_DEFAULTS, ...(limits || {}) };
   const key = identity && identity.key ? String(identity.key) : null;
   const name = (identity && (identity.name || identity.key)) || null;
   const counts = spendCounts(state, key || '__no-identity__', now);
-  const no = (why, detail, retryAfter = 0) => ({ ok: false, why, detail, retryAfter, counts, limits: L, reason, identity: identity || null });
+  // COUNTS ARE WHAT WAS SPENT; inFlight IS WHAT WAS AUTHORIZED AND NOT YET
+  // SETTLED. Kept apart on purpose: every surface that reports "N of M turns
+  // today" must keep reporting turns that HAPPENED, while the ceiling has to
+  // bind on both or a concurrent pass walks straight through it.
+  const inFlight = pendingCounts(pending, key, now);
+  const flight = (n) => (n > 0 ? ` (+${n} in flight)` : '');
+  const no = (why, detail, retryAfter = 0) => ({ ok: false, why, detail, retryAfter, counts, inFlight, limits: L, reason, identity: identity || null });
   if (!reason || !(reason in SPEND_REASONS)) {
     // An unnamed producer is the one shape the census exists to prevent; if it
     // reaches here at runtime it must not spend.
@@ -332,13 +429,17 @@ function authorizeUnattendedSpend({
     const seen = Number(overage.ageMs) > 0 ? ` (last reported ${Math.round(overage.ageMs / 60000)} min ago)` : '';
     return no('overage-in-use', `${name} is billing paid overage${seen} — unattended turns are refused while real money is being spent`, overage.resetsAt ? overage.resetsAt * 1000 : 0);
   }
+  // THE HOLD IS PART OF THE SUM. `retryAfter` still speaks only of STAMPS: a
+  // hold settles when its producer answers, not on a window boundary, so
+  // promising an instant for it would be a guess (0 = "no promise about when",
+  // which refusalText prints as nothing at all).
   if (L.perIdentityHour === 0) return no('hour-cap', `unattended turns per identity per hour are set to 0`);
-  if (counts.hour >= L.perIdentityHour) return no('hour-cap', `${name} has spent ${counts.hour} unattended turns this hour (cap ${L.perIdentityHour})`, counts.hourOldest + HOUR_MS);
+  if (counts.hour + inFlight.identity >= L.perIdentityHour) return no('hour-cap', `${name} has spent ${counts.hour}${flight(inFlight.identity)} unattended turns this hour (cap ${L.perIdentityHour})`, counts.hourOldest + HOUR_MS);
   if (L.perIdentityDay === 0) return no('day-cap', `unattended turns per identity per day are set to 0`);
-  if (counts.day >= L.perIdentityDay) return no('day-cap', `${name} has spent ${counts.day} unattended turns today (cap ${L.perIdentityDay})`, counts.dayOldest + DAY_MS);
+  if (counts.day + inFlight.identity >= L.perIdentityDay) return no('day-cap', `${name} has spent ${counts.day}${flight(inFlight.identity)} unattended turns today (cap ${L.perIdentityDay})`, counts.dayOldest + DAY_MS);
   if (L.perInstanceDay === 0) return no('instance-cap', `unattended turns for this instance are set to 0`);
-  if (counts.instanceDay >= L.perInstanceDay) return no('instance-cap', `this instance has spent ${counts.instanceDay} unattended turns today (cap ${L.perInstanceDay})`, counts.instanceOldest + DAY_MS);
-  return { ok: true, why: null, detail: null, retryAfter: 0, counts, limits: L, reason, identity: identity || null };
+  if (counts.instanceDay + inFlight.instance >= L.perInstanceDay) return no('instance-cap', `this instance has spent ${counts.instanceDay}${flight(inFlight.instance)} unattended turns today (cap ${L.perInstanceDay})`, counts.instanceOldest + DAY_MS);
+  return { ok: true, why: null, detail: null, retryAfter: 0, counts, inFlight, limits: L, reason, identity: identity || null };
 }
 
 /** PURE. Record a spend that ACTUALLY happened (two-phase, like the loop
@@ -400,7 +501,9 @@ function noticeText(warn) {
 
 module.exports = {
   SPEND_REASONS, BUDGET_DEFAULTS, HOUR_MS, DAY_MS, MAX_STAMPS, CAP_MAX, stampCap, OVERAGE_STALE_MS,
+  LOAD_RETENTION, RESERVE_TTL_MS, RESERVE_CAP,
   budgetLimits, emptyBudget, pruneBudget, spendCounts,
+  pendingCounts, reservePending, releasePending, expirePending,
   overageState, overageText, spendControlState, spendControlText,
   authorizeUnattendedSpend, noteUnattendedSpend, refusalText, noticeText,
 };

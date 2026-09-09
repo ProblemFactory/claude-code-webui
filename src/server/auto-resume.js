@@ -177,7 +177,7 @@ function writeJsonAtomic(file, obj) {
  * @param deps.notify         (sessionId, session, text) => void — a visible line in the chat
  */
 /**
- * @param deps.authorizeSpend (id, session, identity) => {ok, why, detail, retryAfter}
+ * @param deps.authorizeSpend (id, session, identity, {hold}) => {ok, why, detail, retryAfter, hold?}
  *        THE SPEND CEILING (design-account-hardening §4.4c / P9). The loop
  *        breaker below bounds this producer's PACING; the authorizer bounds the
  *        MONEY, per credential slot, across every producer and across restarts.
@@ -185,10 +185,17 @@ function writeJsonAtomic(file, obj) {
  *        the ones with a story to tell), and neither may be bypassed. Absent
  *        (harness without the guard wired) = allow; scripts/test-spend-paths.mjs
  *        pins the real wiring in server.js so "absent" can only mean a test.
- * @param deps.noteSpend (id, session, identity) => void — charged only when a
- *        continue was actually delivered.
+ * @param deps.noteSpend (id, session, identity, hold) => void — charged only
+ *        when a continue was actually delivered. `hold` is the reservation the
+ *        verdict opened (r5): the authorizer holds the slot it authorized, and
+ *        the charge converts that hold instead of adding to it.
+ * @param deps.releaseSpend (id, session, hold) => void — the OTHER half of the
+ *        same pair, for the one path here that authorizes and then does not
+ *        spend: the send fails and the session STAYS ARMED. The promise still
+ *        stands, so the money has to go back — otherwise a pty that refuses one
+ *        frame keeps that slot's budget booked until the hold times out.
  */
-function create({ dataDir, activeSessions, sendToSession, serverSetting, broadcast = () => { }, notify = null, beforeFire = null, fireIdentity = null, authorizeSpend = null, noteSpend = null, notifyDelayMs = 90000, log = () => { } }) {
+function create({ dataDir, activeSessions, sendToSession, serverSetting, broadcast = () => { }, notify = null, beforeFire = null, fireIdentity = null, authorizeSpend = null, noteSpend = null, releaseSpend = null, notifyDelayMs = 90000, log = () => { } }) {
   const file = path.join(dataDir, 'auto-resume.json');
   let armed = new Map(); // webuiId -> { at, resetsAt, reason, cid, fired }
   let fires = new Map(); // webuiId -> loop-breaker record (see FIRE_* above)
@@ -474,16 +481,25 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
    *  once per session, is how the round-2 "it also refused me" cards happened.
    *  The arm is NOT dropped: the promise still stands, it is the money that is
    *  out — a later hour, or a raised budget, continues the session. */
-  function spendOk(id, session, ident, kind, out = null) {
+  function spendOk(id, session, ident, kind, out = null, { hold = true } = {}) {
     if (!authorizeSpend) return true;
     let v = null;
-    try { v = authorizeSpend(id, session, ident || null); } catch (e) { log('[auto-resume] spend authorizer threw: ' + e.message); return false; } // FAIL CLOSED (P8)
+    // `hold` says which of the two calls this is (r5). The DEFAULT is to hold,
+    // because that is the money-safe direction and a caller that says nothing
+    // must get it; the PROBE — "would this be allowed?", asked before the
+    // pre-fire gate — says so explicitly, and must not reserve a slot or the
+    // charging call below it refuses its own request (measured at cap 1/hour:
+    // zero continues ever fired).
+    try { v = authorizeSpend(id, session, ident || null, { hold }); } catch (e) { log('[auto-resume] spend authorizer threw: ' + e.message); return false; } // FAIL CLOSED (P8)
     // CHARGE WHAT YOU AUTHORIZED (r4): hand the caller the slot this verdict
     // RESOLVED, so the charge below names it instead of asking a second time.
     // It matters only when `ident` is null — the gate could not name a fire
     // target, the guard resolved one from the session, and without this the
     // charge would resolve it AGAIN, off state the send is free to have moved.
     if (out && v && v.identity && v.identity.key) out.identity = v.identity;
+    // …and the HOLD it opened (r5), so the charge converts it and a failed send
+    // gives it back
+    if (out && v && v.hold) out.hold = v.hold;
     if (!v || v.ok !== false) return true;
     log(`[auto-resume] ${id}: refused ${kind === 'now' ? 'an immediate' : 'a timed'} continue onto ${(ident && ident.name) || 'this account'} (spend budget: ${v.why})`);
     return false;
@@ -521,7 +537,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     // so a budget that is already spent must stop us before we pay for that
     // work, and the identity the continue actually LANDS on must be checked
     // again once the gate has had its say.
-    if (!spendOk(id, session, ident, kind)) return false;
+    if (!spendOk(id, session, ident, kind, null, { hold: false })) return false;
     const deliver = () => {
       const a2 = armed.get(id);
       if (!a2 || a2.fired || a2.resetsAt !== a.resetsAt) return false;   // re-armed/disarmed while gating
@@ -560,15 +576,21 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       // the send: nothing between them spends, and test-auto-resume-loop's
       // round-2 pin measures the distance from `moved` to `continueNoticeFor`.
       const charge = {};
-      if (!spendOk(id, session, ident2, kind, charge)) return false;
+      if (!spendOk(id, session, ident2, kind, charge, { hold: true })) return false;
       const ok = sendToSession(id, session, CONTINUE_PROMPT);
-      if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); return false; }
+      if (!ok) {
+        log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`);
+        // AUTHORIZED, NOT SPENT (r5): the arm is kept, so the hold must not be
+        // — this session is going to ask again.
+        if (charge.hold && releaseSpend) { try { releaseSpend(id, session, charge.hold); } catch (e) { log('[auto-resume] releasing the spend hold failed: ' + e.message); } }
+        return false;
+      }
       armed.delete(id);
       noteFired(id, key2, kind, Date.now());
       // CHARGED ONLY WHEN THE TURN HAPPENED (two-phase): everything above can
       // refuse, and an authorization that never became a turn must not eat an
       // identity's hourly budget.
-      if (noteSpend) { try { noteSpend(id, session, charge.identity || ident2 || null); } catch (e) { log('[auto-resume] spend accounting failed: ' + e.message); } }
+      if (noteSpend) { try { noteSpend(id, session, charge.identity || ident2 || null, charge.hold || null); } catch (e) { log('[auto-resume] spend accounting failed: ' + e.message); } }
       save();
       _cancelArmNotify(id);
       log(kind === 'now'
