@@ -207,6 +207,84 @@ ok(afterRids.size === 5, 'local walk picks up the same append');
   ok(JSON.stringify(modLate) === JSON.stringify(scLate), 'module: identical late event (parity across the boundary)');
 }
 
+// ── THE FIXTURE GUARD, BOTH SPELLINGS (2026-09-09) ───────────────────────
+// A suite's SYNTHETIC transcript is not usage. The module requires
+// src/fixture-guard.js; the shipped scanner carries an INLINE COPY because a
+// checkout-less ssh host cannot require src/ (the same documented exception as
+// the walk itself). Two spellings of one rule = the twin class, so both are
+// driven over the same table, on the same fixture tree, in one run.
+{
+  const fxHome = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-walkpar-fx-'));
+  const FX_SID = 'e2e00000-0000-4000-8000-000000000001';
+  const REAL_SID = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff';
+  const rec2 = (mid) => JSON.stringify({
+    type: 'assistant', requestId: mid, timestamp: new Date().toISOString(),
+    message: { id: mid, model: 'claude-fable-5', usage: { input_tokens: 100, output_tokens: 20 } },
+  }) + '\n';
+  const enc = (cwd) => cwd.replace(/[/._]/g, '-');
+  // (1) a fixture cwd holding a REAL-looking conversation id — the project-dir
+  //     rung (this is the wire probe / chat-e2e shape: a real CLI turn in a
+  //     throwaway cwd)
+  write(path.join(fxHome, '.claude', 'projects', enc('/tmp/vs-chatpage-test-1234'), REAL_SID + '.jsonl'), rec2('req_fx_dir'));
+  // (2) the SYNTHETIC sid in an ordinary project dir — the sid rung, which is
+  //     the ONLY evidence that survives when the fixture carries no cwd (a
+  //     hand-written assistant record has none)
+  write(path.join(fxHome, '.claude', 'projects', enc('/home/u/work'), FX_SID + '.jsonl'), rec2('req_fx_sid'));
+  // (3) NEGATIVE CONTROL: an ordinary conversation in an ordinary dir. Without
+  //     it, "0 events" below could just mean the fixture tree is broken.
+  write(path.join(fxHome, '.claude', 'projects', enc('/home/u/work'), REAL_SID + '.jsonl'), rec2('req_real'));
+
+  const { runUsageWalk: walkFx } = require(path.join(REPO, 'src/usage-walker.js'));
+  const modEvs = walkFx({ home: fxHome, cursorFile: path.join(dataDir, 'fx-mod-cursor.json') })
+    .events.map((l) => JSON.parse(l));
+  const scanOut = execFileSync(process.execPath, [path.join(REPO, 'data/bin/vibespace-usage-scan')], {
+    encoding: 'utf8', env: { ...process.env, HOME: fxHome, CODEX_HOME: path.join(fxHome, '.codex'), VIBESPACE_USAGE_CURSOR: path.join(dataDir, 'fx-scan-cursor.json') }, timeout: 30000,
+  });
+  const scanEvs = scanOut.split('\n').filter(Boolean).map((l) => JSON.parse(l));
+
+  ok(modEvs.length === 1 && modEvs[0].rid === 'req_real',
+    `module: only the REAL conversation walks — the fixture cwd and the synthetic sid are refused (${modEvs.map((e) => e.rid).join(',') || 'none'})`);
+  ok(scanEvs.length === 1 && scanEvs[0].rid === 'req_real',
+    `shipped scanner: identical refusal (${scanEvs.map((e) => e.rid).join(',') || 'none'})`);
+  ok(JSON.stringify(modEvs) === JSON.stringify(scanEvs), 'module and scanner events are BYTE-IDENTICAL over the fixture tree');
+
+  // The PREDICATES themselves, same table, both spellings. The scanner's copy
+  // is extracted from its own SOURCE and evaluated, so a one-sided edit to
+  // either fails here rather than at the next incident.
+  const G = require(path.join(REPO, 'src/fixture-guard.js'));
+  const scanSrc = fs.readFileSync(path.join(REPO, 'data/bin/vibespace-usage-scan'), 'utf-8');
+  const a = scanSrc.indexOf('const FIXTURE_CWD_PREFIX');
+  const b = scanSrc.indexOf('const isFixtureSid');
+  const bEnd = scanSrc.indexOf('\n', b);
+  ok(a > 0 && b > a, 'the scanner carries the inline copy where this test can read it');
+  const block = scanSrc.slice(a, bEnd + 1);
+  // eslint-disable-next-line no-new-func
+  const mirror = new Function(block + '\nreturn { isFixtureProjectDir, isFixtureSid, FIXTURE_SID_PREFIX, FIXTURE_CWD_PREFIX, TMP_ROOTS };')();
+  ok(mirror.FIXTURE_SID_PREFIX === G.FIXTURE_SID_PREFIX && mirror.FIXTURE_CWD_PREFIX === G.FIXTURE_CWD_PREFIX
+    && JSON.stringify(mirror.TMP_ROOTS) === JSON.stringify(G.TMP_ROOTS),
+    'the inline copy declares the SAME constants as src/fixture-guard.js');
+  const TABLE_DIRS = [
+    '-tmp-vs-chatpage-test-1234', '-tmp-vs-chat-e2e-cwd-Q9oyO8', '-tmp-vs-wire-probe-abc',
+    '-var-tmp-vs-mmjump-test-9', '-tmp-vs-', '-tmp-vsv-probe', '-home-u-workspace-vibespace',
+    '-tmp-otel-cap-cwd-Q9oyO8', '-tmp', '', 'vs-chatpage-test-1',
+  ];
+  const TABLE_SIDS = [
+    'e2e00000-0000-4000-8000-000000000001', 'E2E00000-0000-4000-8000-00000000000A',
+    'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff', 'e2e00000-0000-4000-8000', '', 'agent-plain1',
+  ];
+  const dirsDiff = TABLE_DIRS.filter((d) => !!G.isFixtureProjectDir(d) !== !!mirror.isFixtureProjectDir(d));
+  const sidsDiff = TABLE_SIDS.filter((d) => !!G.isFixtureSid(d) !== !!mirror.isFixtureSid(d));
+  ok(dirsDiff.length === 0, `both spellings agree on ${TABLE_DIRS.length} project-dir names`, JSON.stringify(dirsDiff));
+  ok(sidsDiff.length === 0, `both spellings agree on ${TABLE_SIDS.length} session ids`, JSON.stringify(sidsDiff));
+  // The table must be non-vacuous in BOTH directions, or "they agree" would be
+  // satisfied by two predicates that always say no.
+  ok(TABLE_DIRS.some((d) => G.isFixtureProjectDir(d)) && TABLE_DIRS.some((d) => !G.isFixtureProjectDir(d))
+    && TABLE_SIDS.some((d) => G.isFixtureSid(d)) && TABLE_SIDS.some((d) => !G.isFixtureSid(d)),
+    'the parity table exercises both answers (an all-no table would agree vacuously)');
+
+  fs.rmSync(fxHome, { recursive: true, force: true });
+}
+
 fs.rmSync(home, { recursive: true, force: true });
 fs.rmSync(dataDir, { recursive: true, force: true });
 console.log(fail ? `FAIL (${fail})` : `ALL PASS (${pass})`);

@@ -737,18 +737,35 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
       const junkLive = staleJunk(listLive, staleMs);
       ok(`the product’s own session discovery lists ZERO STALE probe sessions (${listLive.length} sessions scanned)`, junkLive.length === 0,
         JSON.stringify(junkLive.slice(0, 3).map((s) => ({ cwd: s.cwd, status: s.status, ageMs: Date.now() - (s.startedAt || 0) }))));
+      // SINCE 2026-09-09 discovery is STRICTLY STRONGER than "skip it once it
+      // is stale": src/fixture-guard.js makes it refuse the whole throwaway-cwd
+      // convention, so a probe dir is never a session at ANY age. That changed
+      // what these two legs can observe — before the guard, the assertion was
+      // "discovery SEES the fresh one and FLAGS the backdated one"; now it is
+      // "discovery never lists either, while the AGE-sensitive reader still
+      // does its job". The positive control keeps that from being vacuous: the
+      // same call still lists this machine's real sessions.
+      const seesFixture = (l) => l.some((x) => x.cwd === ctlCwd);
       ok('REGRESSION: a probe running CONCURRENTLY (fresh cwd + transcript — what the sweep deliberately spares) fails NEITHER reader',
-        staleLeftovers(PROJECTS, staleMs).length === 0 && junkLive.length === 0
-          && listLive.some((s) => s.cwd === ctlCwd), // it IS visible — the filters skip it on AGE, not by failing to see it
-        JSON.stringify({ leftovers: staleLeftovers(PROJECTS, staleMs).slice(0, 3), junk: junkLive.length, seen: listLive.some((s) => s.cwd === ctlCwd) }));
+        staleLeftovers(PROJECTS, staleMs).length === 0 && junkLive.length === 0,
+        JSON.stringify({ leftovers: staleLeftovers(PROJECTS, staleMs).slice(0, 3), junk: junkLive.length }));
+      ok('…and discovery never lists it AS A SESSION at all — the fixture guard refuses the convention, not just a stale instance of it',
+        !seesFixture(listLive), JSON.stringify({ ctlCwd }));
+      ok(`POSITIVE CONTROL: the same discovery call still lists this machine's real sessions (${listLive.length}), so "not listed" is the guard and not a broken reader`,
+        listLive.length > 0);
       // NEGATIVE CONTROL: the SAME directory, backdated past the threshold, is
-      // a real leftover — both readers must flag it, or they are vacuous.
+      // a real leftover — the AGE-sensitive reader must flag it, or it is
+      // vacuous. Discovery must STILL not list it (the guard is age-blind by
+      // design: a fixture is never a conversation, fresh or stale).
       const old = (Date.now() - staleMs - 60000) / 1000;
       fs.utimesSync(ctlJsonl, old, old); fs.utimesSync(ctlDir, old, old);
       const listOld = await discoverClaudeSessions({ activeSessions: new Map() });
-      ok('NEGATIVE CONTROL: the SAME dir backdated past the threshold IS flagged by both readers (they filter on age, they are not blind to the name)',
-        staleLeftovers(PROJECTS, staleMs).includes(path.basename(ctlDir)) && staleJunk(listOld, staleMs).some((s) => s.cwd === ctlCwd),
-        JSON.stringify({ leftovers: staleLeftovers(PROJECTS, staleMs), junk: staleJunk(listOld, staleMs).map((s) => s.cwd) }));
+      ok('NEGATIVE CONTROL: the SAME dir backdated past the threshold IS flagged by the age-sensitive reader (it filters on age, it is not blind to the name)',
+        staleLeftovers(PROJECTS, staleMs).includes(path.basename(ctlDir)),
+        JSON.stringify({ leftovers: staleLeftovers(PROJECTS, staleMs) }));
+      ok('…and discovery still refuses it when STALE too (age-blind by design — the sweep owns the age question, the guard owns the convention)',
+        !seesFixture(listOld) && staleJunk(listOld, staleMs).length === 0,
+        JSON.stringify({ junk: staleJunk(listOld, staleMs).map((s) => s.cwd) }));
     } finally { rmCtl(); }
   }
 }

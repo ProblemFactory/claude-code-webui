@@ -17,13 +17,13 @@
 // VIBESPACE_CI_OAT secret; fork PRs get no secret and SKIP.
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
-import net from 'node:net';
-const freePort = () => new Promise((res, rej) => { const s = net.createServer(); s.once('error', rej); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { freePort, scratch, scratchHome } from './scratch.mjs';
 const require = createRequire(import.meta.url);
+const { fixtureLitter, isFixtureProjectDir, FIXTURE_STALE_MS } = require('../src/fixture-guard.js');
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 let token = process.env.VIBESPACE_CI_OAT || '';
@@ -34,7 +34,41 @@ if (!hasCli) { console.log('SKIP: no claude CLI on PATH'); process.exit(0); }
 
 const MODEL = process.env.VIBESPACE_CI_MODEL || 'claude-haiku-4-5-20251001';
 const PORT = await freePort(); // free port (2.369.46): fixed 3995 collided between concurrent gates
-const wt = `/tmp/vs-chat-e2e-${process.pid}`;
+const wt = scratch('chat-e2e');
+// ISOLATED $HOME (2026-09-09). This suite runs ONE real haiku turn on every
+// non-docs push, so the CLI wrote a real transcript into the developer's REAL
+// ~/.claude/projects — and the cleanup that removed it sat at the very END of
+// the happy path, after four `process.exit(1)` returns. Measured before this
+// change: 155 dead cursor entries in the production ledger from this suite's
+// throwaway cwds alone, plus one junk "conversation" per push in the sidebar.
+//
+// MEASURED (2026-09-09, claude 2.1.263): the real CLI serves a full turn under
+// a throwaway HOME with the oat riding CLAUDE_CODE_OAUTH_TOKEN alone —
+// `system/init` -> `assistant` -> `result/success` in 2.4 s, no onboarding
+// gate, transcript in THAT home. The account this suite seeds is oat-only by
+// construction (a fresh worktree data/ has no credential dir), so
+// `resolveForSpawn` takes the `oatOnly` branch and the token is the whole
+// login. HOME is not in AGENT_ENV_DROP, so the server hands it to the CLI it
+// spawns.
+const fakeHome = scratchHome('chat-e2e-home', fs);
+const REAL_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
+const realBefore = (() => { try { return new Set(fs.readdirSync(REAL_PROJECTS)); } catch { return new Set(); } })();
+// SWEEP what earlier versions of this suite left in the REAL home (the wire
+// probe's r5/r6 contract, same threshold, same "spare a run in flight" rule).
+// A leftover younger than the threshold may be a CONCURRENT copy of this suite
+// — two worktrees pushing minutes apart really do overlap.
+const swept = [];
+{
+  const sweptAt = Date.now();
+  for (const d of (() => { try { return fs.readdirSync(REAL_PROJECTS, { withFileTypes: true }); } catch { return []; } })()) {
+    if (!d.isDirectory() || !isFixtureProjectDir(d.name) || !d.name.includes('chat-e2e')) continue;
+    const p = path.join(REAL_PROJECTS, d.name);
+    let ageMs = -1; try { ageMs = sweptAt - fs.statSync(p).mtimeMs; } catch { continue; }
+    if (ageMs <= FIXTURE_STALE_MS) continue;
+    try { fs.rmSync(p, { recursive: true, force: true }); swept.push(d.name); } catch { }
+  }
+  if (swept.length) console.log(`  swept ${swept.length} stale leftover(s) from earlier runs: ${swept.slice(0, 3).join(', ')}`);
+}
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + String(e).slice(0, 300) : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -52,14 +86,20 @@ const am = new AccountManager({ dataDir: path.join(wt, 'data') });
 const acct = am.createSubscription({ name: 'CI-oat' });
 am.setOat(acct.id, token);
 
-const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-chat-e2e-cwd-'));
-const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), VIBESPACE_SKIP_AGENT_HOOKS: '1', VIBESPACE_PASSWORD: '' }, stdio: 'ignore' });
+const cwd = scratch('chat-e2e-cwd');
+fs.mkdirSync(cwd, { recursive: true });
+const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), HOME: fakeHome, VIBESPACE_SKIP_AGENT_HOOKS: '1', VIBESPACE_PASSWORD: '' }, stdio: 'ignore' });
+// UNCONDITIONAL cleanup (2026-09-09). The transcript removal used to live at
+// the very END of the happy path, so every early `process.exit(1)` — and every
+// signal — left it behind. It runs here, from one function, on 'exit' AND on
+// the signals 'exit' does not fire for.
 const cleanup = () => {
   try { srv.kill('SIGKILL'); } catch {}
   try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
-  try { fs.rmSync(cwd, { recursive: true, force: true }); } catch {}
+  for (const d of [cwd, fakeHome]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 };
 process.on('exit', cleanup);
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { cleanup(); process.exit(143); });
 // BOOT WAIT sized for a LOADED box (2.369.75 gate: the fast tier runs beside
 // three implementer workflows on a 3,900-process machine; the worktree server
 // took longer than the old 15 s, the loop gave up SILENTLY and the WebSocket
@@ -188,14 +228,29 @@ try {
   }
 }
 
-// kill + transcript-litter cleanup (the real ~/.claude is shared by design)
 ws.send(JSON.stringify({ type: 'kill', sessionId: sid }));
 await sleep(1500);
-try {
+
+// THE REAL HOME IS UNTOUCHED. The CLI's transcript went to the isolated home
+// (removed by `cleanup`), so this asserts the CONSEQUENCE rather than trusting
+// the env var: no fixture entry appeared in the developer's own projects dir.
+{
   const { cwdToProjectDir } = require(path.join(wt, 'src', 'session-store.js'));
-  const projDir = path.join(os.homedir(), '.claude', 'projects', cwdToProjectDir(cwd));
-  fs.rmSync(projDir, { recursive: true, force: true });
-} catch { }
+  const after = (() => { try { return fs.readdirSync(REAL_PROJECTS, { withFileTypes: true }); } catch { return []; } })();
+  const added = after.filter((d) => !realBefore.has(d.name))
+    .map((d) => ({ name: d.name, mtimeMs: (() => { try { return fs.statSync(path.join(REAL_PROJECTS, d.name)).mtimeMs; } catch { return Date.now(); } })() }));
+  const lit = fixtureLitter(added);
+  check(`the real ~/.claude/projects gained no fixture entry (${added.length} new from concurrent real sessions, 0 fixtures; swept ${swept.length} stale)`,
+    lit.offenders.length === 0, JSON.stringify(lit.offenders.slice(0, 3)));
+  check('…and this suite\'s own cwd is not among them (the CLI wrote under the isolated home)',
+    !after.some((d) => d.name === cwdToProjectDir(cwd)), cwdToProjectDir(cwd));
+  // POSITIVE CONTROL: the isolation must not be "the CLI never ran". A real
+  // turn leaves a real transcript — under the ISOLATED home.
+  const iso = path.join(fakeHome, '.claude', 'projects');
+  const isoDirs = (() => { try { return fs.readdirSync(iso); } catch { return []; } })();
+  check(`the real turn's transcript landed under the ISOLATED home (${isoDirs.length} project dir(s))`,
+    isoDirs.includes(cwdToProjectDir(cwd)), JSON.stringify(isoDirs.slice(0, 3)));
+}
 ws.close();
-console.log(failed ? `\n${failed} FAILED` : '\nALL PASS (8)');
+console.log(failed ? `\n${failed} FAILED` : '\nALL PASS');
 process.exit(failed ? 1 : 0);

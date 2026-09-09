@@ -54,9 +54,20 @@ import { spawn, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { createRequire } from 'node:module';
+// THE FIXTURE CONVENTION, ONE DECLARATION (2026-09-09). This probe is the ONE
+// suite fixture that must run under the developer's REAL home (it measures the
+// installed CLI with the machine's real credentials), so it is the ONE entry in
+// `REAL_HOME_FIXTURE_PREFIXES` — and the standing sweep
+// (scripts/test-fixture-isolation.mjs) spares exactly what is declared there,
+// for exactly as long as `FIXTURE_STALE_MS`. Two hand-written copies of that
+// threshold is how the sweep and the probe would come to disagree about the
+// same directory, which is the r6/r7 defect one layer up.
+const _require = createRequire(import.meta.url);
+const _fx = _require('../src/fixture-guard.js');
 
 const BUDGET_MS = Number(process.env.VIBESPACE_WIRE_PROBE_MS || 90000);
-const PREFIX = 'vs-wire-probe-';
+const PREFIX = _fx.REAL_HOME_FIXTURE_PREFIXES[0].prefix; // 'vs-wire-probe-' — declared in src/fixture-guard.js
 const HOME = process.env.HOME || os.homedir();
 const PROJECTS = path.join(HOME, '.claude', 'projects');
 const SESSION_ENV = path.join(HOME, '.claude', 'session-env');
@@ -103,7 +114,7 @@ const RAW_DIR = path.join(os.tmpdir(), `${PREFIX}raw-${process.getuid?.() ?? 0}`
 //    layer down. So: ONE `SWEPT_AT` timestamp, `spared` built from the SAME
 //    pass that decided (name + the age as measured THEN), and `sweptAt` in the
 //    report so a reader can use the sweep's clock instead of its own.
-const STALE_MS = 10 * 60 * 1000;
+const STALE_MS = _fx.FIXTURE_STALE_MS; // shared with the standing sweep — see src/fixture-guard.js
 const SWEPT_AT = Date.now();
 const ageOf = (p, now = SWEPT_AT) => { try { return now - fs.statSync(p).mtimeMs; } catch { return -1; } };
 const stale = (p) => ageOf(p) > STALE_MS;

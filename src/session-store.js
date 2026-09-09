@@ -9,6 +9,9 @@ const os = require('os');
 const { execFileSync, execFile } = require('child_process');
 const { extractTailIds, nameFromUserRecord } = require('./discovery-facts');
 const { readJsonlBounded } = require('./adapters/codex');
+// A test suite's synthetic transcript is never a conversation (see the essay
+// in src/fixture-guard.js — one declaration, shared with the usage walk).
+const { isFixtureProjectDir, isFixtureSid } = require('./fixture-guard.js');
 
 const SESSIONS_DIR = path.join(os.homedir(), '.claude', 'sessions');
 
@@ -1112,13 +1115,22 @@ async function discoverClaudeSessions({ activeSessions, webuiPids = new Set(), d
   const sessionMap = new Map(); // sessionId → index in sessions[] (dedup: running wins over stopped)
   if (snapByDir || fs.existsSync(projectsDir)) {
     for (const projDir of (snapByDir ? [...snapByDir.keys()] : fs.readdirSync(projectsDir))) {
+      // A SUITE'S THROWAWAY cwd is not a conversation (2026-09-09). Its
+      // transcript is hand-written, its "session" was never a session, and it
+      // is deleted seconds later — but the production instance polls this
+      // directory every 5s, so it listed one card per gate run (12 measured on
+      // this box before the isolation fix, each with its own cwd folder
+      // group). The DEVICE snapshot path goes through the same predicate: the
+      // fact is about the directory, not about which transport read it.
+      if (isFixtureProjectDir(projDir)) continue;
       const projPath = path.join(projectsDir, projDir);
       const snapFiles = snapByDir?.get(projDir) || null;
       if (!snapFiles) { try { if (!fs.statSync(projPath).isDirectory()) continue; } catch { continue; } }
 
       // Pre-fetch stats for sorting + mtime lookup (device facts carry them)
-      const jsonls = snapFiles ? [...snapFiles.keys()]
-        : fs.readdirSync(projPath).filter(f => f.endsWith('.jsonl') && !f.startsWith('agent-'));
+      const jsonls = (snapFiles ? [...snapFiles.keys()]
+        : fs.readdirSync(projPath).filter(f => f.endsWith('.jsonl') && !f.startsWith('agent-')))
+        .filter(f => !isFixtureSid(f.replace(/\.jsonl$/, ''))); // synthetic conversation id, wherever it landed
       const statMap = new Map();
       for (const f of jsonls) {
         if (snapFiles) { statMap.set(f, snapFiles.get(f)?.mtimeMs || 0); continue; }

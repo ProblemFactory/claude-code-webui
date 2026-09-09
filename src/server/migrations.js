@@ -128,6 +128,22 @@ function create({ rootDir, serverNotice }) {
       },
     },
     {
+      id: '2026-09-purge-test-fixture-ledger',
+      note: "two suites wrote SYNTHETIC claude transcripts into the developer's real ~/.claude/projects (the worktree server they spawn inherited HOME and can only discover what lives under its own home), and the production instance's usage walk ingested their hand-written `usage` blocks: 79,533 permanent ledger rows on this instance claiming 982,140 tokens of a model nobody ever ran (measured 2026-09-09 14:39 UTC on a copy of its stores; 79,778 rows removed in all, 222 dead cursors, 1,575 anchors re-measured), attributed to the machine login and counted into the costSince of its anchor pairs. Archives every fixture row (synthetic sid family, or a throwaway fixture cwd) to data/archive/, drops the dead cursors, voids the anchor costSince values that measured an interval containing one, and drops the learned rates so the estimator re-learns. From this release the walk and discovery refuse the convention outright (src/fixture-guard.js), so this is a one-shot clean-up of history, not a guard.",
+      run() {
+        const { purgeFixtureLedger } = require('../fixture-ledger-purge.js');
+        const rep = purgeFixtureLedger({ dataDir, id: '2026-09-purge-test-fixture-ledger' });
+        // Say what happened even when it is nothing — a repair nobody can see
+        // ran is a repair nobody can verify ran.
+        console.log('[migrate] fixture-ledger:', JSON.stringify(rep));
+        if (rep.rowsRemoved || rep.cursors) {
+          try {
+            serverNotice?.('fixture-ledger-purged', `Usage bookkeeping repaired: ${rep.rowsRemoved} ledger row(s) written by test fixtures (${rep.synthetic} of them fabricated — a synthetic transcript, no request ever made) were archived to data/archive/, ${rep.cursors} dead cursor(s) dropped and ${rep.anchorsVoided} usage anchor(s) re-measured. The Usage window and the quota estimator re-derive from the cleaned data.`, { level: 'info' });
+          } catch { }
+        }
+      },
+    },
+    {
       id: '2026-08-archive-dormant-task-plans',
       note: 'dormant checklist plan arrays (feature removed 2.121.0) → data/archive/',
       run() {
