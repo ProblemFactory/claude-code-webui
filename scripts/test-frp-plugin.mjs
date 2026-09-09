@@ -9,6 +9,7 @@ import os from 'node:os';
 import net from 'node:net';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 
 // pull relay config from the private secrets file if not in env
@@ -108,7 +109,7 @@ try {
   const { execSync } = await import('node:child_process'); const fsx = await import('node:fs');
   const httpS = (await import('node:http')).createServer((q, s) => s.end('ok'));
   await new Promise((r) => httpS.listen(0, '127.0.0.1', r));
-  const tmp = fsx.mkdtempSync('/tmp/frp-probe-');
+  const tmp = fsx.mkdtempSync(scratch('frp-probe') + '-');
   execSync(`openssl req -x509 -newkey rsa:2048 -keyout ${tmp}/k.pem -out ${tmp}/c.pem -days 1 -nodes -subj /CN=localhost 2>/dev/null`);
   const httpsS = (await import('node:https')).createServer({ key: fsx.readFileSync(`${tmp}/k.pem`), cert: fsx.readFileSync(`${tmp}/c.pem`) }, (q, s) => s.end('ok'));
   await new Promise((r) => httpsS.listen(0, '127.0.0.1', r));

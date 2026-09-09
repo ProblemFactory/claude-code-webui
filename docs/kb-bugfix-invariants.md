@@ -2,6 +2,16 @@
 
 Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 
+## GATE SUITES CLAIMED MACHINE-GLOBAL NAMES (2.369.76, heavy tier RED on 40ad936d)
+
+**THE SHAPE.** The heavy tier for 2.369.75's commit went red on test-chat-paging: first `npx esbuild` (unminified rebuild in the suite's worktree) failed with no stderr, then the retry's `git worktree add --detach /tmp/vs-chatpage-smoke HEAD` failed with status 128. Neither is a product failure. The suite's worktree path, chrome profile dir (`/tmp/vs-chatpage-chrome`) and ports (3990/9340) were fixed strings; a verifier agent — told, as every verifier is, to run the gate suites from its own checkout — ran the same suite in the same minute. Its `git worktree remove --force` deleted the heavy run's tree mid-build, and its `worktree add` recreated the path before the heavy run's retry got there. The heavy tier's machine lock (2026-09-07 round 2) serialises heavy RUNS; it cannot cover a process that never takes it.
+
+**THE CENSUS.** 28 suites carried the shapes: 23 with quoted `/tmp/vs-<name>` literals, 17 with `const PORT = NNNN`, three suites sharing 3989/9339, four sharing 3991/9341, five using `3951 + (process.pid % 20)` (a 1-in-20 collision, and two of them share one range). 2.369.46 had fixed exactly one (test-chat-e2e :3995) inline — the third strike is where an idiom becomes shared: `scripts/scratch.mjs` (`scratch(name)` = `/tmp/vs-<name>-<pid>`; `freePorts(n)` holds every listener open until all are chosen, because closing each before the next `listen(0)` can hand the same port back). It is deliberately not a `test-*.mjs` — the tier census would demand a tier for it.
+
+**THE GUARD.** test-ci-gate §6 already had `machineGlobalFixtures` (the 2026-09-07 detector: a literal that IS a port, a `/tmp` literal that reaches the filesystem) but scanned FAST-tier suites only — the tier that collided was the other one. It now scans both tiers, and pins that the scanned set contains the heavy tier and the suite that collided. The detector's own fixtures (scripts/fixtures/machine-global-shapes/) are the controls; test-ci-gate's `/tmp/vs-ack-smoke` assertion is a control READING a fixture, not a claim, and the rewrite reverted its accidental hit.
+
+**INVARIANTS.** A lock covers the processes that take it and nothing else — when the colliders are other agents, the fix is a name nobody shares, not a bigger lock. A suite's scratch names are part of its correctness on a shared box. The second inline fix of a class is the signal to make the idiom shared and the detector tier-wide.
+
 ## A MEMBER BECAME USABLE AND NOBODY NOTICED (2026-09-08 02:00–02:31, from this instance's own journal)
 
 **THE SHAPE.** Pool "全部" hit 0 % on every member. The owner added a subscription in the middle of it. Eight fable conversations were parked on the newcomer **while it had no usage reading at all**, re-armed for a reset **eight hours away**, and released only when the owner typed a prompt into one of them seven minutes later.

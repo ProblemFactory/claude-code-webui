@@ -28,12 +28,16 @@
 // proves the push is not obviously broken, the heavy tier proves it is
 // actually good, and nothing rides on top of a known-red commit.
 //
-// ONE HEAVY TIER PER MACHINE (2026-09-07 round 2). The heavy suites claim
-// machine-global names — fixed ports, fixed /tmp checkouts — so two heavy runs
-// on one box do not merely queue, they DESTROY each other and the loser writes
-// a red that blocks the next push. Two mechanisms keep the tier serial, and
-// both are needed because this box hosts ~160 checkouts of this repository
-// driven by parallel agents:
+// ONE HEAVY TIER PER MACHINE (2026-09-07 round 2). Two heavy runs on one box
+// double the load the suites' budgets were measured under, and until 2.369.76
+// the heavy suites also claimed machine-global names (fixed ports, fixed /tmp
+// checkouts) so two runs DESTROYED each other and the loser wrote a red that
+// blocked the next push. The names are gone (scripts/scratch.mjs — per-pid
+// paths, free ports; test-ci-gate §6 scans BOTH tiers for the fixed shapes,
+// because the 40ad936d red came from a VERIFIER AGENT running one suite from
+// its own checkout, which no lock covers); the lock stays for the load. Two
+// mechanisms keep the tier serial, and both are needed because this box hosts
+// ~160 checkouts of this repository driven by parallel agents:
 //   · the LAUNCHER supersedes: a run in flight for an ANCESTOR of the sha
 //     being pushed is killed, because the newer commit subsumes it and its
 //     half-finished verdict is worthless. A run for the same sha is refused;

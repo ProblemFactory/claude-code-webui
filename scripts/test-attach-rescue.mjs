@@ -18,6 +18,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -29,7 +30,7 @@ if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
 const freePort = () => new Promise((res) => { const s = require('net').createServer(); s.listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => res(p)); }); });
 const PORT = await freePort(), CDP_PORT = await freePort();
 const wt = `/tmp/vs-attach-rescue-${process.pid}`;
-const fakeHome = '/tmp/vs-attach-rescue-home';
+const fakeHome = scratch('attach-rescue-home');
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -46,7 +47,7 @@ execSync('npm run build', { cwd: wt, stdio: 'ignore' });
 const SID_LOCAL = '11111111-2222-3333-4444-555555555555';
 const SID_CACHED = '66666666-7777-8888-9999-aaaaaaaaaaaa';
 const SID_GONE = 'bbbbbbbb-cccc-dddd-eeee-ffffffffffff';
-const cwd = '/tmp/vs-rescue-proj';
+const cwd = scratch('rescue-proj');
 const rec = (sid, i, role, text) => JSON.stringify(role === 'user'
   ? { type: 'user', uuid: `u-${sid.slice(0, 4)}-${i}`, timestamp: new Date(1700000000000 + i * 60000).toISOString(), sessionId: sid, cwd, message: { role: 'user', content: [{ type: 'text', text }] } }
   : { type: 'assistant', uuid: `a-${sid.slice(0, 4)}-${i}`, timestamp: new Date(1700000000000 + i * 60000).toISOString(), sessionId: sid, cwd, message: { role: 'assistant', model: 'claude-fable-5', content: [{ type: 'text', text }], usage: { input_tokens: 10, output_tokens: 5 } } });

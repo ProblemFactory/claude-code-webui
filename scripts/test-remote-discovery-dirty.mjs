@@ -8,13 +8,14 @@
  */
 import { readFileSync } from 'fs';
 import { createRequire } from 'module';
+import { scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const { HostManager } = require('../src/hosts.js');
 
 let pass = 0, fail = 0;
 const ok = (c, m) => { if (c) { pass++; console.log('  ✓ ' + m); } else { fail++; console.log('  ✗ ' + m); } };
 
-const h = new HostManager({ dataDir: '/tmp/vs-disc-dirty-' + process.pid });
+const h = new HostManager({ dataDir: scratch('disc-dirty') });
 const seen = [];
 h.onDiscoveryDirty = (id) => seen.push(id);
 
@@ -58,7 +59,7 @@ ok(/onDiscoveryDirty[\s\S]{0,700}wss\.clients\.size/.test(srv), 'no computation 
 // background refresh through the same dirty→push channel; an explicit ⟳
 // (ttlMs 0) still blocks for the real scan.
 {
-  const h2 = new HostManager({ dataDir: '/tmp/vs-disc-swr-' + process.pid });
+  const h2 = new HostManager({ dataDir: scratch('disc-swr') });
   h2._state.hosts.push({ id: 'hX', name: 'X' });
   h2._persistedDisc['hX'] = { at: Date.now() - 3600e3, sessions: [{ sessionId: 'aaa', status: 'remote-running' }] };
   let kicked = null; h2.onDiscoveryDirty = (id) => { kicked = id; };

@@ -4,24 +4,25 @@
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs'; import path from 'node:path'; import http from 'node:http';
 import { createRequire } from 'node:module';
+import { freePorts, scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const repo = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const CHROME = ['/usr/bin/google-chrome','/usr/bin/google-chrome-stable','/usr/bin/chromium'].find(p=>fs.existsSync(p));
 if(!CHROME){ console.log('SKIP: no chrome'); process.exit(0); }
-const wt = '/tmp/vs-desk-wt';
+const wt = scratch('desk-wt');
 try { execSync(`git worktree remove --force ${wt}`, {cwd:repo, stdio:'ignore'}); } catch {}
 execSync(`git worktree add --detach ${wt} HEAD`, {cwd:repo, stdio:'ignore'});
 for (const f of ['node_modules','public/bundle.js']) { try { fs.symlinkSync(path.join(repo,f), path.join(wt,f)); } catch {} }
 for (const f of execSync('git diff --name-only HEAD',{cwd:repo}).toString().split('\n').filter(Boolean))
   { try { fs.mkdirSync(path.dirname(path.join(wt,f)),{recursive:true}); fs.copyFileSync(path.join(repo,f), path.join(wt,f)); } catch {} }
 const env={...process.env}; delete env.VIBESPACE_PASSWORD; delete env.VIBESPACE_GENERATE_PASSWORD;
-const PORT=39511;
+const [PORT, CDP_PORT] = await freePorts(2); // per-process (scripts/scratch.mjs)
 const srv=spawn('node',[path.join(wt,'server.js')],{cwd:wt,env:{...env,PORT:String(PORT),VIBESPACE_SKIP_AGENT_HOOKS:'1'},stdio:'ignore'});
-const chrome=spawn(CHROME,['--headless=new','--remote-debugging-port=9251','--no-sandbox','--disable-gpu','about:blank'],{stdio:'ignore'});
+const chrome=spawn(CHROME,['--headless=new',`--remote-debugging-port=${CDP_PORT}`,'--no-sandbox','--disable-gpu','about:blank'],{stdio:'ignore'});
 await new Promise(r=>setTimeout(r,4000));
 const get=(u)=>new Promise((res,rej)=>http.get(u,s=>{let b='';s.on('data',d=>b+=d);s.on('end',()=>res(b))}).on('error',rej));
 const WebSocket=require(path.join(repo,'node_modules/ws/index.js'));
-const tgt=JSON.parse(await get('http://127.0.0.1:9251/json')).find(t=>t.type==='page');
+const tgt=JSON.parse(await get(`http://127.0.0.1:${CDP_PORT}/json`)).find(t=>t.type==='page');
 const ws=new WebSocket(tgt.webSocketDebuggerUrl,{perMessageDeflate:false});
 let id=0;const pend={};const send=(m,p={})=>new Promise(r=>{pend[++id]=r;ws.send(JSON.stringify({id,method:m,params:p}))});
 ws.on('message',d=>{const m=JSON.parse(d);if(m.id&&pend[m.id]){pend[m.id](m.result||{});delete pend[m.id];}});

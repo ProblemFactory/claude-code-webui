@@ -1,10 +1,11 @@
 import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs'; import path from 'node:path';
 import { createRequire } from 'node:module';
+import { freePort, scratch } from './scratch.mjs';
 const require = createRequire(new URL('../server.js', import.meta.url));
-const repo = process.cwd(); const PORT = 3994;
-const wt = '/tmp/vs-brk-smoke', fakeHome = '/tmp/vs-brk-home';
-const CWD = '/tmp/vs-brk-work'; const SID = '88880000-1111-2222-3333-444455556666';
+const repo = process.cwd(); const PORT = await freePort(); // per-process (scripts/scratch.mjs)
+const wt = scratch('brk-smoke'), fakeHome = scratch('brk-home');
+const CWD = scratch('brk-work'); const SID = '88880000-1111-2222-3333-444455556666';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = 0; const check = (n,c,e)=>{ if(c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e?' — '+e:''}`);} };
 try { execSync(`git worktree remove --force ${wt}`, { stdio: 'ignore' }); } catch {}
@@ -40,7 +41,7 @@ check('absent transcript → transcriptKnown false', r2.transcriptKnown === fals
 check('message never says "start a new session instead"', !/start a new session instead/i.test(r2.message||''), r2.message);
 check('message says nothing was deleted', /nothing has been deleted/i.test(r2.message||''), r2.message);
 // KNOWN case: arm for the id whose transcript exists
-await send({type:'create',backend:'claude',mode:'chat',resume:true,resumeId:SID,cwd:'/tmp/vs-brk-wrongdir',recreateCwd:true,reqId:'k1',cols:80,rows:24});
+await send({type:'create',backend:'claude',mode:'chat',resume:true,resumeId:SID,cwd:scratch('brk-wrongdir'),recreateCwd:true,reqId:'k1',cols:80,rows:24});
 await sleep(6000);
 const r4 = await send({type:'create',backend:'claude',mode:'chat',resume:true,resumeId:SID,cwd:CWD,reqId:'k2',cols:80,rows:24});
 if (r4.type==='error' && r4.code==='no-convo-breaker') {

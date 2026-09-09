@@ -6,6 +6,7 @@
 // Run: T_HOST=<ip> T_USER=<user> T_KEY=<keyfile> [T_PORT=22] node scripts/test-graduate-dial.mjs
 import { spawn, execFileSync } from 'node:child_process';
 import http from 'node:http'; import fs from 'node:fs'; import os from 'node:os'; import path from 'node:path';
+import { freePort } from './scratch.mjs';
 const REPO = new URL('..', import.meta.url).pathname.replace(/\/$/, '');
 const HOST=process.env.T_HOST, USER=process.env.T_USER, KEY=process.env.T_KEY, PORT_SSH=process.env.T_PORT||'22';
 if(!HOST){ console.log('SKIP: no T_HOST'); process.exit(0); }
@@ -22,7 +23,7 @@ for (const f of ['node_modules','public/bundle.js','data/bin/vibespace-agentd.js
 for (const f of execFileSync('git',['diff','--name-only','HEAD'],{cwd:REPO}).toString().split('\n').filter(Boolean))
   { try { fs.mkdirSync(path.dirname(path.join(WT,f)),{recursive:true}); fs.copyFileSync(path.join(REPO,f), path.join(WT,f)); } catch {} }
 const env={...process.env}; delete env.VIBESPACE_PASSWORD; delete env.VIBESPACE_GENERATE_PASSWORD;
-const PORT=39411;
+const PORT = await freePort(); // per-process (scripts/scratch.mjs)
 const srv=spawn('node',[path.join(WT,'server.js')],{cwd:WT,env:{...env,PORT:String(PORT),VIBESPACE_SKIP_AGENT_HOOKS:'1',VIBESPACE_PUBLIC_URL:`http://127.0.0.1:${PORT}`},stdio:['ignore','pipe','pipe']});
 let log=''; srv.stdout.on('data',d=>{log+=d;}); srv.stderr.on('data',d=>{log+=d;});
 const req=(m,p,body)=>new Promise((res,rej)=>{const d=body?JSON.stringify(body):null;

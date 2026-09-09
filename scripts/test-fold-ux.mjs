@@ -24,6 +24,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { freePorts } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -132,7 +133,7 @@ if (!CHROME) {
   console.log(failed ? `\n${failed} FAILED (${passed} passed)` : `\nALL PASS (${passed})`);
   process.exit(failed ? 1 : 0);
 }
-const PORT = 3951 + (process.pid % 20), CDP_PORT = 9351 + (process.pid % 20);
+const [PORT, CDP_PORT] = await freePorts(2); // per-process (scripts/scratch.mjs) — a pid-modulo port was a 1-in-20 collision
 const wt = `/tmp/vs-foldux-${process.pid}`;
 const fakeHome = `${wt}-home`;
 const CWD = `${wt}-cwd`;

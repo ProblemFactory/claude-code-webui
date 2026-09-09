@@ -18,12 +18,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { freePort, scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 3991;
-const wt = '/tmp/vs-integ-toggle';
-const home = '/tmp/vs-integ-home';
+const PORT = await freePort(); // per-process (scripts/scratch.mjs) — fixed ports collided across concurrent gates
+const wt = scratch('integ-toggle');
+const home = scratch('integ-home');
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

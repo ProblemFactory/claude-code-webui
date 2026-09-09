@@ -25,6 +25,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { freePort } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 const R = (p) => require(path.join(REPO, p));
@@ -1356,7 +1357,7 @@ console.log('— §7 the chip at 375x667 (headless chrome)');
       + "  '" + row('Pool', '&rarr; Personal Max', 'window.chips.pool') + "';\n"
       + '<' + '/script></body></html>'; // split so THIS file's own parser never sees a close tag; the fixture gets the real one
     fs.writeFileSync(path.join(dir, 'fixture.html'), html);
-    const CDP_PORT = 9351;
+    const CDP_PORT = await freePort(); // per-process (scripts/scratch.mjs)
     const profile = path.join(dir, 'chrome');
     const chrome = spawn(CHROME, ['--headless=new', '--remote-debugging-port=' + CDP_PORT, '--no-first-run', '--disable-gpu', '--window-size=375,667', '--user-data-dir=' + profile, 'about:blank'], { stdio: 'ignore' });
     const sleep = (ms) => new Promise((r) => setTimeout(r, ms));

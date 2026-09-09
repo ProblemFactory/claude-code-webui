@@ -23,6 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { freePorts } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 let passed = 0, failed = 0;
@@ -860,7 +861,7 @@ if (!CHROME) {
 } else if (!HAVE_MODULES) {
   console.log(`  SKIP: ${NODE_MODULES} has no installed packages (a worktree without its node_modules link) — the live-server + chrome legs are not run`);
 } else {
-  const PORT = 3971 + (process.pid % 20), CDP_PORT = 9371 + (process.pid % 20);
+  const [PORT, CDP_PORT] = await freePorts(2); // per-process (scripts/scratch.mjs) — a pid-modulo port was a 1-in-20 collision
   const wt = path.join(os.tmpdir(), `vs-permrules-wt-${process.pid}`);
   const fakeHome = wt + '-home';
   // WORKTREE-ONLY (the #127 rule): never boot a server from the repo dir — its

@@ -10,6 +10,7 @@
 // for years. This test pins the now-single rules.
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
+import { scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const { extractTailIds, nameFromUserRecord, nameFromUserLine, pidLooksClaude } = require('../src/discovery-facts.js');
 const { readJsonlTailIds } = require('../src/session-store.js');
@@ -39,7 +40,7 @@ const tail = Array(5).fill('{"sessionId":"aaa"}').concat(['{"sessionId":"bbb"}',
 ok(JSON.stringify(extractTailIds(tail)) === '["aaa","bbb","aaa"]', 'runs uniq-collapse; re-appearance is a NEW run (last = current writer)');
 const many = Array.from({ length: 12 }, (_, i) => `{"sessionId":"s${i}"}`).join('\n');
 ok(extractTailIds(many).length === 8 && extractTailIds(many)[7] === 's11', 'last-8 cap keeps the newest runs (ssh script semantics)');
-const tmp = '/tmp/vs-df-tail.jsonl';
+const tmp = scratch('df-tail') + '.jsonl';
 fs.writeFileSync(tmp, tail + '\n');
 ok(JSON.stringify(readJsonlTailIds(tmp)) === '["aaa","bbb","aaa"]', 'session-store readJsonlTailIds delegates to the SAME rule');
 fs.rmSync(tmp);

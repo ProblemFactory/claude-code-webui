@@ -770,10 +770,20 @@ console.log('\n§5 the detached child\'s git environment');
 console.log('\n§6 machine-global fixtures + no-verdict honesty');
 {
   const srcOf = (n) => { try { return fs.readFileSync(path.join(REPO, 'scripts', n + '.mjs'), 'utf-8'); } catch { return ''; } };
-  const fast = SUITES.filter((s) => s.tier === 'fast');
-  const offenders = fast.map((s) => ({ s, f: machineGlobalFixtures(srcOf(s.name)) }))
+  // EVERY tier since 2.369.76 — the heavy tier's machine lock serialises HEAVY
+  // RUNS, but the thing that turned 40ad936d red was not a second heavy run:
+  // a verifier agent ran test-chat-paging from its own checkout while the
+  // heavy tier ran it too, and both claimed `/tmp/vs-chatpage-smoke` + :3990
+  // (one's `git worktree remove --force` deleted the other's tree mid-esbuild;
+  // the retry's `worktree add` hit the path the other had just recreated).
+  // A lock cannot cover a process that never takes it; a name nobody shares
+  // can. scripts/scratch.mjs is the shared idiom (per-pid paths, free ports).
+  const scanned = SUITES.filter((s) => s.tier === 'fast' || s.tier === 'heavy');
+  const offenders = scanned.map((s) => ({ s, f: machineGlobalFixtures(srcOf(s.name)) }))
     .filter(({ f }) => f.ports.length || f.paths.length);
-  ok(!offenders.length, `no FAST-tier suite claims a fixed port or /tmp path (${offenders.map(({ s, f }) => `${s.name}: ${[...f.ports, ...f.paths].join(' ')}`).join('; ') || `${fast.length} suites clean`})`);
+  ok(!offenders.length, `no gated suite (either tier) claims a fixed port or /tmp path (${offenders.map(({ s, f }) => `${s.name}: ${[...f.ports, ...f.paths].join(' ')}`).join('; ') || `${scanned.length} suites clean`})`);
+  ok(scanned.some((s) => s.tier === 'heavy') && scanned.some((s) => s.name === 'test-chat-paging'),
+    'the scan covers the heavy tier (the suite that collided is in the scanned set)');
 
   const launcherSrc = srcOf('test-ci-heavy-launch');
   const slice = (/const SLICE = '([^']+)'/.exec(launcherSrc) || [])[1];

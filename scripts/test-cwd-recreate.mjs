@@ -2,11 +2,12 @@ import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { freePort, scratch } from './scratch.mjs';
 const require = createRequire(new URL('../server.js', import.meta.url));
 const repo = process.cwd();
-const PORT = 3998;
-const wt = '/tmp/vs-cwdre-smoke', fakeHome = '/tmp/vs-cwdre-home';
-const MISSING_CWD = '/tmp/vs-cwdre-workdir/deleted-project';
+const PORT = await freePort(); // per-process (scripts/scratch.mjs) — fixed ports collided across concurrent gates
+const wt = scratch('cwdre-smoke'), fakeHome = scratch('cwdre-home');
+const MISSING_CWD = scratch('cwdre-workdir') + '/deleted-project';
 const SID = '77770000-1111-2222-3333-444455556666';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 let failed = 0;
@@ -17,12 +18,12 @@ for (const f of ['src', 'public', 'server.js']) execSync(`rm -rf ${wt}/${f} && c
 fs.symlinkSync(path.join(repo, 'node_modules'), path.join(wt, 'node_modules'));
 fs.mkdirSync(path.join(wt, 'data'), { recursive: true });
 fs.rmSync(fakeHome, { recursive: true, force: true });
-fs.rmSync('/tmp/vs-cwdre-workdir', { recursive: true, force: true }); // the cwd does NOT exist
+fs.rmSync(scratch('cwdre-workdir'), { recursive: true, force: true }); // the cwd does NOT exist
 const projDir = path.join(fakeHome, '.claude', 'projects', MISSING_CWD.replace(/[/._]/g, '-'));
 fs.mkdirSync(projDir, { recursive: true });
 fs.writeFileSync(path.join(projDir, `${SID}.jsonl`), JSON.stringify({ type: 'user', uuid: 'u1', timestamp: new Date().toISOString(), sessionId: SID, cwd: MISSING_CWD, message: { role: 'user', content: [{ type: 'text', text: 'hello from before the deletion' }] } }) + '\n');
 const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), HOME: fakeHome, VIBESPACE_SKIP_AGENT_HOOKS: '1' }, stdio: 'ignore' });
-process.on('exit', () => { try { srv.kill('SIGKILL'); } catch {}; try { execSync(`git worktree remove --force ${wt}`, { stdio: 'ignore' }); } catch {}; try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch {}; try { fs.rmSync('/tmp/vs-cwdre-workdir', { recursive: true, force: true }); } catch {} });
+process.on('exit', () => { try { srv.kill('SIGKILL'); } catch {}; try { execSync(`git worktree remove --force ${wt}`, { stdio: 'ignore' }); } catch {}; try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch {}; try { fs.rmSync(scratch('cwdre-workdir'), { recursive: true, force: true }); } catch {} });
 for (let i = 0; i < 40; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250); } }
 const WebSocket = require('ws');
 const ws = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);

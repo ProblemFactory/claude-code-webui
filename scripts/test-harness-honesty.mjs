@@ -40,6 +40,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { spawn, execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { freePorts } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 let pass = 0, fail = 0;
@@ -694,7 +695,7 @@ if (!CHROME) {
   console.log('  SKIP: no chrome/chromium — the browser leg did not run');
 } else {
   console.log('— headless chrome: a LIVE image_gen item renders as a drawn thumbnail');
-  const PORT = 3971 + (process.pid % 20), CDP_PORT = 9371 + (process.pid % 20);
+  const [PORT, CDP_PORT] = await freePorts(2); // per-process (scripts/scratch.mjs) — a pid-modulo port was a 1-in-20 collision
   const wt = `/tmp/vs-honesty-wt-${process.pid}`;
   const fakeHome = `${wt}-home`;
   const CWD = `${wt}-cwd`;

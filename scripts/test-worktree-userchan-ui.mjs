@@ -30,6 +30,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
 import net from 'node:net';
+import { scratch } from './scratch.mjs';
 
 const require = createRequire(import.meta.url);
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -758,14 +759,15 @@ console.log('— E. the active-sessions payload really reaches the surfaces that
   // shape server.js broadcasts, then asks the REAL renderer / properties
   // window / fork call site what they see — the payload→merge→surface hop,
   // not a hand-built object handed straight to a renderer.
-  const WT = '/tmp/wt-probe-repo/.claude/worktrees/worktree-swift-owl';
+  const ROOT = scratch('wt-probe-repo'); // per-process; interpolated into the BROWSER-evaluated string below (scratch() does not exist there)
+  const WT = ROOT + '/.claude/worktrees/worktree-swift-owl';
   const merged = await ev(`(() => {
     const sb = window.app.sidebar;
     window.__mergeProbe = { sysBak: sb._systemSessions, webBak: sb._webuiSessions, allBak: sb._allSessions };
     // exactly the row activeSessionsPayload() builds for a live isolated session
     sb._systemSessions = [];
     sb._webuiSessions = [{
-      id: 'sess-9', name: 'probe', cwd: '/tmp/wt-probe-repo', host: null, hostName: null,
+      id: 'sess-9', name: 'probe', cwd: ${JSON.stringify(ROOT)}, host: null, hostName: null,
       remoteState: null, createdAt: Date.now(), backend: 'claude', backendSessionId: 'conv-9',
       sessionKey: 'claude:conv-9', claudeSessionId: 'conv-9', sourceKind: null, agentKind: 'primary',
       agentRole: '', agentNickname: '', parentThreadId: null, accountId: null, accountName: null,

@@ -10,6 +10,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { createRequire } from 'node:module';
+import { scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
 let pass = 0, fail = 0;
@@ -435,7 +436,7 @@ const wsCreateSrc = fs.readFileSync(path.join(REPO, 'src/ws-create.js'), 'utf8')
       ctx: {
         activeSessions: new Map(), WS_OPEN: 1, adapterRegistry: { get: () => adapter },
         sessionCounterRef: { value: 0 }, hosts: null, accounts: null, os, fs, path,
-        serverSetting: () => '', SOCKETS_DIR: '/tmp/vs-wtprobe-sockets', BUFFERS_DIR: '/tmp/vs-wtprobe-buffers',
+        serverSetting: () => '', SOCKETS_DIR: scratch('wtprobe-sockets'), BUFFERS_DIR: scratch('wtprobe-buffers'),
         broadcastActiveSessions() { }, broadcastToSession() { },
       },
       agentEnv: () => ({}), crashLoopRef: { map: new Map() }, noConvoRef: { map: new Map() },

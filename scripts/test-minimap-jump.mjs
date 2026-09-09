@@ -16,15 +16,16 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
+import { freePorts, scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
 
-const PORT = 3991, CDP_PORT = 9341;
-const wt = '/tmp/vs-mmjump-smoke';
-const CWD = '/tmp/vs-mmjump-test';
+const [PORT, CDP_PORT] = await freePorts(2); // per-process (scripts/scratch.mjs) — fixed ports collided across concurrent gates
+const wt = scratch('mmjump-smoke');
+const CWD = scratch('mmjump-test');
 const SID = 'e2e00000-0000-4000-8000-000000000002';
 const PROJ = path.join(os.homedir(), '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
 let failed = 0;
@@ -67,12 +68,12 @@ fs.symlinkSync(path.join(repo, 'node_modules'), path.join(wt, 'node_modules'));
 execSync('npx esbuild src/client.js --bundle --outfile=public/bundle.js --format=iife --platform=browser --target=es2020 --loader:.css=css', { cwd: wt, stdio: 'ignore' });
 const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), VIBESPACE_SKIP_AGENT_HOOKS: '1' }, stdio: 'ignore' });
 const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--no-first-run', '--disable-gpu', '--window-size=1400,1000',
-  '--disable-background-timer-throttling', '--user-data-dir=/tmp/vs-mmjump-chrome', 'about:blank'], { stdio: 'ignore' });
+  '--disable-background-timer-throttling', `--user-data-dir=${scratch('mmjump-chrome')}`, 'about:blank'], { stdio: 'ignore' });
 const cleanup = () => {
   try { chrome.kill('SIGKILL'); } catch {}
   try { srv.kill('SIGKILL'); } catch {}
   try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
-  try { fs.rmSync('/tmp/vs-mmjump-chrome', { recursive: true, force: true }); } catch {}
+  try { fs.rmSync(scratch('mmjump-chrome'), { recursive: true, force: true }); } catch {}
   try { fs.rmSync(PROJ, { recursive: true, force: true }); } catch {}
   try { fs.rmSync(CWD, { recursive: true, force: true }); } catch {}
 };

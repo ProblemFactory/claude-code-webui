@@ -34,6 +34,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn, execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
+import { freePorts } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const repo = path.resolve(new URL('..', import.meta.url).pathname);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -190,7 +191,7 @@ const done = () => { console.log(failed ? `\n${failed} FAILED (${passed} passed)
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
 if (!CHROME) { console.log('  SKIP: no chrome/chromium — the browser measurement did not run'); done(); }
 
-const PORT = 3991 + (process.pid % 20), CDP_PORT = 9391 + (process.pid % 20);
+const [PORT, CDP_PORT] = await freePorts(2); // per-process (scripts/scratch.mjs) — a pid-modulo port was a 1-in-20 collision
 const wt = `/tmp/vs-turntruth-${process.pid}`;
 const fakeHome = `${wt}-home`;
 const CWD = `${wt}-cwd`;

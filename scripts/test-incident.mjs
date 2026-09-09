@@ -6,8 +6,9 @@ import { execSync, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { freePort, scratch } from './scratch.mjs';
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
-const PORT = 3993, wt = '/tmp/vs-incident-smoke';
+const PORT = await freePort(), CDP_PORT = await freePort(), wt = scratch('incident-smoke'); // per-process (scripts/scratch.mjs)
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? ' — ' + e : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -105,11 +106,11 @@ if (CHROME) {
   const { spawn: sp } = await import('node:child_process');
   const { createRequire } = await import('node:module');
   const WebSocket = createRequire(import.meta.url)('ws');
-  const chrome = sp(CHROME, ['--headless=new', '--remote-debugging-port=9341', '--no-first-run', '--disable-gpu', '--user-data-dir=/tmp/vs-inc-chrome', 'about:blank'], { stdio: 'ignore' });
-  process.on('exit', () => { try { chrome.kill('SIGKILL'); } catch {}; try { fs.rmSync('/tmp/vs-inc-chrome', { recursive: true, force: true }); } catch {} });
+  const chrome = sp(CHROME, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--no-first-run', '--disable-gpu', `--user-data-dir=${scratch('inc-chrome')}`, 'about:blank'], { stdio: 'ignore' });
+  process.on('exit', () => { try { chrome.kill('SIGKILL'); } catch {}; try { fs.rmSync(scratch('inc-chrome'), { recursive: true, force: true }); } catch {} });
   let target = null;
   for (let i = 0; i < 40 && !target; i++) {
-    try { target = (await (await fetch('http://127.0.0.1:9341/json')).json()).find((x) => x.type === 'page'); } catch { await sleep(250); }
+    try { target = (await (await fetch(`http://127.0.0.1:${CDP_PORT}/json`)).json()).find((x) => x.type === 'page'); } catch { await sleep(250); }
   }
   const cws = new WebSocket(target.webSocketDebuggerUrl, { maxPayload: 64 * 1024 * 1024 });
   await new Promise((r) => cws.on('open', r));

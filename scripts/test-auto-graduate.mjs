@@ -6,6 +6,7 @@
  */
 import { readFileSync } from 'fs';
 import { createRequire } from 'module';
+import { scratch } from './scratch.mjs';
 const require = createRequire(import.meta.url);
 const { HostManager } = require('../src/hosts.js');
 
@@ -37,7 +38,7 @@ const dc = hostsSrc.slice(hostsSrc.indexOf('async _deviceConnect(id)'), hostsSrc
 ok(/dialOnline\?\.\(h\.deviceId\)[\s\S]{0,400}catch \{ \/\* ssh fallback below \*\//.test(dc), 'a dead ws link still falls back to ssh');
 
 // a throwing consumer must not break connects
-const h = new HostManager({ dataDir: '/tmp/vs-grad-' + process.pid });
+const h = new HostManager({ dataDir: scratch('grad') });
 h.onSshConnected = () => { throw new Error('boom'); };
 let threw = false;
 try { h.onSshConnected?.('x'); } catch { threw = true; }
