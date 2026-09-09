@@ -181,7 +181,7 @@ function authorizeUnattendedSpend({
   const L = { ...BUDGET_DEFAULTS, ...(limits || {}) };
   const key = identity && identity.key ? String(identity.key) : null;
   const name = (identity && (identity.name || identity.key)) || null;
-  const counts = spendCounts(state, key || ' none', now);
+  const counts = spendCounts(state, key || '__no-identity__', now);
   const no = (why, detail, retryAfter = 0) => ({ ok: false, why, detail, retryAfter, counts, limits: L, reason, identity: identity || null });
   if (!reason || !(reason in SPEND_REASONS)) {
     // An unnamed producer is the one shape the census exists to prevent; if it

@@ -60,6 +60,12 @@ const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src
   // mirror of its core block (a checkout-less host cannot require src/), and a
   // rule with an import is a rule that cannot be mirrored.
   'src/reading-lag.js',
+  // THE SPEND CEILING (design-account-hardening §4.4c / P9): the decision every
+  // producer of a turn nobody typed passes through, plus `overageState` — the
+  // ONE reader of the overage record, asked by the authorizer, by the pool's
+  // voluntary-target rule and by BOTH quota panels. PURE so the browser can
+  // bundle it and the rule is unit-provable in one place.
+  'src/spend-authorizer.js',
   'src/rewind-ops.js', // claude tombstone / codex thread_rolled_back → ONE 'rewound' meta op; index-stable marking, no I/O
   'src/turn-state.js', // authoritative turn state: the live consumer and the attach reconciliation must decide identically
   'src/opencode-remote.js', // S9 remainder: the OpenCode-serve OP TABLE + runOpencodeOp — one definition the local rung, the agentd op and the shipped ssh script all obey
