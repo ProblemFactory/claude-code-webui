@@ -67,6 +67,13 @@ const FIRE_MAX_IMMEDIATE = 3;                 // per session per window; the TIM
 const FIRE_QUARANTINE_MS = 10 * 60 * 1000;    // an identity that just rejected this session is off the table
 const FIRE_PENDING_MS = 10 * 60 * 1000;       // a fire we never heard back about stops blocking after this
 const REFUSE_LOG_MS = 5 * 60 * 1000;          // one journal line per (reason, identity) — never one per cycle
+// A gate VETO parks the fresh-window edge for this wall (r3). The producer's
+// traffic sets the re-ask rate otherwise: the incident thread's own buffer
+// carries 454 `rate_limits_updated` pushes in under two hours (one per ~16 s),
+// so a standing veto ran the gate ~225×/h — probe floor and pool re-evaluation
+// each time — for the days a watch can stand. On this clock it is 6×/h, and a
+// recovery that has already waited 32 h is not harmed by ≤10 min of pacing.
+const EDGE_HOLD_MS = 10 * 60 * 1000;
 const NO_TARGET_FRESH_MS = 10 * 60 * 1000;    // how long the pool's "nowhere to go" verdict may be quoted for
 
 // ── WHAT THE CONVERSATION IS TOLD, AND WHEN (round 2 of the same incident) ──
@@ -234,7 +241,18 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
           // window handed the loop a fresh reading-fire every hour, which is
           // most of what round 1 measured. Bounded by the armed set: once the
           // wait is gone (fired / disarmed / watch expired) so is the memory.
-          || (!!r.edgeSpent && armed.has(k));
+          || (!!r.edgeSpent && armed.has(k))
+          // …AND SO DOES A GATE HOLD (r3). Same rule, second instance: this
+          // predicate decides what may still REFUSE, so every field that can
+          // refuse owes it a clause — a fact the reader consults but the
+          // pruner does not know about is deleted on the next save, and
+          // `save()` runs on every arm, every fire and every refusal.
+          // MEASURED before this clause existed: the 10-minute hold vanished
+          // at each FIRE_WINDOW_MS boundary, so a standing veto asked the
+          // gate 27 times over four simulated hours instead of 25 — small
+          // here only because the hold is short; the rule is what matters.
+          // Bounded twice, like edgeSpent: by its OWN expiry and by the wait.
+          || (!!(r.edgeHeld && r.edgeHeld.until > now) && armed.has(k));
         if (!live) fires.delete(k);
       }
       writeJsonAtomic(file, { armed: Object.fromEntries(armed), fires: Object.fromEntries(fires) });
@@ -616,29 +634,49 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     // there is the hourly cap, driven in test-auto-resume 12(d″)). The TIMED
     // path is untouched: it is paced by real reset times, and it is what still
     // delivers when the window genuinely rolls.
+    const wall = wallKeyOf(a);
     const r0 = fires.get(id);
-    if (r0 && r0.edgeSpent && r0.edgeSpent === wallKeyOf(a)) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };
-    const fired = fireNow(id, 'the usage window reopened', { via: 'reading', wall: wallKeyOf(a) });
-    // SAID AFTER THE FACT, and only when it happened (r2). Round 1 logged
-    // "continuing now" BEFORE attempting, once per READING — measured 492
-    // lines for 12 actual continues (41:1) — burying the very channel the
-    // incident was diagnosed from ("ZERO [auto-resume] lines for that
-    // session"). A refused attempt is journalled by logRefusal, which has its
-    // own per-(reason,identity) throttle; a refusal by THIS rung is reported
-    // to the caller as `already-refuted` and throttled per verdict there.
-    const head = `[auto-resume] ${id}: ${a.watch ? 'watched' : 'armed'} window reopened (${why})`;
-    if (fired) log(`${head} — continued now`);
-    else {
-      // NOT a continue. Say so, and say it at most once per REFUSE_LOG_MS —
-      // the breaker's own logRefusal has already named the reason (with its
-      // per-(reason, identity) throttle) whenever the refusal came from there.
-      const r = fireRec(id, Date.now());
-      const now2 = Date.now();
-      if (!r.edgeSaidAt || now2 - r.edgeSaidAt > REFUSE_LOG_MS) {
-        r.edgeSaidAt = now2;
-        log(`${head} but no continue was delivered — the breaker or the pre-fire gate refused`);
-      }
+    if (r0 && r0.edgeSpent && r0.edgeSpent === wall) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };
+    // …AND A GATE VETO HOLDS THIS WALL FOR A BOUNDED TIME (r3). The shot is
+    // spent at the DELIVERY, so a veto spends nothing — which in round 2 left
+    // NOTHING at all: the guard above was un-stamped, so the next push re-
+    // entered, and the production gate is `async` (server.js → the `async`
+    // beforeAutoResumeFire), i.e. ALWAYS a Promise. Measured through this
+    // module's public seam with the production gate shape (`beforeFire: async
+    // () => false`), one armed watch, 100 healthy readings: 100 gate runs, 0
+    // continues — one full `probeQuotaForKey` + `maybePoolAutoSwitch` per
+    // push, for the LIFE of a watch (six days in the incident), and the veto
+    // branch that takes `scheduleWallProbe` changes no state, so the loop is
+    // stable. A polled path may not carry an unbounded side effect (the
+    // new-member-wake r2 rule); the gate is an AUTHORITY we asked and it said
+    // no, so we ask it again on a clock instead of on their traffic.
+    // HELD, never SPENT: the gate's "still blocked" is about NOW, and the
+    // whole point of this edge is a window that opens EARLY — burning the
+    // wall on a veto would turn one transient disagreement into a permanent
+    // refusal for a wait that has nowhere else to go. The hold is bounded and
+    // per WALL, so a different window is still a different question, and
+    // proof of work drops the whole record anyway.
+    if (r0 && r0.edgeHeld && r0.edgeHeld.wall === wall && Date.now() < r0.edgeHeld.until) {
+      return { ...v, open: false, why: 'gate-held', wallOpen: true, fired: false };
     }
+    // THE LINE THAT ANNOUNCES A CONTINUE IS WRITTEN BY THE CODE THAT DELIVERS
+    // ONE (r3). Round 2 moved it after the attempt and read `attemptFire`'s
+    // return value — but that value is `true` for a gate that is merely IN
+    // FLIGHT (the async branch returns before `deliver()` has run), so on the
+    // production wiring every vetoed reading still journalled a continue that
+    // never happened: 100 lines for 0 continues in the measurement above,
+    // re-creating round 1's 41:1 flood in the one channel this incident was
+    // diagnosed from ("ZERO [auto-resume] lines for that session"). Making the
+    // caller's else-branch reachable was not the fix — the caller CANNOT know:
+    // the outcome is decided one microtask later. So the reading edge hands
+    // its own head to `fireNow` as the fire's `why` and says nothing itself;
+    // `deliver()` prints it, once, immediately after `noteFired` stamps the
+    // shot. One continue, one line, and they are the same event.
+    const head = `${a.watch ? 'watched' : 'armed'} window reopened (${why})`;
+    const fired = fireNow(id, head, { via: 'reading', wall });
+    // `fired` is `attemptFire`'s contract — delivered OR a gate in flight — and
+    // nothing may journal a spend from it; it is returned for the caller's
+    // control flow only.
     return { ...v, fired };
   }
 
@@ -732,12 +770,41 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     let gate = true;
     try { gate = beforeFire ? beforeFire(id, session) : true; } catch { gate = true; }
     if (gate && typeof gate.then === 'function') {
-      gate.then((g2) => { if (g2 !== false) deliver(); }).catch(() => deliver()).finally(() => { session._arFiring = false; });
+      gate.then((g2) => { if (g2 === false) noteGateRefusal(id, kind, origin); else deliver(); })
+        .catch(() => deliver()).finally(() => { session._arFiring = false; });
       return true;
     }
+    if (gate === false) noteGateRefusal(id, kind, origin);
     const done = gate === false ? false : deliver();
     session._arFiring = false;
     return done;
+  }
+
+  /** THE PRE-FIRE GATE SAID NO — recorded HERE because here is the only place
+   *  that knows (r3). `attemptFire` reports `true` for a gate that is merely in
+   *  flight, and the production gate is always a Promise, so every caller that
+   *  read the return value as an outcome was reporting one it did not have.
+   *  Two things happen, both at the point of knowledge:
+   *   · the JOURNAL gets one line per REFUSE_LOG_MS. The gate veto used to be
+   *     the one refusal nothing said anything about — logRefusal covers the
+   *     breaker's reasons, and this rung is not the breaker.
+   *   · a READING-driven attempt HOLDS its wall (see noteQuotaReading). Not
+   *     spends: the reading may well be right and the gate merely early. */
+  function noteGateRefusal(id, kind, origin) {
+    const now = Date.now();
+    const r = fireRec(id, now);
+    let changed = false;
+    if (origin && origin.via === 'reading' && origin.wall) { r.edgeHeld = { wall: origin.wall, until: now + EDGE_HOLD_MS }; changed = true; }
+    if (!r.gateSaidAt || now - r.gateSaidAt > REFUSE_LOG_MS) {
+      r.gateSaidAt = now; changed = true;
+      log(`[auto-resume] ${id}: the pre-fire gate refused ${kind === 'now' ? 'an immediate' : 'a timed'} continue — quota still reads blocked`);
+    }
+    // …AND THE DISK WRITE IS PART OF THE SIDE EFFECT THIS FIX IS ABOUT. The
+    // paths with no hold (the timed tick, the pool-switch/wake fireNow) reach
+    // here on every attempt, so an unconditional save() would be the same
+    // unbounded-effect-on-a-polled-path shape one layer down — logRefusal
+    // already saves only inside its throttle, for the same reason.
+    if (changed) save();
   }
 
   /** The in-chat line that follows a delivered continue (`note` = the PURE
@@ -826,6 +893,6 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
 
 module.exports = {
   create, CONTINUE_PROMPT, TICK_MS, GRACE_MS, MAX_WAIT_MS,
-  FIRE_WINDOW_MS, FIRE_BACKOFF_MS, FIRE_MAX_IMMEDIATE, FIRE_QUARANTINE_MS, NO_TARGET_FRESH_MS,
+  FIRE_WINDOW_MS, FIRE_BACKOFF_MS, FIRE_MAX_IMMEDIATE, FIRE_QUARANTINE_MS, NO_TARGET_FRESH_MS, EDGE_HOLD_MS,
   refusalNoticeFor, continueNoticeFor, // PURE: what the conversation is told, and when
 };

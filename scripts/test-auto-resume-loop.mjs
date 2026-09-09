@@ -1054,10 +1054,16 @@ if (!probe) {
   // the product module with ONLY the edge's single-shot guard removed — round
   // 1's code, reproduced from source, in the wiring it actually ships in.
   const src = read('src/server/auto-resume.js');
-  const NEEDLE = "    const r0 = fires.get(id);\n    if (r0 && r0.edgeSpent && r0.edgeSpent === wallKeyOf(a)) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };";
-  const mutated = src.replace(NEEDLE, '    // PRE-FIX: no single-shot guard')
-    .replace(/require\('\.\.\//g, `require('${path.join(REPO, 'src')}/`);
-  ok('control setup: the guard is one identifiable block and the copy resolves its own requires', mutated !== src && !/require\('\.\.\//.test(mutated));
+  const NEEDLE = "    if (r0 && r0.edgeSpent && r0.edgeSpent === wall) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };";
+  const rewired = src.replace(/require\('\.\.\//g, `require('${path.join(REPO, 'src')}/`);
+  const mutated = rewired.replace(NEEDLE, '    // PRE-FIX: no single-shot guard');
+  // THE SETUP ASSERT MUST SEE THE GUARD REPLACEMENT ITSELF. `mutated !== src`
+  // was satisfied by the require-rewrite alone, so when this needle drifted
+  // (r3 renamed `wallKeyOf(a)` to the hoisted `wall`) the "control" silently
+  // became a copy of the SHIPPED module and only the outcome assert noticed —
+  // an unpatched control is not a control, and its own setup line must say so.
+  ok('control setup: the guard is one identifiable block and the copy resolves its own requires',
+    mutated !== rewired && !/require\('\.\.\//.test(mutated) && !mutated.includes(NEEDLE));
   const mdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-aredge-')); cleanup.push(mdir);
   const mpath = path.join(mdir, 'auto-resume-preedge.cjs');
   fs.writeFileSync(mpath, mutated);
@@ -1120,10 +1126,38 @@ if (!probe) {
   // dropped anywhere between noteQuotaReading and noteFired the guard would
   // never arm and the loop would be back, silently.
   ok('WIRING: a reading-driven fire carries its WALL to the record, and the shot is stamped AT THE DELIVERY (not at the rejection report — a caller that never reports one may not re-open the spend)',
-    /fireNow\(id, 'the usage window reopened', \{ via: 'reading', wall: wallKeyOf\(a\) \}\)/.test(ar2src)
+    /const fired = fireNow\(id, head, \{ via: 'reading', wall \}\);/.test(ar2src)
     && /function fireNow\(id, why, \{ cause = null, via = null, wall = null \} = \{\}\)[\s\S]{0,400}attemptFire\(id, session, a, 'now', why, cause, via \? \{ via, wall \} : null\)/.test(ar2src)
     && /function noteFired\(id, key, kind, now, origin = null\) \{[\s\S]{0,1400}if \(origin && origin\.via === 'reading' && origin\.wall\) r\.edgeSpent = origin\.wall;/.test(ar2src)
     && !/if \(r\.last\.via === 'reading'/.test(ar2src));
+  // ── round 3: the async gate cannot be read as an outcome ────────────────
+  // `attemptFire` returns `true` for a gate that is merely IN FLIGHT, and the
+  // production gate is ALWAYS a Promise (server.js → `async
+  // beforeAutoResumeFire`). So the reading edge may not journal a continue from
+  // that return value, and a VETO must leave something behind or every push
+  // re-enters the gate for the life of the watch.
+  ok('WIRING (r3): the reading edge hands its own head to the fire and journals NOTHING itself — the line is written by the code that delivers',
+    /const head = `\$\{a\.watch \? 'watched' : 'armed'\} window reopened \(\$\{why\}\)`;\s*\n\s*const fired = fireNow\(id, head, \{ via: 'reading', wall \}\);/.test(ar2src)
+    && !/if \(fired\) log\(/.test(ar2src));
+  ok('WIRING (r3): a gate VETO is recorded where it is known — the async branch, the sync branch, and it holds the reading edge per WALL',
+    /gate\.then\(\(g2\) => \{ if \(g2 === false\) noteGateRefusal\(id, kind, origin\); else deliver\(\); \}\)/.test(ar2src)
+    && /if \(gate === false\) noteGateRefusal\(id, kind, origin\);/.test(ar2src)
+    && /function noteGateRefusal\(id, kind, origin\) \{[\s\S]{0,500}if \(origin && origin\.via === 'reading' && origin\.wall\) \{ r\.edgeHeld = \{ wall: origin\.wall, until: now \+ EDGE_HOLD_MS \}; changed = true; \}/.test(ar2src)
+    // …and the disk write is conditional: the no-hold paths (timed tick,
+    // pool-switch/wake fireNow) reach this on every attempt, so an
+    // unconditional save() is the same unbounded-effect-on-a-polled-path
+    // shape one layer down.
+    && /if \(changed\) save\(\);/.test(ar2src)
+    && /if \(r0 && r0\.edgeHeld && r0\.edgeHeld\.wall === wall && Date\.now\(\) < r0\.edgeHeld\.until\)/.test(ar2src));
+  // …and the pruner knows the hold can still refuse. `save()` deletes breaker
+  // records that "can no longer refuse anything" and runs on every arm, fire
+  // and refusal, so a field only the READER knows about is dropped at the next
+  // FIRE_WINDOW_MS boundary — measured, 27 gate asks per four hours instead of
+  // 24, before this clause existed. Every refusing field owes this predicate a
+  // clause; `edgeSpent` (r2) is the same rule's first instance.
+  ok('WIRING (r3): every field that can REFUSE is in the save() liveness predicate, or the pruner deletes it',
+    /\|\| \(!!r\.edgeSpent && armed\.has\(k\)\)/.test(ar2src)
+    && /\|\| \(!!\(r\.edgeHeld && r\.edgeHeld\.until > now\) && armed\.has\(k\)\);/.test(ar2src));
   ok('WIRING: the continue card is chosen from the ARM + whether the gate moved us + the caller\'s named CAUSE, in one place', /const moved = !!key && !!key2 && key2 !== key;[\s\S]{0,600}const note = continueNoticeFor\(\{ kind, armReason: a2\.reason, label: label2, moved, cause \}\);/.test(ar2src));
   // 'all-logins-expired' (2026-09-07) is the same class of fact — nowhere for
   // this conversation to go — so the breaker must hear it too, or it re-fires

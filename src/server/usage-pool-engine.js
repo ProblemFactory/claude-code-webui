@@ -1282,14 +1282,21 @@ function noteQuotaReadingForResume(session, snapshot, why) {
     const now = Date.now();
     if (prev && prev.why === v.why && now - prev.at < READING_EDGE_LOG_MS) return;
     _readingEdgeSaid.set(id, { why: v.why, at: now });
-    // `already-refuted` is NOT "the wall is still up" — the window really does
-    // read open, and we are declining to spend on it again because the CLI
-    // answered our last reading-driven continue with another limit rejection.
-    // Saying it the other way would print a false fact into the one channel
-    // this incident was diagnosed from.
+    // TWO VERDICTS CARRY `wallOpen: true` AND EACH NEEDS ITS OWN SENTENCE —
+    // the generic line says the wall is still up, and for these two that is a
+    // false fact printed into the one channel this incident was diagnosed from.
+    //   already-refuted  the window really does read open; we decline to spend
+    //                    again because the CLI answered our last reading-driven
+    //                    continue with another limit rejection (r2)
+    //   gate-held        the window reads open, the PRE-FIRE GATE disagreed,
+    //                    and we are pacing the re-ask rather than re-running it
+    //                    on the producer's traffic (r3). The wait is intact and
+    //                    it will be asked again — say that, not "still limited".
     console.log(v.why === 'already-refuted'
       ? `[auto-resume] ${id}: the window reads open but a continue onto this wall was already refused — waiting for the reset`
-      : `[auto-resume] ${id}: reading did not reopen the wait (${v.why})`);
+      : v.why === 'gate-held'
+        ? `[auto-resume] ${id}: the window reads open but the pre-fire gate still says blocked — re-asking on a timer, the wait stands`
+        : `[auto-resume] ${id}: reading did not reopen the wait (${v.why})`);
   } catch (e) { console.warn('[auto-resume] reading edge failed:', e.message); }
 }
 

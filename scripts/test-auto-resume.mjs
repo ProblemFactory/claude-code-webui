@@ -564,7 +564,7 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
 // in one worktree, and a dirty tree is what the release gate REFUSES on.
 const AR_PATH = path.join(REPO, 'src/server/auto-resume.js');
 const AR_SRC0 = read('src/server/auto-resume.js');
-const { FIRE_MAX_IMMEDIATE } = require(AR_PATH);
+const { FIRE_MAX_IMMEDIATE, EDGE_HOLD_MS } = require(AR_PATH);
 const arMutants = [];
 process.on('exit', () => { for (const f of arMutants) { try { fs.unlinkSync(f); } catch { } } });
 try {
@@ -581,11 +581,25 @@ let arMutN = 0;
 // fireNow); EDIT_OPTIMISTIC_LOG is the journal half (the line is written
 // before the attempt, so it describes a continue that mostly never happened).
 const EDIT_NO_EDGE_GUARD = [
-  "    const r0 = fires.get(id);\n    if (r0 && r0.edgeSpent && r0.edgeSpent === wallKeyOf(a)) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };",
+  "    if (r0 && r0.edgeSpent && r0.edgeSpent === wall) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };",
   '    // PRE-FIX: no edge-spent guard — every healthy reading re-enters fireNow'];
+// THE FIRE CALL, verbatim, as the anchor both journal controls rewrite around.
+const EDGE_FIRE_CALL = "    const head = `${a.watch ? 'watched' : 'armed'} window reopened (${why})`;\n    const fired = fireNow(id, head, { via: 'reading', wall });";
 const EDIT_OPTIMISTIC_LOG = [
-  '    if (fired) log(`${head} — continued now`);',
-  '    log(`${head} — continuing now`); if (fired) { /* PRE-FIX: said before the attempt, once per reading */ }'];
+  EDGE_FIRE_CALL,
+  "    const head = `${a.watch ? 'watched' : 'armed'} window reopened (${why})`;\n    log(`[auto-resume] ${id}: ${head} — continuing now`); // PRE-FIX (round 1): said before the attempt, once per reading\n    const fired = fireNow(id, head, { via: 'reading', wall });"];
+// ── THE ROUND-3 SHAPES ─────────────────────────────────────────────────────
+// EDIT_R2_JOURNAL is round 2 as SHIPPED: the success line is written by the
+// CALLER from `attemptFire`'s return value — which is `true` for a gate that
+// is merely IN FLIGHT, and the production gate is always a Promise
+// (server.js → `async function beforeAutoResumeFire`). EDIT_NO_EDGE_HOLD is
+// the other half: a veto stamped nothing, so the next push re-entered the gate.
+const EDIT_R2_JOURNAL = [
+  EDGE_FIRE_CALL,
+  "    const head = `[auto-resume] ${id}: ${a.watch ? 'watched' : 'armed'} window reopened (${why})`;\n    const fired = fireNow(id, 'the usage window reopened', { via: 'reading', wall });\n    if (fired) log(`${head} — continued now`); // ROUND 2: read from a return value that does not know yet"];
+const EDIT_NO_EDGE_HOLD = [
+  "    if (r0 && r0.edgeHeld && r0.edgeHeld.wall === wall && Date.now() < r0.edgeHeld.until) {\n      return { ...v, open: false, why: 'gate-held', wallOpen: true, fired: false };\n    }",
+  '    // PRE-FIX (r2): a gate veto stamps nothing, so the next push re-enters the gate'];
 // …and the THIRD shape: this fix's own DRAFT, which stamped the reading's one
 // shot when the CLI's rejection was REPORTED instead of when the continue was
 // DELIVERED. It is indistinguishable from the shipped rule while the caller
@@ -615,19 +629,35 @@ function mutantAr(edits) {
  *  `rotateWall` re-arms onto a DIFFERENT wall each time (model-scoped weekly
  *  caps: one identity, several windows), which is the shape the per-wall guard
  *  deliberately says nothing about — there the loop breaker is the belt. */
-function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, reportOutcome = true } = {}) {
+/** `gate` is the PRE-FIRE GATE, and its SHAPE is part of the finding (r3):
+ *  production hands an `async` function (server.js → beforeAutoResumeFire), so
+ *  `beforeFire` always returns a Promise and `attemptFire` returns before the
+ *  outcome exists. `null` = no gate at all, which is what every round-2 leg
+ *  ran with — and why the synchronous path was the only one they measured.
+ *  `veto`/`allow` are the async production shape; a function is called with
+ *  (readingIndex) and may change its mind. */
+function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, reportOutcome = true, gate = null } = {}) {
   const mod = arModule || require(AR_PATH);
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-aredge-'));
   const sessions = new Map(), sent = [], journal = [];
   const realNow = Date.now;
   let NOW = realNow();
   const SID = 'sess-13-1788764799305';
+  let gateCalls = 0, readIdx = 0;
+  // `veto-sync` is the same veto through the SYNCHRONOUS branch: production
+  // never takes it (server.js hands an `async` function), but the branch
+  // exists and a source pin is not behaviour — a veto has to hold the wall on
+  // BOTH paths or the one nobody exercises drifts.
+  const gateFn = gate === null ? null
+    : gate === 'veto-sync' ? () => { gateCalls++; return false; }
+      : async () => { gateCalls++; return gate === 'veto' ? false : gate === 'allow' ? true : !!gate(readIdx); };
   const ar = mod.create({
     dataDir: dir, activeSessions: sessions, serverSetting: () => true,
     sendToSession: () => true, notify: () => { }, broadcast: () => { },
     notifyDelayMs: 1e12,                                   // the delayed announcement must never fire on a fake clock
     resumeVerb: () => ({ form: 'turn-start', deliver: () => { sent.push(NOW); return true; } }),
     fireIdentity: () => ({ key: 'codex:__global__', name: 'codex login' }),
+    ...(gateFn ? { beforeFire: gateFn } : {}),
     log: (l) => journal.push(l),
   });
   sessions.set(SID, { backend: 'codex', mode: 'chat', _webuiId: SID, _autoResume: true, pty: {}, _isStreaming: !!streaming });
@@ -641,17 +671,24 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
     ? { limitId: 'codex', scopedWeekly: [{ name: 'cap-' + wallN, utilization: 0, resetsAt: Math.floor(NOW / 1000) + 700000 }] }
     : { limitId: 'codex', sevenDay: { utilization: 0, resetsAt: Math.floor(NOW / 1000) + 700000 } });
   return {
-    ar, sent, journal,
-    run({ hours = 4, stepMs = 30e3 } = {}) {
+    ar, sent, journal, sid: SID, sessions, healthy, clock: { get: () => NOW, add: (ms) => { NOW += ms; }, install: () => { Date.now = () => NOW; }, restore: () => { Date.now = realNow; } },
+    gateCalls: () => gateCalls,
+    /** ASYNC since r3: with the production gate shape the continue is delivered
+     *  a microtask AFTER the reading returns, so a synchronous loop would score
+     *  every world as "nothing was delivered". The drain is unconditional — the
+     *  no-gate legs behave identically through it, and a measurement rig that
+     *  only works for one shape is how the async path went unmeasured. */
+    async run({ hours = 4, stepMs = 30e3 } = {}) {
       Date.now = () => NOW;
       try {
         arm();
         const perHour = []; let base = 0, readings = 0, lastWhy = null, lastWallOpen = false;
         for (let h = 0; h < hours; h++) {
           for (let i = 0; i < 3600e3 / stepMs; i++) {
-            NOW += stepMs; readings++;
+            NOW += stepMs; readings++; readIdx = readings;
             const before = sent.length;
             const v = ar.noteQuotaReading(SID, healthy(), 'fresh non-limited codex reading');
+            await new Promise((r) => setImmediate(r));   // let an in-flight gate settle
             lastWhy = v.why; lastWallOpen = !!v.wallOpen;
             if (sent.length > before) {
               // the CLI rejected it again. `reportOutcome:false` is the SAME
@@ -667,9 +704,13 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
           perHour.push(sent.length - base); base = sent.length;
         }
         return {
-          perHour, total: sent.length, readings, lastWhy, lastWallOpen,
+          perHour, total: sent.length, readings, lastWhy, lastWallOpen, gateCalls,
           armedAtEnd: ar.statusFor(SID).armed === true,
           reopenLines: journal.filter((l) => /window reopened/.test(l)).length,
+          // the CLAIM "a continue happened", counted on its own: round 2 wrote
+          // it from a return value that could not know yet
+          continuedLines: journal.filter((l) => /— continued (now|immediately)$/.test(l)).length,
+          gateRefusedLines: journal.filter((l) => /the pre-fire gate refused/.test(l)).length,
         };
       } finally { Date.now = realNow; }
     },
@@ -819,6 +860,16 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
       w.ar.tick(Date.now()); await settle(120);
     }
     ok('…and the continue is DELIVERED, exactly once, through the codex turn-start verb', w.fired.length === 1 && w.fired[0].backend === 'codex' && w.fired[0].t === CONTINUE_PROMPT, JSON.stringify(w.fired));
+    // …ON THE REAL WIRING (r3). This leg runs the REAL engine's
+    // `beforeAutoResumeFire`, which is `async`, so `attemptFire` returns before
+    // the outcome exists — round 2 wrote its line from that return value and
+    // measured 2 claims for this one delivery. A claim about a billed turn is
+    // written by the code that billed it, so the ratio here is exactly 1:1.
+    {
+      const claims = w.journal.filter((l) => /— continued (now|immediately|automatically)$/.test(l)).length;
+      ok('…and the journal claims exactly as many continues as were delivered (the async gate cannot be read as an outcome)',
+        claims === w.fired.length, JSON.stringify({ claims, delivered: w.fired.length, lines: w.journal.filter((l) => /continued/.test(l)) }));
+    }
     ok('…and the conversation was TOLD, in words that promise no clock it cannot keep', w.notes.some((t2) => /不会按时间自动续跑/.test(t2)));
     try { fs.rmSync(w.root, { recursive: true, force: true }); } catch { }
   }
@@ -870,7 +921,7 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
   // path reports through `noteFireOutcome(id, false)` before re-arming.
   {
     const W = mkEdgeWorld();
-    const r = W.run({ hours: 4 });
+    const r = await W.run({ hours: 4 });
     ok('the edge is SINGLE-SHOT per wall: four simulated hours of healthy readings against a wall the CLI keeps rejecting spend exactly ONE billed continue',
       r.total === 1, JSON.stringify(r.perHour));
     ok('…and the wait is still standing (bounding the spend must not silently drop the promise — the timed path still owns the reset)',
@@ -894,7 +945,7 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
     ok('control setup: the PRE-FIX auto-resume copy applied its one replacement', mut.hits === 1, JSON.stringify({ hits: mut.hits, err: mut.err }));
     if (mut.mod) {
       const W = mkEdgeWorld({ arModule: mut.mod });
-      const r = W.run({ hours: 4 });
+      const r = await W.run({ hours: 4 });
       ok('NEGATIVE CONTROL (pre-fix): the identical world burns FIRE_MAX_IMMEDIATE billed continues every hour, forever — the loop this branch shipped',
         r.total >= 4 * FIRE_MAX_IMMEDIATE && r.perHour.every((n) => n === FIRE_MAX_IMMEDIATE) && r.armedAtEnd === true,
         JSON.stringify({ perHour: r.perHour, total: r.total }));
@@ -912,7 +963,7 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
     ok('control setup: the ROUND-1 auto-resume copy applied both replacements', mut.hits === 2, JSON.stringify({ hits: mut.hits, err: mut.err }));
     if (mut.mod) {
       const W = mkEdgeWorld({ arModule: mut.mod });
-      const r = W.run({ hours: 4 });
+      const r = await W.run({ hours: 4 });
       ok('NEGATIVE CONTROL (round 1): "continuing now" is printed once per READING — 40:1 against the continues that actually happened',
         r.reopenLines >= 30 * r.total && r.reopenLines >= r.readings,
         JSON.stringify({ reopenLines: r.reopenLines, continues: r.total, readings: r.readings }));
@@ -929,7 +980,7 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
   // THIS module.
   {
     const W = mkEdgeWorld({ reportOutcome: false });
-    const r = W.run({ hours: 4 });
+    const r = await W.run({ hours: 4 });
     ok('a caller that re-arms the same wall WITHOUT ever reporting the outcome still gets exactly ONE billed continue',
       r.total === 1 && r.armedAtEnd === true, JSON.stringify({ perHour: r.perHour, why: r.lastWhy }));
     W.cleanup();
@@ -944,12 +995,12 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
       mut.hits === 2, JSON.stringify({ hits: mut.hits, err: mut.err }));
     if (mut.mod) {
       const A = mkEdgeWorld({ arModule: mut.mod, reportOutcome: true });
-      const ra = A.run({ hours: 4 });
+      const ra = await A.run({ hours: 4 });
       ok('…and it is INDISTINGUISHABLE while every outcome is reported (so the difference is the seam, not the arithmetic)',
         ra.total === 1, JSON.stringify(ra.perHour));
       A.cleanup();
       const B = mkEdgeWorld({ arModule: mut.mod, reportOutcome: false });
-      const rb = B.run({ hours: 4 });
+      const rb = await B.run({ hours: 4 });
       ok('NEGATIVE CONTROL (draft): with the report missing it is round 1 again — FIRE_MAX_IMMEDIATE billed continues every hour, forever',
         rb.total >= 4 * FIRE_MAX_IMMEDIATE && rb.perHour.every((n) => n === FIRE_MAX_IMMEDIATE),
         JSON.stringify({ perHour: rb.perHour, total: rb.total }));
@@ -971,11 +1022,175 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
     ok('the immediate-continue budget is a SPEND PROMISE, pinned to a number a human agreed to',
       FIRE_MAX_IMMEDIATE >= 1 && FIRE_MAX_IMMEDIATE <= 5, 'FIRE_MAX_IMMEDIATE=' + FIRE_MAX_IMMEDIATE);
     const W = mkEdgeWorld({ rotateWall: true });
-    const r = W.run({ hours: 3 });
+    const r = await W.run({ hours: 3 });
     ok('a session re-armed onto a DIFFERENT wall each time is bounded by the hourly cap, not by the edge',
       r.perHour.every((n) => n <= FIRE_MAX_IMMEDIATE) && r.total <= 3 * FIRE_MAX_IMMEDIATE, JSON.stringify(r.perHour));
     ok('…and the cap is really the thing doing it (the budget is spent, every hour)',
       r.perHour.filter((n) => n === FIRE_MAX_IMMEDIATE).length >= 2, JSON.stringify(r.perHour));
+    W.cleanup();
+  }
+  // ── (d⁵) THE PRODUCTION GATE IS ASYNC, AND ROUND 2 READ ITS RETURN VALUE ──
+  // Everything above ran with NO `beforeFire` at all, so `attemptFire` took its
+  // SYNCHRONOUS path and its boolean really did mean "delivered". Production
+  // never does that: server.js hands `beforeAutoResumeFire`, which is `async`,
+  // so the gate is ALWAYS a Promise and `attemptFire` returns `true` — before
+  // `deliver()` has run — for a gate that is merely IN FLIGHT.
+  // Two consequences, both measured against round 2's committed code below:
+  //   · the journal claimed a continue per READING that never happened, which
+  //     is round 1's 41:1 flood back in the one channel this incident was
+  //     diagnosed from
+  //   · `edgeSpent` is stamped inside `deliver()`, so a VETO left the
+  //     single-shot guard un-stamped and every later push re-entered the gate —
+  //     a full `probeQuotaForKey` + `maybePoolAutoSwitch` per push, for the
+  //     life of a watch, with nothing ever changing state
+  {
+    ok('the gate-veto hold is a PACING promise, pinned to a number a human agreed to',
+      EDGE_HOLD_MS >= 60e3 && EDGE_HOLD_MS <= 30 * 60e3, 'EDGE_HOLD_MS=' + EDGE_HOLD_MS);
+    const W = mkEdgeWorld({ gate: 'veto' });
+    const r = await W.run({ hours: 4 });
+    ok('a VETOING production-shaped gate spends nothing…', r.total === 0, JSON.stringify({ perHour: r.perHour, why: r.lastWhy }));
+    ok('…and claims nothing: NOT ONE "continued" line for zero continues',
+      r.continuedLines === 0, JSON.stringify({ continued: r.continuedLines, readings: r.readings }));
+    // 4 h at 30 s = 480 readings; the hold lets exactly one ask per EDGE_HOLD_MS
+    const expectAsks = Math.ceil((4 * 3600e3) / EDGE_HOLD_MS) + 1;
+    ok('…and the gate is asked on OUR clock, not on the producer\'s traffic',
+      r.gateCalls <= expectAsks, JSON.stringify({ gateCalls: r.gateCalls, readings: r.readings, cap: expectAsks }));
+    ok('…each ask says so ONCE (a refusal nothing else reports must still be reportable)',
+      r.gateRefusedLines >= 1 && r.gateRefusedLines <= r.gateCalls, JSON.stringify({ said: r.gateRefusedLines, asks: r.gateCalls }));
+    ok('…and the promise is INTACT — the wait stands and the refusal is named, never "the wall is back up"',
+      r.armedAtEnd === true && r.lastWhy === 'gate-held' && r.lastWallOpen === true, JSON.stringify({ armed: r.armedAtEnd, why: r.lastWhy }));
+    W.cleanup();
+  }
+  // …and the SYNCHRONOUS veto branch holds the wall too. A rule that lives on
+  // two paths must live on both of them; the async path is the one production
+  // takes, which is exactly why the other one is where a drift would sit
+  // unmeasured behind a source pin.
+  {
+    const W = mkEdgeWorld({ gate: 'veto-sync' });
+    const r = await W.run({ hours: 4 });
+    ok('a SYNCHRONOUS veto holds the wall on its own path (same rule, both branches)',
+      r.total === 0 && r.continuedLines === 0 && r.gateCalls === (4 * 3600e3) / EDGE_HOLD_MS && r.lastWhy === 'gate-held',
+      JSON.stringify({ gateCalls: r.gateCalls, why: r.lastWhy, continued: r.continuedLines }));
+    W.cleanup();
+  }
+  // POSITIVE CONTROL: the same async shape that ALLOWS still delivers exactly
+  // one continue and journals exactly one line for it. The hold must be a
+  // DELAY on a disagreeing gate, never a switch that turns the edge off.
+  {
+    const W = mkEdgeWorld({ gate: 'allow' });
+    const r = await W.run({ hours: 4 });
+    ok('an ALLOWING production-shaped gate still continues the session exactly once',
+      r.total === 1 && r.lastWhy === 'already-refuted', JSON.stringify({ perHour: r.perHour, gateCalls: r.gateCalls, why: r.lastWhy }));
+    ok('…and the journal carries exactly ONE claim, written by the code that delivered it',
+      r.continuedLines === 1, JSON.stringify({ continued: r.continuedLines, delivered: r.total }));
+    W.cleanup();
+  }
+  // …and a gate that CHANGES ITS MIND continues the session: the hold delays
+  // the re-ask by EDGE_HOLD_MS, it does not retire the wall. (Vetoes for the
+  // first hour, then allows — the shape of a window that really did reopen
+  // while the verdict had not caught up yet.)
+  {
+    const W = mkEdgeWorld({ gate: (n) => n > 120 });   // 120 readings × 30 s = the first hour
+    const r = await W.run({ hours: 4 });
+    ok('a gate that stops vetoing lets the wait be kept (the hold is a delay, never a retirement)',
+      r.total === 1 && r.perHour[0] === 0, JSON.stringify({ perHour: r.perHour, gateCalls: r.gateCalls }));
+    W.cleanup();
+  }
+  // (d⁵′) NEGATIVE CONTROL — ROUND 2's JOURNAL, one replacement: the caller
+  // writes the line from `attemptFire`'s return value.
+  {
+    const mut = mutantAr([EDIT_R2_JOURNAL]);
+    ok('control setup: the ROUND-2 journal copy applied its one replacement', mut.hits === 1, JSON.stringify({ hits: mut.hits, err: mut.err }));
+    if (mut.mod) {
+      const W = mkEdgeWorld({ arModule: mut.mod, gate: 'veto' });
+      const r = await W.run({ hours: 4 });
+      // ONE MECHANISM, ONE CONTROL: with the hold still in place the flood is
+      // paced, but EVERY line is still a continue that never happened — which
+      // is the defect. The RATE is the other mechanism's, measured below.
+      ok('NEGATIVE CONTROL (round 2 journal): every gate ask journals a continue that never happened',
+        r.total === 0 && r.continuedLines > 0 && r.continuedLines === r.gateCalls,
+        JSON.stringify({ continued: r.continuedLines, delivered: r.total, gateCalls: r.gateCalls }));
+      W.cleanup();
+    }
+  }
+  // (d⁵″) NEGATIVE CONTROL — ROUND 2's RE-ENTRY, one replacement: a veto stamps
+  // nothing, so the gate runs once per push for the life of the watch.
+  {
+    const mut = mutantAr([EDIT_NO_EDGE_HOLD]);
+    ok('control setup: the ROUND-2 re-entry copy applied its one replacement', mut.hits === 1, JSON.stringify({ hits: mut.hits, err: mut.err }));
+    if (mut.mod) {
+      const W = mkEdgeWorld({ arModule: mut.mod, gate: 'veto' });
+      const r = await W.run({ hours: 4 });
+      ok('NEGATIVE CONTROL (round 2): a standing veto re-runs the pre-fire gate on EVERY reading',
+        r.gateCalls >= r.readings, JSON.stringify({ gateCalls: r.gateCalls, readings: r.readings }));
+      W.cleanup();
+    }
+  }
+  // (d⁵‴) NEGATIVE CONTROL — ROUND 2 AS SHIPPED, both halves. The 480:0 flood
+  // is a JOINT consequence, exactly like round 1's: the line was written from
+  // a return value that could not know yet AND the veto stamped nothing, so
+  // every push re-entered. Reproduced by reverting both and by nothing less.
+  {
+    const mut = mutantAr([EDIT_R2_JOURNAL, EDIT_NO_EDGE_HOLD]);
+    ok('control setup: the ROUND-2 AS-SHIPPED copy applied both replacements', mut.hits === 2, JSON.stringify({ hits: mut.hits, err: mut.err }));
+    if (mut.mod) {
+      const W = mkEdgeWorld({ arModule: mut.mod, gate: 'veto' });
+      const r = await W.run({ hours: 4 });
+      ok('NEGATIVE CONTROL (round 2 as shipped): one false "continued" line PER READING, for zero continues',
+        r.total === 0 && r.continuedLines >= r.readings && r.gateCalls >= r.readings,
+        JSON.stringify({ continued: r.continuedLines, delivered: r.total, readings: r.readings, gateCalls: r.gateCalls }));
+      W.cleanup();
+    }
+  }
+  // (d⁵⁗) THE HOLD SURVIVES THE HOUR — `save()` prunes breaker records that
+  // "can no longer refuse anything", and it is asked on every arm, fire and
+  // refusal. A field the READER consults but the PRUNER does not know about is
+  // deleted at the first FIRE_WINDOW_MS boundary; r2 had to teach it about
+  // `edgeSpent` for the same reason, and this is that rule's second instance.
+  // MEASURED (found by this suite's own cadence assert, not by reading code):
+  // 27 asks over four hours instead of 24, one extra at each hour boundary.
+  {
+    const W = mkEdgeWorld({ gate: 'veto' });
+    const r = await W.run({ hours: 4 });
+    const perHold = (4 * 3600e3) / EDGE_HOLD_MS;
+    ok('the gate hold is paced by ITS OWN clock across hour boundaries (the pruner knows it can still refuse)',
+      r.gateCalls === perHold, JSON.stringify({ gateCalls: r.gateCalls, expected: perHold }));
+    W.cleanup();
+  }
+  {
+    const mut = mutantAr([[
+      "          || (!!(r.edgeHeld && r.edgeHeld.until > now) && armed.has(k));",
+      '          || false; // PRE-FIX: the pruner does not know the hold can refuse']]);
+    ok('control setup: the UNPRUNED-HOLD copy applied its one replacement', mut.hits === 1, JSON.stringify({ hits: mut.hits, err: mut.err }));
+    if (mut.mod) {
+      const W = mkEdgeWorld({ arModule: mut.mod, gate: 'veto' });
+      const r = await W.run({ hours: 4 });
+      ok('NEGATIVE CONTROL: a hold the pruner does not know about is dropped at every window boundary',
+        r.gateCalls > (4 * 3600e3) / EDGE_HOLD_MS, JSON.stringify({ gateCalls: r.gateCalls, expected: (4 * 3600e3) / EDGE_HOLD_MS }));
+      W.cleanup();
+    }
+  }
+  // …and the REFUSE_LOG_MS throttle on the gate line is REACHABLE — it is not
+  // made dead by the hold, because the hold is per-WALL and only the READING
+  // edge stamps it. The pool-switch fireNow path (`via` = null, the new-member
+  // wake's own call shape) carries no wall, so a standing veto there is paced
+  // by the throttle alone. A guard nothing can exercise is not a guard.
+  {
+    const W = mkEdgeWorld({ gate: 'veto' });
+    W.clock.install();
+    try {
+      W.ar.armIfEnabled(W.sid, W.sessions.get(W.sid), W.clock.get() + 6 * 24 * 3600e3, 'usage limit', { lane: 'codex', bucket: 'sevenDay' });
+      let asks = 0;
+      for (let i = 0; i < 40; i++) {           // 40 × 30 s = 20 min of wake edges
+        W.clock.add(30e3);
+        W.ar.fireNow(W.sid, 'account usable again', { cause: 'member-usable' });
+        await new Promise((r) => setImmediate(r));
+        asks = W.gateCalls();
+      }
+      const said = W.journal.filter((l) => /the pre-fire gate refused/.test(l)).length;
+      ok('the gate refusal THROTTLE is reachable: an un-held path asks every time and speaks once per window',
+        asks >= 40 && said >= 1 && said < asks, JSON.stringify({ asks, said }));
+    } finally { W.clock.restore(); }
     W.cleanup();
   }
 }
