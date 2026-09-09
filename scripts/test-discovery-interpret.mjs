@@ -136,7 +136,13 @@ if (fs.existsSync('/proc/self')) {
   const codexBin = path.join(home, 'bin', 'codex');
   fs.symlinkSync(process.execPath, claudeBin);
   fs.symlinkSync(process.execPath, codexBin);
-  const idle = 'setTimeout(() => {}, 60000)';
+  // The fixtures live until the suite KILLS them (line ~312), not for a fixed
+  // 60 s: `lsof +D` walks every process's fd table and measured 11.8 s per call
+  // on this box (~3,900 processes), and the suite runs it six times — the
+  // fixtures were dead before the parity matrix ran (2.369.76 push: three
+  // asserts red, "exactly the two real CLIs answer YES" saw every row false).
+  // 10 min is a backstop against a crashed suite, never the lifetime.
+  const idle = 'setTimeout(() => {}, 600000)';
   // holds `file` on fd 0, so an INHERITED-fd shape is reproducible too
   const holder = (cmd, file, argvTail = []) => {
     const fd = fs.openSync(file, 'r');
@@ -246,7 +252,7 @@ if (fs.existsSync('/proc/self')) {
   // identity: `execFileSync` throws on that status and the catch eats it.
   const preR3StatusViaLsof = (root) => {
     try {
-      const output = execFileSync('lsof', ['-Fpn', '+D', root], { encoding: 'utf-8', timeout: 8000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
+      const output = execFileSync('lsof', ['-Fpn', '+D', root], { encoding: 'utf-8', timeout: LSOF_BUDGET_MS, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'] });
       const set = new Set();
       let cli = false;
       for (const line of output.split('\n')) {
@@ -265,7 +271,7 @@ if (fs.existsSync('/proc/self')) {
   // one defect each. Driven against a tree the real CLI does not touch, so the
   // verdict is about WHO was credited, not about what was found.
   const preR3IdentityViaLsof = (root) => {
-    const r = spawnSync('lsof', ['-Fpcn', '+D', root], { encoding: 'utf-8', timeout: 8000, maxBuffer: 8 * 1024 * 1024 });
+    const r = spawnSync('lsof', ['-Fpcn', '+D', root], { encoding: 'utf-8', timeout: LSOF_BUDGET_MS, maxBuffer: 8 * 1024 * 1024 });
     const set = new Set();
     let cmd = '';
     for (const line of String(r.stdout || '').split('\n')) {
