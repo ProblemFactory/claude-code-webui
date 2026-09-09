@@ -145,9 +145,12 @@ ok("…routes a kind:'notification' frame to turn/steer while busy, and leaves h
 const cd = read('src/server/conversation-deliver.js');
 ok('the LADDER tags the frame and never decides the lane itself (only the wrapper knows whether a turn is running)', /const kind = opts\.kind === 'notification' \? 'notification' : 'peer';/.test(cd) && /type: 'peer-message', text, fromName: opts\.fromName \|\| null, cardText: opts\.cardText \|\| null, kind \}/.test(cd));
 const jb = read('src/jobs.js');
-ok("jobs.js TYPES its owner notifications (the wiring pin: a rule with no call site is dead code)", /deliverToConversation\(cid, text, \{ fromName: 'Background Work · ' \+ \(job\.name \|\| job\.id\), kind: 'notification' \}\)/.test(jb));
+// Asserted by MEMBERSHIP, not verbatim: the options object gained
+// `spendReason` with the spend ceiling (design-account-hardening §4.4c), and a
+// pin on the exact literal fails for a field ADDED beside the one it protects.
+ok("jobs.js TYPES its owner notifications (the wiring pin: a rule with no call site is dead code)", /deliverToConversation\(cid, text, \{[^}]*fromName: 'Background Work · ' \+ \(job\.name \|\| job\.id\)[^}]*kind: 'notification'[^}]*\}\)/.test(jb));
 const ar = read('src/agent-routes.js');
-ok('…while vibespace-msg (a PERSON writing to another session) passes no kind at all ⇒ peer', /deliver\.deliverToConversation\(target\.cid, framed, \{ fromName, cardText: text \}\)/.test(ar) && !/msg\/send[\s\S]{0,2000}kind: 'notification'/.test(ar));
+ok('…while vibespace-msg (a PERSON writing to another session) passes no kind at all ⇒ peer', /deliver\.deliverToConversation\(target\.cid, framed, \{(?![^}]*\bkind:)[^}]*fromName[^}]*cardText: text[^}]*\}\)/.test(ar) && !/msg\/send[\s\S]{0,2000}kind: 'notification'/.test(ar));
 const sp = read('src/lib/session-props.js');
 ok('Session Properties STATES the rule (derived from the caps row, never a backend id)', /notificationDeliveryFor\(s\.backend \|\| 'claude'\)/.test(sp) && /Steered into the running turn/.test(sp) && /carries only itself/.test(sp));
 const cev = read('src/server/stdout/codex-events.js');

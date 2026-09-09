@@ -200,7 +200,26 @@ function writeJsonAtomic(file, obj) {
  * @param deps.broadcast      (sessionId, msg) => void — per-session UI state
  * @param deps.notify         (sessionId, session, text) => void — a visible line in the chat
  */
-function create({ dataDir, activeSessions, sendToSession, serverSetting, broadcast = () => { }, notify = null, beforeFire = null, fireIdentity = null, resumeVerb = null, notifyDelayMs = 90000, log = () => { } }) {
+/**
+ * @param deps.authorizeSpend (id, session, identity, {hold}) => {ok, why, detail, retryAfter, hold?}
+ *        THE SPEND CEILING (design-account-hardening §4.4c / P9). The loop
+ *        breaker below bounds this producer's PACING; the authorizer bounds the
+ *        MONEY, per credential slot, across every producer and across restarts.
+ *        They COMPOSE — the breaker runs first (it is free and its refusals are
+ *        the ones with a story to tell), and neither may be bypassed. Absent
+ *        (harness without the guard wired) = allow; scripts/test-spend-paths.mjs
+ *        pins the real wiring in server.js so "absent" can only mean a test.
+ * @param deps.noteSpend (id, session, identity, hold) => void — charged only
+ *        when a continue was actually delivered. `hold` is the reservation the
+ *        verdict opened (r5): the authorizer holds the slot it authorized, and
+ *        the charge converts that hold instead of adding to it.
+ * @param deps.releaseSpend (id, session, hold) => void — the OTHER half of the
+ *        same pair, for the one path here that authorizes and then does not
+ *        spend: the send fails and the session STAYS ARMED. The promise still
+ *        stands, so the money has to go back — otherwise a pty that refuses one
+ *        frame keeps that slot's budget booked until the hold times out.
+ */
+function create({ dataDir, activeSessions, sendToSession, serverSetting, broadcast = () => { }, notify = null, beforeFire = null, fireIdentity = null, resumeVerb = null, authorizeSpend = null, noteSpend = null, releaseSpend = null, notifyDelayMs = 90000, log = () => { } }) {
   const file = path.join(dataDir, 'auto-resume.json');
   let armed = new Map(); // webuiId -> { at, resetsAt, reason, cid, fired }
   let fires = new Map(); // webuiId -> loop-breaker record (see FIRE_* above)
@@ -680,6 +699,50 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     return { ...v, fired };
   }
 
+  /** THE SPEND CEILING, asked. Returns true when the turn may be paid for.
+   *  A refusal is JOURNAL-ONLY here and deliberately so: the guard itself
+   *  already told the user (one "For you" item per identity per reason per 6h,
+   *  plus telemetry), and the loop-breaker's in-chat budget belongs to the
+   *  refusals that describe THIS conversation's own pacing. Saying it twice,
+   *  once per session, is how the round-2 "it also refused me" cards happened.
+   *  The arm is NOT dropped: the promise still stands, it is the money that is
+   *  out — a later hour, or a raised budget, continues the session. */
+  function spendOk(id, session, ident, kind, out = null, { hold = true } = {}) {
+    if (!authorizeSpend) return true;
+    let v = null;
+    // `hold` says which of the two calls this is (r5). The DEFAULT is to hold,
+    // because that is the money-safe direction and a caller that says nothing
+    // must get it; the PROBE — "would this be allowed?", asked before the
+    // pre-fire gate — says so explicitly, and must not reserve a slot or the
+    // charging call below it refuses its own request (measured at cap 1/hour:
+    // zero continues ever fired).
+    try { v = authorizeSpend(id, session, ident || null, { hold }); } catch (e) { log('[auto-resume] spend authorizer threw: ' + e.message); return false; } // FAIL CLOSED (P8)
+    // CHARGE WHAT YOU AUTHORIZED (r4): hand the caller the slot this verdict
+    // RESOLVED, so the charge below names it instead of asking a second time.
+    // It matters only when `ident` is null — the gate could not name a fire
+    // target, the guard resolved one from the session, and without this the
+    // charge would resolve it AGAIN, off state the send is free to have moved.
+    if (out && v && v.identity && v.identity.key) out.identity = v.identity;
+    // …and the HOLD it opened (r5), so the charge converts it and a failed send
+    // gives it back
+    if (out && v && v.hold) out.hold = v.hold;
+    if (!v || v.ok !== false) return true;
+    log(`[auto-resume] ${id}: refused ${kind === 'now' ? 'an immediate' : 'a timed'} continue onto ${(ident && ident.name) || 'this account'} (spend budget: ${v.why})`);
+    return false;
+  }
+
+  /** The pre-fire gate broke. It probes fresh quota, re-runs the pool decision
+   *  and re-reads the verdict, so an exception means NONE of that happened —
+   *  the refusal is the only honest answer, and it must be SAID (a money gate
+   *  that fails silently reads exactly like one that passed). Journal +
+   *  telemetry only: the guard's own inbox item covers the user-facing half,
+   *  and the loop breaker's in-chat budget belongs to the refusals that
+   *  describe this conversation's pacing. */
+  function gateFailedClosed(id, how, e) {
+    log(`[auto-resume] ${id}: pre-fire gate ${how} — refusing the continue (fail closed): ${(e && e.message) || e}`);
+    try { global.__vsEvent?.('spend-gate-error', 'auto-resume:' + how); } catch { }
+  }
+
   /** ONE fire path for BOTH callers — the timed tick and the immediate
    *  (pool-switch) fireNow. Two things used to differ between them and both
    *  differences were bugs: the immediate path skipped the pre-fire gate
@@ -695,6 +758,12 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     const label = ident ? ident.name : null;
     const chk = canFire(id, key, kind, now);
     if (!chk.ok) { logRefusal(id, session, key, label, chk, kind); return false; }
+    // THE CEILING, asked BEFORE the gate as well as after it (same shape as
+    // canFire/chk2): the pre-fire gate probes quota and can re-point the link,
+    // so a budget that is already spent must stop us before we pay for that
+    // work, and the identity the continue actually LANDS on must be checked
+    // again once the gate has had its say.
+    if (!spendOk(id, session, ident, kind, null, { hold: false })) return false;
     const deliver = () => {
       const a2 = armed.get(id);
       if (!a2 || a2.fired || a2.resetsAt !== a.resetsAt) return false;   // re-armed/disarmed while gating
@@ -726,28 +795,46 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       // WHAT UNBLOCKED US decides both the journal line and the card, from the
       // ARMED RECORD (one source, one wording) — see continueNoticeFor
       const note = continueNoticeFor({ kind, armReason: a2.reason, label: label2, moved, cause });
+      // THE CEILING, on the identity the continue actually lands on. The gate
+      // can have moved us onto a member whose budget is spent — charging the
+      // one we resolved before it is the round-2 defect in a second currency.
+      // It sits BELOW the (pure, side-effect-free) card computation and ABOVE
+      // the send: nothing between them spends, and test-auto-resume-loop's
+      // round-2 pin measures the distance from `moved` to `continueNoticeFor`.
+      const charge = {};
+      if (!spendOk(id, session, ident2, kind, charge, { hold: true })) return false;
+      // AUTHORIZED, NOT SPENT (r5): from here on, EVERY exit that does not
+      // deliver gives the reservation back. The arm survives each of them, so
+      // this session is going to ask again — a hold left booked would keep
+      // that slot's budget out of circulation until it times out.
+      const giveBack = () => { if (charge.hold && releaseSpend) { try { releaseSpend(id, session, charge.hold); } catch (e) { log('[auto-resume] releasing the spend hold failed: ' + e.message); } } };
       // THE HARNESS'S OWN VERB delivers (owner ruling 2026-09-08). This is the
       // ONE fire choke point for every harness and every path — the timed tick,
       // the immediate pool-switch fire and the fresh-window edge all arrive at
-      // THIS line, which is what keeps the loop breaker in front of every
-      // unattended turn. `sendChatInput` is the ORCH channel the verb may use;
-      // the descriptor decides what a continue MEANS on its harness.
-      //
-      // NAMED SEAM FOR THE SPEND AUTHORIZER (design-account-hardening §4.4(c),
-      // branch feat-hardening-p4-spend — NOT on master as of 2026-09-08, so it
-      // is not wired here). When it lands, `authorizeSpend({reason:'auto-resume',
-      // …})` goes immediately ABOVE this line and its `release()` on the
-      // `!ok` path below, exactly as that branch already writes it: making the
-      // verb generic did not add a second fire path, so ONE gate still covers
-      // every harness. Integrators: the conflict is this one line.
+      // THIS line, which is what keeps the loop breaker AND the spend ceiling
+      // in front of every unattended turn. `sendChatInput` is the ORCH channel
+      // the verb may use; the descriptor decides what a continue MEANS on its
+      // harness.
+      //   THE SPEND AUTHORIZER IS THE LINES DIRECTLY ABOVE (the integration of
+      // design-account-hardening §4.4(c)): the seam this comment used to
+      // RESERVE is now taken, and it is taken ONCE — making the verb generic
+      // did not add a second fire path, so one gate still covers every
+      // harness. The order is deliberate: authorize (which HOLDS the slot),
+      // then ask the harness for its verb, then send. Every return between the
+      // hold and a delivered turn calls `giveBack()`.
       const verb = verbFor(session);
-      if (!verb) { log(`[auto-resume] ${id}: harness '${session.backend || '?'}' declares no resume verb — cannot continue`); armed.delete(id); save(); emit(id); return false; }
+      if (!verb) { log(`[auto-resume] ${id}: harness '${session.backend || '?'}' declares no resume verb — cannot continue`); giveBack(); armed.delete(id); save(); emit(id); return false; }
       let ok = false;
       try { ok = !!verb.deliver(session, CONTINUE_PROMPT, { sendChatInput: (s2, text) => sendToSession(id, s2, text) }); }
       catch (e) { log(`[auto-resume] ${id}: the '${verb.form}' resume verb threw: ${e.message}`); ok = false; }
-      if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); return false; }
+      if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); giveBack(); return false; }
       armed.delete(id);
       noteFired(id, key2, kind, Date.now(), origin);
+      // CHARGED ONLY WHEN THE TURN HAPPENED (two-phase): everything above can
+      // refuse, and an authorization that never became a turn must not eat an
+      // identity's hourly budget. `charge.hold` is the reservation opened by
+      // the call above — `note()` CONVERTS it rather than adding to it.
+      if (noteSpend) { try { noteSpend(id, session, charge.identity || ident2 || null, charge.hold || null); } catch (e) { log('[auto-resume] spend accounting failed: ' + e.message); } }
       save();
       _cancelArmNotify(id);
       log(kind === 'now'
@@ -766,12 +853,41 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     // armed sessions, and everything the gate does BEFORE its first await is
     // synchronous re-entry (measured: 1992 levels deep with the flag raised
     // one line too late).
+    //
+    // FAIL CLOSED (P8), THE THIRD LAYER. Both halves used to answer a broken
+    // gate with a billed turn — `catch { gate = true; }` and `.catch(() =>
+    // deliver())` — and design §1.4 only named the other two layers (the
+    // engine's own `catch { return true; }` and the server.js wiring lambda).
+    // Fixing those two MASKS this one in production, which is precisely why it
+    // has to be fixed here as well: the mask lives in two different files from
+    // the bug, and making the wiring lambda `async` (the natural refactor —
+    // the callee already is) removes both halves of it at once. Measured on
+    // the real module: a throwing beforeFire delivered 1 continue, a rejecting
+    // one delivered 1; with the gate answering `false`, 0.
+    // The ARM IS NOT DROPPED, exactly as for a `false` verdict: the promise
+    // still stands, it is the gate that is unavailable, and the next tick
+    // (30 s) asks again.
     session._arFiring = true;
     let gate = true;
-    try { gate = beforeFire ? beforeFire(id, session) : true; } catch { gate = true; }
+    try { gate = beforeFire ? beforeFire(id, session) : true; }
+    catch (e) { gateFailedClosed(id, 'threw', e); gate = false; }
     if (gate && typeof gate.then === 'function') {
-      gate.then((g2) => { if (g2 === false) noteGateRefusal(id, kind, origin); else deliver(); })
-        .catch(() => deliver()).finally(() => { session._arFiring = false; });
+      // TWO-ARG `then`, deliberately: the rejection handler must see ONLY the
+      // gate's own failure. A trailing `.catch` would also catch a throw from
+      // `deliver()` (save() on a full disk, an emit handler) and report it as
+      // "the gate rejected" — and the shape this replaced answered that case by
+      // calling `deliver()` a SECOND time. A reason string is an assertion about
+      // the system; the delivery's own failure gets its own line and no retry.
+      //   A VETO IS RECORDED HERE, in the resolve arm, because here is the only
+      // place that knows (auto-resume r3): `attemptFire` returns true for a gate
+      // merely in flight, so the reading edge cannot journal or hold from its
+      // return value.
+      gate.then(
+        (g2) => { if (g2 === false) noteGateRefusal(id, kind, origin); else deliver(); },
+        (e) => { gateFailedClosed(id, 'rejected', e); },   // never deliver() from here
+      )
+        .catch((e) => { log(`[auto-resume] ${id}: delivering the continue threw after the gate allowed it: ${(e && e.message) || e}`); })
+        .finally(() => { session._arFiring = false; });
       return true;
     }
     if (gate === false) noteGateRefusal(id, kind, origin);

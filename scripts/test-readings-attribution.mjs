@@ -551,7 +551,11 @@ if (!probe) {
   ok('§8 …while a reading from before the death is simply old, not suspect', S.staleSince({ state: 'wiped', usable: false, since: 5000 }, 1000).suspect === false);
   ok('§8 the stamp is absolute (a "5 days ago" for something that will never move again is the wrong unit)', /\d/.test(S.stampText(Date.parse('2026-09-03T05:55:00Z'))) && S.stampText(null) === '—');
   const um = read('src/lib/usage-meter.js');
-  ok('§8 WIRING: the meter imports the pure rules and renders ONE provenance line for both panels', /import \{ corroborationNote, readingSource, stampText, staleSince \} from '\.\/usage-source\.js';/.test(um) && (um.match(/\$\{sourceLine\(/g) || []).length === 2);
+  // The list is asserted by MEMBERSHIP, not verbatim: this module gained
+  // `overageChip` with the spend ceiling (design-account-hardening §1.4), and a
+  // pin on the exact import list fails for a rule that was ADDED beside the
+  // ones it exists to protect.
+  ok('§8 WIRING: the meter imports the pure rules and renders ONE provenance line for both panels', /import \{[^}]*\bcorroborationNote\b[^}]*\breadingSource\b[^}]*\bstampText\b[^}]*\bstaleSince\b[^}]*\} from '\.\/usage-source\.js';/.test(um) && (um.match(/\$\{sourceLine\(/g) || []).length === 2);
   ok('§8 WIRING: it reads the per-account credential state /api/usage now carries', /this\._usageLogins = data\?\.logins \|\| \{\}/.test(um) && /logins: \(\(\) => \{/.test(read('src/usage-routes.js')));
   ok('§8 WIRING: every interpolated value goes through escHtml (the panel renders peer-controlled account names)', /escHtml\(src\.tip\)/.test(um) && /escHtml\(t\('via \{source\}'/.test(um));
 }

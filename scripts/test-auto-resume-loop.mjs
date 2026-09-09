@@ -1139,8 +1139,12 @@ if (!probe) {
   ok('WIRING (r3): the reading edge hands its own head to the fire and journals NOTHING itself — the line is written by the code that delivers',
     /const head = `\$\{a\.watch \? 'watched' : 'armed'\} window reopened \(\$\{why\}\)`;\s*\n\s*const fired = fireNow\(id, head, \{ via: 'reading', wall \}\);/.test(ar2src)
     && !/if \(fired\) log\(/.test(ar2src));
-  ok('WIRING (r3): a gate VETO is recorded where it is known — the async branch, the sync branch, and it holds the reading edge per WALL',
-    /gate\.then\(\(g2\) => \{ if \(g2 === false\) noteGateRefusal\(id, kind, origin\); else deliver\(\); \}\)/.test(ar2src)
+  // The async branch is the TWO-ARG `then` (the spend work's P8 layer): the
+  // rejection handler must see ONLY the gate's own failure, so the veto record
+  // and the fail-closed arm are pinned TOGETHER — one expression, because they
+  // live in one call and a merge that keeps either alone is the bug.
+  ok('WIRING (r3): a gate VETO is recorded where it is known — the async branch (whose rejection arm never delivers), the sync branch, and it holds the reading edge per WALL',
+    /gate\.then\(\s*\(g2\) => \{ if \(g2 === false\) noteGateRefusal\(id, kind, origin\); else deliver\(\); \},\s*\(e\) => \{ gateFailedClosed\(id, 'rejected', e\); \}/.test(ar2src)
     && /if \(gate === false\) noteGateRefusal\(id, kind, origin\);/.test(ar2src)
     && /function noteGateRefusal\(id, kind, origin\) \{[\s\S]{0,500}if \(origin && origin\.via === 'reading' && origin\.wall\) \{ r\.edgeHeld = \{ wall: origin\.wall, until: now \+ EDGE_HOLD_MS \}; changed = true; \}/.test(ar2src)
     // …and the disk write is conditional: the no-hold paths (timed tick,

@@ -232,6 +232,23 @@ function create({ engine, deliverRef, permissionRulesRef }) {
           if (msg.type === 'event_msg' && msg.payload?.type === 'peer_message_result' && msg.payload.ok === true && msg.payload.steerFailed) {
             console.log(`[deliver] rpc-queue: turn/steer refused (${msg.payload.steerFailed}${msg.payload.steerDetail ? ': ' + msg.payload.steerDetail : ''}) — the notification took the '${msg.payload.mode}' lane instead`);
           }
+          // THE SPEND SETTLEMENT for that same answer (r2). The ladder does not
+          // charge a notification it predicted would be STEERED into a turn
+          // already running — that opens no turn, so charging it would spend
+          // the money ceiling on nothing and then refuse the auto-resume
+          // continue that does cost. The prediction can be wrong (the turn
+          // ended between the check and the RPC; a review/compact turn is not
+          // steerable), and the wrapper is the only party that knows: `mode`
+          // 'steered' drops the withheld charge, 'queued'/'turn' charges it
+          // now. ok:false charges nothing — the re-stash above keeps the words
+          // and they ride a turn that was going to happen anyway.
+          // PROPERTY ACCESS on the lazy ref, never a call (the mk() Proxy
+          // lesson two blocks up); the degrade catch logs verbatim.
+          if (msg.type === 'event_msg' && msg.payload?.type === 'peer_message_result') {
+            const cid = session.backendSessionId || session.claudeSessionId;
+            try { if (cid) deliverRef?.settleRpcDelivery?.(cid, { ok: msg.payload.ok !== false, mode: msg.payload.mode || null }); }
+            catch (e) { console.warn(`[deliver] ${id}: spend settle failed: ${e.message}`); }
+          }
           // READ-ONLY permission-rule answer (owner ruling 10): the wrapper
           // replied to `read-permission-rules`. It goes to exactly ONE place —
           // the pending HTTP read that asked for it, matched by requestId.

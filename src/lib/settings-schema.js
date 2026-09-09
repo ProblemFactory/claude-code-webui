@@ -510,11 +510,66 @@ const SETTINGS_SCHEMA = {
     description: t('Lets sessions YOU designate as "Group manager" (Session Properties) create and configure Task Groups via their CLI — create/update/bind/unbind, the same organize-only operations you perform in the UI. Paths they may use are limited by the roots setting below; every operation is recorded in the group\'s activity log. Off = the API refuses all agents.'),
     category: t('Integration'), liveApply: true,
   },
+  'agents.stopNudgeMaxUnanswered': {
+    type: 'number', default: 3, min: 0, max: 100, step: 1,
+    label: t('Stop nudge: give up after this many unanswered nudges'),
+    description: t('A session that has never reported a board status is being asked for bookkeeping it does not do — and every nudge costs a real mini-turn. After this many nudges with no status report at all, that session is not nudged again (any status report resets the count). 0 = never give up.'),
+    category: t('Integration'), liveApply: true,
+  },
   'agents.groupManagementRoots': {
     type: 'string', default: '~',
     label: t('Group management path roots'),
     description: t('Comma-separated absolute path prefixes a manager agent may use for a group\'s context folder / auto-include folders (~ = your home). Keeps agents from pointing context injection at arbitrary paths.'),
     category: t('Integration'), liveApply: true,
+  },
+  // ── SPENDING (docs/design-account-hardening.md §4.4c, owner decisions D2/D3/D6)
+  // Every turn VibeSpace starts WITHOUT you passes one authorizer with these
+  // ceilings, counted per credential slot and persisted across restarts
+  // (data/spend-budget.json). Measured driver on this instance: 603 Stop-nudge
+  // mini-turns over two months (536M cached tokens read on the turns they
+  // forced; 21 of them on ONE conversation inside ONE hour), and an auto-resume
+  // loop that once fired 130 billed continues into a wall in one night.
+  'spend.unattendedPerIdentityHour': {
+    type: 'number', default: 12, min: 0, max: 200, step: 1,
+    label: t('Unattended turns per account per hour'),
+    description: t('The most turns VibeSpace may start by itself on ONE account in a rolling hour — the auto-continue after a usage limit, the Stop bookkeeping nudge, Background Work notifications and messages from other sessions all count. Turns YOU type are never counted. 0 = no automatic turns at all on any account. When a budget is spent the refusal is journalled and filed in the \u201cFor you\u201d inbox; nothing is lost — a notification that cannot be delivered live is injected into the conversation\u2019s next turn instead.'),
+    category: t('Spending'), liveApply: true,
+  },
+  'spend.unattendedPerIdentityDay': {
+    type: 'number', default: 60, min: 0, max: 2000, step: 5,
+    label: t('Unattended turns per account per day'),
+    description: t('The same ceiling over a rolling 24 hours. An account can be busy for an hour without spending its whole day.'),
+    category: t('Spending'), liveApply: true,
+  },
+  'spend.unattendedPerInstanceDay': {
+    type: 'number', default: 200, min: 0, max: 10000, step: 10,
+    label: t('Unattended turns for this instance per day'),
+    description: t('The ceiling across every account together, over a rolling 24 hours — the bound that still holds when a new subscription is added mid-incident.'),
+    category: t('Spending'), liveApply: true,
+  },
+  'spend.budgetNoticePct': {
+    type: 'number', default: 80, min: 0, max: 100, step: 5,
+    label: t('Warn when a spending budget reaches (%)'),
+    description: t('File one \u201cFor you\u201d item when an account (or this instance) has used this share of its unattended-turn budget, so the ceiling is never a surprise. 0 = never warn.'),
+    category: t('Spending'), liveApply: true,
+  },
+  'spend.allowOverageTurns': {
+    type: 'boolean', default: false, confirmOn: true,
+    label: t('\u26a0 Allow unattended turns while an account bills paid overage'),
+    description: t('OFF (recommended): while an account reports that it is using PAID OVERAGE, VibeSpace refuses every turn it would have started by itself on that account — a turn nobody asked for is a quota decision when quota is included and a dollar decision when it is not. Turns YOU type always run. Turn this ON only if you want automatic continues to keep going at pay-per-use prices.'),
+    category: t('Spending'), liveApply: true,
+  },
+  'pool.reserveFloorPct': {
+    type: 'number', default: 15, min: 0, max: 90, step: 5,
+    label: t('Keep this much of each account\u2019s weekly quota in reserve (%)'),
+    description: t('The account pool drains the member whose weekly window resets soonest, which is right while there is a choice about when to burn quota — measured, it took one account from 60% to 95% of its weekly window in 12.4 hours. Below this floor a member stops being a VOLUNTARY switch target: it still serves its own conversations, and a conversation whose current account is genuinely dead may still escape onto it. 0 = no floor (the pre-2026-09 behaviour).'),
+    category: t('Spending'), liveApply: true,
+  },
+  'pool.avoidOverageMembers': {
+    type: 'boolean', default: false,
+    label: t('Do not switch conversations onto an account billing paid overage'),
+    description: t('While an account is using paid overage its utilization stays under 100% even though every token costs money, so the pool\u2019s \u201cmost remaining\u201d ranking actively prefers it. With this on, such a member is not a voluntary switch target (an escape from a dead account still uses it, and it keeps serving its own conversations). Off by default: watch the quota panels for a week first — they now say \u201cpaid overage in use\u201d.'),
+    category: t('Spending'), liveApply: true,
   },
   'accounts.onDemandQuotaRefresh': {
     type: 'enum', default: 'manual',
@@ -860,7 +915,23 @@ const SETTINGS_SCHEMA = {
   },
 };
 
-// Ordered category list for UI rendering
+// Ordered category list for UI rendering.
+//
+// THIS LIST IS THE RENDER LOOP, NOT A HINT. SettingsUI._renderContent groups
+// every row by `schema.category` and then renders by iterating THIS ARRAY — a
+// category that is missing here is grouped into a bucket nobody reads, so its
+// rows are unreachable in the product AND invisible to search ("No settings
+// match your search."). Measured on this file before the fix: 118 settings,
+// 108 rendered, 10 dropped — the seven `Spending` rows (every money ceiling,
+// the overage consent and the EDF reserve floor, while three shipped strings
+// told the user to go to "Settings → Spending") and the three `OpenCode` rows,
+// which had been invisible since they shipped.
+// scripts/test-architecture.mjs §44 is the census that makes the next omission
+// fail the BUILD; adding a category here is the whole fix.
+// The ORDER follows docs/settings.md's "All Settings Reference" so the nav and
+// the manual read the same way top to bottom — a convention, not an enforced
+// invariant: §44 asserts MEMBERSHIP (which is what makes a setting reachable),
+// never the sequence.
 const SETTINGS_CATEGORIES = [
   t('Toolbar & Layout'),
   t('Window'),
@@ -868,8 +939,10 @@ const SETTINGS_CATEGORIES = [
   t('Chat'),
   t('Session'),
   t('Integration'),
+  t('Spending'),
   t('Claude'),
   t('Codex'),
+  t('OpenCode'),
   t('Sidebar'),
   t('Session Card'),
 ];

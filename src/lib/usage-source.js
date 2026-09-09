@@ -87,3 +87,40 @@ export function stampText(ts, { locale = undefined } = {}) {
   if (!ts) return '—';
   try { return new Date(ts).toLocaleString(locale, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' }); } catch { return new Date(ts).toISOString(); }
 }
+
+// ── PAID OVERAGE (docs/design-account-hardening.md §1.4 + D3) ────────────────
+// `cache.overage` has been captured from the CLI's own rate_limit_event since
+// 2.289.0 and was read by NOBODY: the panels showed a donut under 100% while
+// every token on that account was billed pay-per-use, and `accountRemaining()`
+// therefore ranked it as the member with the MOST headroom. The verdict itself
+// is the PURE `overageState` in src/spend-authorizer.js — the same function the
+// spend authorizer and the pool's voluntary-target rule ask, so a panel can
+// never disagree with the gate. This only picks the words.
+// Returns null when there is nothing to say ('no' AND 'unknown' — ignorance is
+// not a claim), so a caller can `if (chip)`.
+export function overageChip(state, { t = (s) => s } = {}) {
+  if (!state || state.inUse !== 'yes') return null;
+  const money = state.spend
+    ? ` — $${state.spend.used.toFixed(2)}${state.spend.limit ? ` / $${state.spend.limit.toFixed(2)}` : ''}`
+    : '';
+  return {
+    label: t('paid overage in use') + money,
+    tip: t('Automatic turns are refused on this account while it bills paid overage (Settings → Spending).'),
+  };
+}
+
+// ── SPEND CONTROL (the §1.4 row's THIRD field, r4) ──────────────────────────
+// codex's `spend_control_reached` was captured and read by NOBODY, exactly as
+// `cache.overage` had been — and it is worse to miss on a panel, because the
+// donuts stay friendly: nothing marks a window spent, so the account ranks as
+// the one with the most headroom while every request it serves is REJECTED.
+// The verdict is the PURE `spendControlState`, the same one the authorizer
+// asks, so the chip and the gate cannot disagree. Returns null when there is
+// nothing to say ('no' AND 'unknown').
+export function spendControlChip(state, { t = (s) => s } = {}) {
+  if (!state || state.reached !== 'yes') return null;
+  return {
+    label: t('spend control reached'),
+    tip: t('This account has reached its spend control, so its requests are rejected — automatic turns on it are refused.'),
+  };
+}

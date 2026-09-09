@@ -105,8 +105,22 @@ const SESSION_FIELDS = {
   _dialReversePort:    { owner: 'dial',   persisted: null,      note: 'device-side reverse forward port' },
   _bridgePort:         { owner: 'dial',   persisted: 'meta',    note: 'DialSessionBridge loopback port' },
 
+  // agent-facing bookkeeping (src/agent-routes.js) — the injection ladder's
+  // per-session "already delivered this" marks, plus the Stop nudge's clock.
+  // Registered 2026-09-08: the detector only saw `session.`/`sess.` receivers,
+  // and every one of these is written through a local named `s`/`sessionObj`.
+  _lastStopNudge:      { owner: 'agent-routes', persisted: 'spend-budget', note: "the Stop bookkeeping nudge's cooldown (design-account-hardening D8). The in-memory mirror of the PERSISTED record in data/spend-budget.json (src/server/spend-guard.js `nudgeRec`/`noteNudge`): it was in-memory ONLY, so every release restart handed the largest measured automatic spender (603 mini-turns over two months here, 21 of them on one conversation inside one hour) a fresh cooldown. The route takes the NEWER of the two" },
+  _preambleSeen:       { owner: 'agent-routes', persisted: null, note: 'hash of the task-context preamble already delivered to this session (re-delivery only when the content changes)' },
+  _toolsIntroSeen:     { owner: 'agent-routes', persisted: null, note: 'the baseline tools intro has been delivered to this no-task session (SessionStart)' },
+  _mgrIntroSeen:       { owner: 'agent-routes', persisted: null, note: 'the manager-agent intro has been delivered (shared latch between SessionStart and prompt-context — whichever delivers first wins)' },
+  _groupSeenAt:        { owner: 'agent-routes', persisted: null, note: '{groupId: contentUpdatedAt} the session has already been shown — the per-turn group-diff cursor' },
+  _ctxSig:             { owner: 'agent-routes', persisted: null, note: '{groupId: contextDirSignature} at last delivery — a ctx folder change re-injects' },
+  _groupSnap:          { owner: 'agent-routes', persisted: null, note: '{groupId: snapshotForDiff} at last delivery — what the update diff is computed against' },
+
   // misc consumers
   _sizeOwnerWs:        { owner: 'ws',     persisted: null,      note: 'size-override owner connection' },
+  _childPid:           { owner: 'boot',   persisted: 'meta',    note: 'the pid INSIDE the dtach session (the wrapper/CLI, not our pty) — restored from session-meta at boot and used by the kill path' },
+  _restoreAgentTasks:  { owner: 'boot',   persisted: null,      note: "the wrapper meta's subagent task map, carried from restore until setupSessionPty's watcher is armed, then cleared (null = consumed)" },
   _todos:              { owner: 'stdout', persisted: null,      note: 'TodoWrite/TaskCreate-derived {done,total,current}' },
   _sbSeen:             { owner: 'brain',  persisted: null,      note: 'first-writer-wins record gate (bounded set)' },
   _codexThreadBaseline: { owner: 'ws',    persisted: null,      note: 'codex thread listing baseline for capture' },

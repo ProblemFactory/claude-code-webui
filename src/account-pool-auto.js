@@ -111,6 +111,16 @@ function bucketRems(cache, nowSec) {
   return out;
 }
 
+// The WEEKLY remaining % — min over the budget buckets only (7d + scoped),
+// deliberately WITHOUT the 5h. The reserve floor (D2) is a rule about the
+// perishable weekly BUDGET; the 5h bucket is a burst RATE limiter that refills
+// ~33×/week, so folding it in would bar a member for being momentarily busy.
+// null = no weekly reading at all (ignorance is not a claim — P6).
+function weeklyRemaining(brs) {
+  const w = (brs || []).filter((b) => b.kind === 'weekly').map((b) => b.remaining);
+  return w.length ? Math.min(...w) : null;
+}
+
 // Decide a switch for a pool. members = [{id, name}] (already login-filtered),
 // readCache(id) → parsed cache entry or null. proactive/hot = hot pools:
 // re-points are free, so they soft-exhaust at the RAISED per-kind thresholds
@@ -175,7 +185,22 @@ function rankPoolMembers({ members, readCache, nowSec, readLogin = null }) {
 // readLogin = (accountId) => loginState info (src/login-expiry.js) or null.
 // OPTIONAL: omit it and every rule below is inert — this function decides
 // exactly as it did before logins were readable.
-function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = false, hot = proactive, pessimism = {}, exclude = null, readLogin = null, explain = false }) {
+// reserveFloorPct = the EDF RESERVE FLOOR (design-account-hardening D2,
+// setting `pool.reserveFloorPct`, 15 by default at the engine). A member whose
+// WEEKLY remaining is below it is not a VOLUNTARY switch/placement target —
+// EDF's job is to drain the soonest-expiring window, and the measured result
+// was one member driven 60% → 95% in 12.4 hours, i.e. the policy operating with
+// no floor in exactly the band where its inputs are least trustworthy. 0 =
+// inert, and the parameter defaults to 0 so every existing caller decides
+// EXACTLY as it did before this input existed (the readLogin rule).
+// overageIds = members currently billing PAID OVERAGE (D3c, setting
+// `pool.avoidOverageMembers`, default off): with overage on, `utilization`
+// stays under 1 while every token costs real money, so the EDF ranking
+// actively PREFERS the account that is spending dollars.
+// Both are rules about VOLUNTARY moves only: a hard-dead current member may
+// still escape onto them (liveness beats efficiency — the 2026-08-11 lesson),
+// and the verdict SAYS which bar it landed on.
+function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = false, hot = proactive, pessimism = {}, exclude = null, readLogin = null, reserveFloorPct = 0, overageIds = null, explain = false }) {
   const excluded = exclude && exclude.length ? new Set(exclude) : null;
   // `explain` keeps the historical contract (null = no switch) for every
   // existing caller and test, while letting the engine ask WHY nothing
@@ -242,6 +267,10 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
   let excludedN = 0;
   let quotaBlockedN = 0;   // dropped by the QUOTA gate — a different wall, a different sentence
   const loginBlocked = []; // [{id, name, state, msLeft}] — named, never a silently short list
+  const reserveBlocked = []; // [{id, name, remaining}] — held back by the reserve floor (D2)
+  const overageBlocked = []; // [{id, name}] — billing paid overage (D3c)
+  const floor = Number(reserveFloorPct) > 0 ? Number(reserveFloorPct) : 0;
+  const overage = overageIds && (typeof overageIds.has === 'function' ? overageIds : new Set(overageIds));
   for (const m of members) {
     if (m.id === currentId) continue;
     if (excluded && excluded.has(m.id)) { excludedN++; continue; } // just rejected this session — not a candidate
@@ -263,10 +292,21 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
     // voluntary move must land somewhere that won't itself soft-exhaust
     // (the 2.266.1 oscillation guard, now per-kind)
     const settleOk = r.known && br.length > 0 && br.every((b) => b.remaining >= THRESH[b.kind].hot + MIN_GAIN_PCT);
-    const row = { id: m.id, name: m.name, eff, known: r.known, settleOk, remaining: r.known ? r.remaining : null, deadline: weeklyDeadline(c, nowSec), loginPenalty: loginRank(li) };
-    if (readLogin && !loginSwitchTarget(li)) { loginBlocked.push({ id: m.id, name: m.name, state: li.state, msLeft: li.msLeft ?? null }); nearRanked.push(row); continue; }
+    const wk = weeklyRemaining(br);
+    const row = { id: m.id, name: m.name, eff, known: r.known, settleOk, remaining: r.known ? r.remaining : null, weeklyRemaining: wk, deadline: weeklyDeadline(c, nowSec), loginPenalty: loginRank(li) };
+    if (readLogin && !loginSwitchTarget(li)) { loginBlocked.push({ id: m.id, name: m.name, state: li.state, msLeft: li.msLeft ?? null }); nearRanked.push({ ...row, barredWhy: 'login-near' }); continue; }
+    // PAID OVERAGE (D3c). Real dollars, not a spent window — it does not heal
+    // on a timer, so it is named separately from every quota bucket.
+    if (overage && overage.has(m.id)) { overageBlocked.push({ id: m.id, name: m.name }); nearRanked.push({ ...row, barredWhy: 'overage' }); continue; }
+    // RESERVE FLOOR (D2). Only a MEASURED weekly reading may bar a member:
+    // an unknown one is ignorance, and ignorance is never a claim.
+    if (floor > 0 && wk != null && wk < floor) { reserveBlocked.push({ id: m.id, name: m.name, remaining: wk }); nearRanked.push({ ...row, barredWhy: 'reserve-floor' }); continue; }
     ranked.push(row);
   }
+  const barDetail = () => ({
+    ...(reserveBlocked.length ? { reserveBlocked, reserveFloorPct: floor } : {}),
+    ...(overageBlocked.length ? { overageBlocked } : {}),
+  });
   ranked.sort(edfCompare);
   nearRanked.sort(edfCompare);
   // ESCAPE SCRAPS (round-2 verifier, reproduced: current hard-dead on 5h, the
@@ -286,12 +326,21 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
     // quota-dead ones and then sent the user to re-login accounts whose
     // logins were fine (round-2 verifier).
     const why = excludedN ? 'all-rejected' : (loginBlocked.length && !quotaBlockedN) ? 'all-logins-expired' : 'no-members';
-    return none(why, { fromRemaining: cur.known ? cur.remaining : null, excluded: excludedN || undefined, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...bucketDetail(curBr) });
+    return none(why, { fromRemaining: cur.known ? cur.remaining : null, excluded: excludedN || undefined, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...barDetail(), ...bucketDetail(curBr) });
   }
 
   // What we are moving ONTO, when the only thing left was a dying login — the
   // move happens, and the notice has to say the login still needs renewing.
-  const scrapsInfo = (pick) => (usingScraps ? { toLoginNear: { id: pick.id, name: pick.name, ...(loginBlocked.find((b) => b.id === pick.id) || {}) } } : {});
+  // WHAT we are moving ONTO when the only thing left was barred from
+  // voluntary moves — and WHICH bar it was, because the three have different
+  // fixes: a dying login needs a re-login, a reserve-floor member needs the
+  // floor raised or quota to reset, an overage member is costing real money.
+  const scrapsInfo = (pick) => {
+    if (!usingScraps) return {};
+    if (pick.barredWhy === 'overage') return { toOverage: { id: pick.id, name: pick.name } };
+    if (pick.barredWhy === 'reserve-floor') return { toReserve: { id: pick.id, name: pick.name, remaining: pick.weeklyRemaining ?? null } };
+    return { toLoginNear: { id: pick.id, name: pick.name, ...(loginBlocked.find((b) => b.id === pick.id) || {}) } };
+  };
   const bestSettle = pool.find((r) => r.settleOk) || null;
   if (exhausted) {
     if (hardDead) {
@@ -319,7 +368,7 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
       // null when that member has no cache at all — `null + 3` is 3, so the
       // old expression would have silently blocked every escape from an
       // unread member). A dead login always leaves.
-      if (!curLoginDead && best.eff <= cur.remaining + MIN_GAIN_PCT) return none('stuck', { fromRemaining: cur.remaining, bestRemaining: best.remaining, bestName: best.name || best.id, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...bucketDetail(curBr) });
+      if (!curLoginDead && best.eff <= cur.remaining + MIN_GAIN_PCT) return none('stuck', { fromRemaining: cur.remaining, bestRemaining: best.remaining, bestName: best.name || best.id, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...barDetail(), ...bucketDetail(curBr) });
       // `reason` says why we LEFT (it gates the dwell-belt exemption and the
       // notice); `toLoginNear` says what we could get. Collapsing the two into
       // one string would have made a login-expired escape onto a scrap lose
@@ -328,7 +377,7 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
     }
     // soft-exhausted (only a hot-raised threshold tripped): still usable,
     // so only move somewhere that can actually SETTLE
-    if (!bestSettle) return none('no-settleable', { fromRemaining: cur.known ? cur.remaining : null, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...bucketDetail(curBr) });
+    if (!bestSettle) return none('no-settleable', { fromRemaining: cur.known ? cur.remaining : null, loginBlocked: loginBlocked.length ? loginBlocked : undefined, ...barDetail(), ...bucketDetail(curBr) });
     return { to: bestSettle.id, toName: bestSettle.name, fromRemaining: cur.known ? cur.remaining : null, toRemaining: bestSettle.remaining, reason: 'exhausted' };
   }
   // Proactive tier (hot pools): jump to a strictly-sooner KNOWN deadline —
@@ -368,6 +417,19 @@ function decidePoolSwitch({ currentId, members, readCache, nowSec, proactive = f
 function poolBlockedNotice(d, { poolName = '', currentName = 'the current member' } = {}) {
   const dead = (d?.deadBuckets || []).join(', ');
   const live = (d?.liveBuckets || []).join(', ');
+  // THE TWO VOLUNTARY-MOVE BARS (D2/D3c). They are not quota walls and they do
+  // not heal on a timer: a reserve-floor member has quota the owner asked us
+  // to keep, an overage member is spending real money. Naming them is the
+  // difference between "out of quota" (which sends the user to wait for a
+  // reset) and the two settings that actually apply.
+  const held = (d?.reserveBlocked || []).map((m) => `${m.name || m.id} (${Math.round(m.remaining)}% weekly)`).join(', ');
+  const heldNote = held ? ` Held back by the ${d.reserveFloorPct}% reserve floor: ${held}.` : '';
+  const paying = (d?.overageBlocked || []).map((m) => m.name || m.id).join(', ');
+  const payNote = paying ? ` Skipped because they are billing paid overage: ${paying}.` : '';
+  // A bar is only the WHOLE story when nothing else emptied the list — the
+  // same rule 'all-logins-expired' earned in round 2: a quota-emptied list
+  // stays a quota sentence and the bars are named alongside it.
+  const barsOnly = !dead && !!(held || paying);
   const what = dead ? `spent: ${dead}` : 'out of quota';
   const rest = live ? ` (still available: ${live})` : '';
   const loginNames = loginBlockedText(d?.loginBlocked);
@@ -381,6 +443,8 @@ function poolBlockedNotice(d, { poolName = '', currentName = 'the current member
     ? `${currentName}'s ${d.fromLogin} — no member can take over${alsoQuota}`
     : loginWall
     ? `no member can take it — ${loginNames}`
+    : barsOnly
+    ? 'every other member is held back by your spending limits'
     : d?.reason === 'no-members'
     ? `no member can serve it — ${what}${rest}`
     : `nowhere better to go — ${what}${rest}`;
@@ -399,8 +463,10 @@ function poolBlockedNotice(d, { poolName = '', currentName = 'the current member
     ? ` Re-login ${currentName} in Manage Agents.`
     : loginWall
     ? ' Re-login those accounts in Manage Agents.'
+    : barsOnly
+    ? ' Adjust them in Settings → Spending, or add a member.'
     : ' Conversations on it will hit a limit until a window resets, you add a member, or you move them off the pool.';
-  return `Pool "${poolName}": ${why}.${alt}${also}${fix}`;
+  return `Pool "${poolName}": ${why}.${alt}${also}${heldNote}${payNote}${fix}`;
 }
 
 
