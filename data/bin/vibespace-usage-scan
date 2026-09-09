@@ -19,6 +19,27 @@ const CUR_FILE = process.env.VIBESPACE_USAGE_CURSOR || path.join(HOME, '.vibespa
 let cursors = {};
 try { cursors = JSON.parse(fs.readFileSync(CUR_FILE, 'utf-8')) || {}; } catch { }
 
+// ── THE FIXTURE GUARD — an INLINE COPY of src/fixture-guard.js (2026-09-09).
+// A suite's synthetic transcript is not usage: its `assistant` records are
+// hand-written and no API request ever happened. This file must stay ONE file
+// on a machine that has no VibeSpace checkout, so it cannot require the shared
+// module; scripts/test-usage-walk-parity.mjs drives BOTH spellings over the
+// same table of names/ids and fails any one-sided edit.
+const FIXTURE_CWD_PREFIX = 'vs-';
+const FIXTURE_SID_PREFIX = 'e2e00000-0000-4000-8000-';
+const TMP_ROOTS = ['/tmp', '/var/tmp'];
+const encodeCwd = (cwd) => String(cwd == null ? '' : cwd).replace(/[/._]/g, '-');
+function isFixtureProjectDir(name, tmpRoots = TMP_ROOTS) {
+  const n = String(name == null ? '' : name);
+  for (const root of tmpRoots) {
+    const head = encodeCwd(root) + '-' + FIXTURE_CWD_PREFIX;
+    if (n.length <= head.length || !n.startsWith(head)) continue;
+    if (/^[A-Za-z0-9][A-Za-z0-9-]*$/.test(n.slice(head.length))) return true;
+  }
+  return false;
+}
+const isFixtureSid = (sid) => typeof sid === 'string' && sid.toLowerCase().startsWith(FIXTURE_SID_PREFIX);
+
 const out = [];
 function scanFileWith(fp, cur, size, onLine) {
   let fd;
@@ -82,6 +103,7 @@ function handleLine(line, cur) {
 let projDirs = [];
 try { projDirs = fs.readdirSync(PROJECTS); } catch { }
 for (const pd of projDirs) {
+  if (isFixtureProjectDir(pd)) continue; // a suite's throwaway cwd — never usage
   const pdAbs = path.join(PROJECTS, pd);
   let entries = [];
   try { entries = fs.readdirSync(pdAbs); } catch { continue; }
@@ -108,6 +130,7 @@ for (const pd of projDirs) {
     }
   }
   for (const { fp, sid } of files) {
+    if (isFixtureSid(sid)) continue; // synthetic conversation id — no request ever happened
     let st; try { st = fs.statSync(fp); } catch { continue; }
     if (!st.isFile()) continue;
     const cur = cursors[fp] || { offset: 0, lastRid: null };
@@ -160,6 +183,7 @@ try { rollouts = fs.readdirSync(CODEX_DIR, { recursive: true }); } catch { }
 for (const rel of rollouts) {
   const m = /rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(\.zst)?$/i.exec(String(rel));
   if (!m) continue;
+  if (isFixtureSid(m[1])) continue; // synthetic thread id — same rule, both harnesses
   const fp = path.join(CODEX_DIR, String(rel));
   let st; try { st = fs.statSync(fp); } catch { continue; }
   if (!st.isFile()) continue;

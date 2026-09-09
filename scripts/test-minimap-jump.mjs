@@ -16,8 +16,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { freePorts, scratch } from './scratch.mjs';
+import { freePorts, scratch, scratchHome, fixtureSid } from './scratch.mjs';
 const require = createRequire(import.meta.url);
+const { fixtureLitter } = require('../src/fixture-guard.js');
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium'].find((p) => fs.existsSync(p));
@@ -26,8 +27,17 @@ if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
 const [PORT, CDP_PORT] = await freePorts(2); // per-process (scripts/scratch.mjs) — fixed ports collided across concurrent gates
 const wt = scratch('mmjump-smoke');
 const CWD = scratch('mmjump-test');
-const SID = 'e2e00000-0000-4000-8000-000000000002';
-const PROJ = path.join(os.homedir(), '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
+const SID = fixtureSid('2');
+// ISOLATED $HOME (2026-09-09) — see the essay in test-chat-paging.mjs and
+// src/fixture-guard.js. This suite's synthetic transcript used to land in the
+// developer's REAL ~/.claude/projects (the spawned server inherited HOME and
+// can only discover what lives under its own home), where the machine's
+// PRODUCTION instance listed it as a conversation and ingested its fabricated
+// usage: 3,600 permanent ledger rows for this session id (of the instance's 79,533 fabricated rows as of 2026-09-09).
+const fakeHome = scratchHome('mmjump-home', fs);
+const PROJ = path.join(fakeHome, '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
+const REAL_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
+const realBefore = (() => { try { return new Set(fs.readdirSync(REAL_PROJECTS)); } catch { return new Set(); } })();
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -66,18 +76,19 @@ for (const f of ['src', 'public', 'server.js']) {
 }
 fs.symlinkSync(path.join(repo, 'node_modules'), path.join(wt, 'node_modules'));
 execSync('npx esbuild src/client.js --bundle --outfile=public/bundle.js --format=iife --platform=browser --target=es2020 --loader:.css=css', { cwd: wt, stdio: 'ignore' });
-const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), VIBESPACE_SKIP_AGENT_HOOKS: '1' }, stdio: 'ignore' });
+const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), HOME: fakeHome, VIBESPACE_SKIP_AGENT_HOOKS: '1' }, stdio: 'ignore' });
 const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--no-first-run', '--disable-gpu', '--window-size=1400,1000',
   '--disable-background-timer-throttling', `--user-data-dir=${scratch('mmjump-chrome')}`, 'about:blank'], { stdio: 'ignore' });
 const cleanup = () => {
   try { chrome.kill('SIGKILL'); } catch {}
   try { srv.kill('SIGKILL'); } catch {}
   try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
-  try { fs.rmSync(scratch('mmjump-chrome'), { recursive: true, force: true }); } catch {}
-  try { fs.rmSync(PROJ, { recursive: true, force: true }); } catch {}
-  try { fs.rmSync(CWD, { recursive: true, force: true }); } catch {}
+  for (const d of [scratch('mmjump-chrome'), fakeHome, CWD]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 };
 process.on('exit', cleanup);
+// SIGNALS TOO: 'exit' does not fire for a default-terminated SIGINT/SIGTERM,
+// which is how a Ctrl-C or a runner timeout ends this suite.
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { cleanup(); process.exit(143); });
 for (let i = 0; i < 40; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250); } }
 
 const WebSocket = require('ws');
@@ -155,6 +166,20 @@ for (const frac of [0.6, 0.25, 0.85]) {
 }
 
 check('the three jumps measured three DISTINCT targets', new Set(seenTargets).size === 3, JSON.stringify(seenTargets));
+
+// ── 4. THE REAL HOME IS UNTOUCHED (see test-chat-paging.mjs §5 for the rule).
+{
+  const after = (() => { try { return fs.readdirSync(REAL_PROJECTS, { withFileTypes: true }); } catch { return []; } })();
+  const added = after.filter((d) => !realBefore.has(d.name))
+    .map((d) => ({ name: d.name, mtimeMs: (() => { try { return fs.statSync(path.join(REAL_PROJECTS, d.name)).mtimeMs; } catch { return Date.now(); } })() }));
+  const lit = fixtureLitter(added);
+  check(`the real ~/.claude/projects gained no fixture entry (${added.length} new from concurrent real sessions, 0 fixtures)`,
+    lit.offenders.length === 0, JSON.stringify(lit.offenders.slice(0, 3)));
+  check('…and this suite\'s OWN project dir is not among them (isolated home)',
+    !after.some((d) => d.name === path.basename(PROJ)), path.basename(PROJ));
+  check('the fixture really was written (the isolation did not just skip the work)',
+    fs.existsSync(path.join(PROJ, `${SID}.jsonl`)), path.join(PROJ, `${SID}.jsonl`));
+}
 
 ws.close();
 console.log(failed === 0 ? 'ALL PASS' : `${failed} FAILED`);

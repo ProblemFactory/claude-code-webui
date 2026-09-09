@@ -10,12 +10,44 @@
 // (test-chat-e2e's port 3995) inline; this is the third strike, so the idiom is
 // shared and test-architecture sweeps every scripts/test-*.mjs for the fixed
 // shapes. NOT a test-*.mjs on purpose: the tier census would demand a tier.
+//
+// SINCE 2026-09-09 the prefix and the tmp root are NOT literals here: they come
+// from src/fixture-guard.js, the ONE declaration of what a fixture looks like.
+// The production usage walk and session discovery skip exactly what this
+// function mints, and the standing sweep (scripts/test-fixture-isolation.mjs)
+// checks the real ~/.claude/projects for exactly what this function mints — so
+// a suite that renames its scratch dir cannot walk out from under the guard.
 import net from 'node:net';
+import path from 'node:path';
+import { createRequire } from 'node:module';
+const require = createRequire(import.meta.url);
+const { FIXTURE_CWD_PREFIX, TMP_ROOTS, FIXTURE_SID_PREFIX } = require('../src/fixture-guard.js');
 
 /** `/tmp/vs-<name>-<pid>` — unique per process, cleaned by the owning suite. */
 export function scratch(name) {
   if (!/^[a-z0-9][a-z0-9-]*$/.test(name)) throw new Error(`scratch(): bad name ${JSON.stringify(name)}`);
-  return `/tmp/vs-${name}-${process.pid}`;
+  return path.join(TMP_ROOTS[0], `${FIXTURE_CWD_PREFIX}${name}-${process.pid}`);
+}
+
+/** An ISOLATED $HOME for a suite that boots a server and needs discovery
+ *  (2026-09-09). The server can only discover transcripts under the home it
+ *  runs with, so the fixture goes HERE and the developer's real ~/.claude is
+ *  never touched. `dirs` are pre-created because a spawned CLI/server must not
+ *  race the first mkdir. Returns the home path; the caller removes it in its
+ *  exit AND signal handlers. */
+export function scratchHome(name, fs, dirs = ['.claude/projects', '.claude/sessions', '.config', '.vibespace']) {
+  const home = scratch(name);
+  for (const d of dirs) fs.mkdirSync(path.join(home, d), { recursive: true });
+  return home;
+}
+
+/** A suite's synthetic conversation id: `e2e00000-0000-4000-8000-<12 hex>`.
+ *  Nothing else may mint one — the walk and discovery both refuse this family
+ *  wherever it lands, which is the only guard that still works when the
+ *  fixture carries no cwd at all (a hand-written `assistant` record has none). */
+export function fixtureSid(suffix) {
+  if (!/^[0-9a-f]{1,12}$/.test(suffix)) throw new Error(`fixtureSid(): bad suffix ${JSON.stringify(suffix)}`);
+  return FIXTURE_SID_PREFIX + suffix.padStart(12, '0');
 }
 
 const listen0 = () => new Promise((res, rej) => {

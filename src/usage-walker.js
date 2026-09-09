@@ -27,6 +27,15 @@ const fs = require('fs');
 const zlib = require('zlib');
 const os = require('os');
 const path = require('path');
+// THE FIXTURE GUARD (2026-09-09). A suite's synthetic transcript is not usage:
+// its `assistant` records are hand-written, no API request ever happened, and
+// on this instance 74,133 such rows claiming 914,640 fabricated tokens had
+// already been ingested into the permanent ledger. The convention has ONE
+// definition (src/fixture-guard.js); the shipped scanner beside this module
+// carries an INLINE COPY of the two predicates because a checkout-less ssh
+// host cannot require src/ — scripts/test-usage-walk-parity.mjs drives both
+// spellings over the same table, so a one-sided edit fails there.
+const { isFixtureProjectDir, isFixtureSid } = require('./fixture-guard.js');
 
 function defaultCursorFile() {
   return process.env.VIBESPACE_USAGE_CURSOR || path.join(os.homedir(), '.vibespace', 'usage-cursor.json');
@@ -108,6 +117,7 @@ function runUsageWalk({ home = os.homedir(), cursorFile = defaultCursorFile(),
   let projDirs = [];
   try { projDirs = fs.readdirSync(PROJECTS); } catch { }
   for (const pd of projDirs) {
+    if (isFixtureProjectDir(pd)) continue; // a suite's throwaway cwd — never usage
     const pdAbs = path.join(PROJECTS, pd);
     let entries = [];
     try { entries = fs.readdirSync(pdAbs); } catch { continue; }
@@ -131,6 +141,7 @@ function runUsageWalk({ home = os.homedir(), cursorFile = defaultCursorFile(),
       }
     }
     for (const { fp, sid } of files) {
+      if (isFixtureSid(sid)) continue; // synthetic conversation id — no request ever happened
       let st; try { st = fs.statSync(fp); } catch { continue; }
       if (!st.isFile()) continue;
       const cur = cursors[fp] || { offset: 0, lastRid: null };
@@ -160,6 +171,7 @@ function runUsageWalk({ home = os.homedir(), cursorFile = defaultCursorFile(),
   for (const rel of rollouts) {
     const m = /rollout-.*-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl(\.zst)?$/i.exec(String(rel));
     if (!m) continue;
+    if (isFixtureSid(m[1])) continue; // synthetic thread id — same rule, both harnesses
     const fp = path.join(codexDir, String(rel));
     let st; try { st = fs.statSync(fp); } catch { continue; }
     if (!st.isFile()) continue;

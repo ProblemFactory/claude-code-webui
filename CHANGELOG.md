@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.369.85 — test fixtures stop being production data (owner: "e2e00000-… 这东西是个啥玩意啊 你浪费我的token干啥呢")
+
+- **Every suite that boots a worktree server gets an ISOLATED HOME.** Three synthetic-transcript suites had written into the real `~/.claude` — 84 litter dirs, a 42 MB fake transcript claiming `claude-fable-5`, a fake conversation in the sidebar and 6,453 (walk-wide: 79,533) fabricated ledger rows shown as Fable usage. Root fix: isolated HOMEs, a fixture guard the usage walker and discovery OBEY (a fixture project is never ingested, measured on a planted dir: 0 events), a one-shot migration that archives the fabricated rows (and drops their cursors — the boot line now re-reads the cursor map after migrations, or the first scan wrote the stale in-memory map back over the purge), and a standing sweep in test-fixture-isolation that fails any suite leaving litter in the real home.
+- **The census sees an `rm -rf` that stood one alias away** (round 2): test-chat-e2e deleted directories under the real `~/.claude/projects` through a bound name the matcher could not follow; the resolver is now transitive (a fixpoint over names rooted at the real home), the write matcher reads the call's first argument, and a legitimate own-leftover sweep is exempted per BLOCK with sentinels, never per file.
+- **The sweep tolerates a run in flight** (round 3): an undeclared fixture dir younger than the staleness threshold — one a concurrent older checkout may still be using, which nothing in the tree is allowed to delete — is spared and NAMED instead of reddening every other worktree's pre-push gate on a box with ~160 checkouts; it becomes litter the moment it goes stale (negative control: the same dir back-dated 15 min ⇒ red with the remedy).
+- test-fixture-isolation 78 · test-migrations 29 · test-usage-walk-parity 40 · fast tier ALL GREEN (264 s) on the branch. Not done on purpose: a self-sweeper for the other three fixture families (a read-only census must stay read-only; stale litter from them still reddens with the printed remedy).
+- The suite's retired-bytes control pins the last pre-fix commit (e87d9893) instead of `master` — a branch name is pre-fix only until the fix merges into it (it reddened this release's own first push).
+
 ## 2.369.84 — the lsof liveness budget follows the box's measured latency (gate-only)
 
 - `LSOF_BUDGET_MS` 20 s → 45 s: one `lsof +D` on the dev box measured 11.8 s a day ago and 23.9 s today (~4,000 processes; it walks every fd table). A budget below the real latency turned test-discovery-interpret red on the fast gate while the suite's own legs already say a timeout is not evidence. 26/26 in 148 s on this box. Nothing to update for.

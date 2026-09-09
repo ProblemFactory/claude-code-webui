@@ -73,9 +73,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import net from 'node:net';
-const freePort = () => new Promise((res, rej) => { const srv = net.createServer(); srv.once('error', rej); srv.listen(0, '127.0.0.1', () => { const p = srv.address().port; srv.close(() => res(p)); }); });
+import os from 'node:os';
+import { freePort, scratch, scratchHome, fixtureSid } from './scratch.mjs';
 const require = createRequire(import.meta.url);
+const { fixtureLitter } = require('../src/fixture-guard.js');
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
@@ -86,12 +87,20 @@ if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
 // talked to the OTHER copy's server, and the source-level negative control probed an
 // unpatched bundle → 4 phantom reds on a green commit.
 const PORT = await freePort(), CDP_PORT = await freePort();
-const wt = `/tmp/vs-deskresume-${process.pid}`;
-const fakeHome = `/tmp/vs-deskresume-home-${process.pid}`;
-const chromeDir = `/tmp/vs-deskresume-chrome-${process.pid}`;
-const CWD = `/tmp/vs-deskresume-cwd-${process.pid}`;
-const SID = 'e2e00000-0000-4000-8000-0000000000d1';
+// EVERY path here comes from scripts/scratch.mjs, which mints them from the ONE
+// fixture convention in src/fixture-guard.js (2026-09-09). This suite already
+// ran the server under an isolated HOME — it is the template the other two were
+// fixed to — but its paths were hand-spelled, so a rename here would have
+// walked out from under the production walk/discovery guard and the standing
+// sweep without either noticing.
+const wt = scratch('deskresume');
+const fakeHome = scratchHome('deskresume-home', fs);
+const chromeDir = scratch('deskresume-chrome');
+const CWD = scratch('deskresume-cwd');
+const SID = fixtureSid('d1');
 const PROJ = path.join(fakeHome, '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
+const REAL_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
+const realBefore = (() => { try { return new Set(fs.readdirSync(REAL_PROJECTS)); } catch { return new Set(); } })();
 let failed = 0, passed = 0;   // COUNTED, not a hand-maintained constant (the pre-round-2 label said 15 for 16 checks)
 const check = (n, c, e) => { if (c) { passed++; console.log(`  ✓ ${n}`); } else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -159,7 +168,7 @@ const cleanup = () => {
   for (const d of [chromeDir, fakeHome, CWD]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 };
 process.on('exit', cleanup);
-for (const sig of ['SIGTERM', 'SIGINT']) process.on(sig, () => { cleanup(); process.exit(143); });
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { cleanup(); process.exit(143); });
 
 for (let i = 0; i < 80; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250); } }
 
@@ -755,6 +764,18 @@ check('NEGATIVE CONTROL: the sentinel probe pages through the gap door',
   bad?.ok && bad.probeTraces.includes('extendTop:done'), JSON.stringify(bad?.probeTraces));
 check('NEGATIVE CONTROL: …and the re-tail-gap injection strands the window (unpinned / away from the tail)',
   bad?.ok && (bad.retail.pinned === false || bad.retail.fromBottom > 8), JSON.stringify(bad?.retail).slice(0, 500));
+
+// THE REAL HOME IS UNTOUCHED (see test-chat-paging.mjs §5 for the rule).
+{
+  const after = (() => { try { return fs.readdirSync(REAL_PROJECTS, { withFileTypes: true }); } catch { return []; } })();
+  const added = after.filter((d) => !realBefore.has(d.name))
+    .map((d) => ({ name: d.name, mtimeMs: (() => { try { return fs.statSync(path.join(REAL_PROJECTS, d.name)).mtimeMs; } catch { return Date.now(); } })() }));
+  const lit = fixtureLitter(added);
+  check(`the real ~/.claude/projects gained no fixture entry (${added.length} new from concurrent real sessions, 0 fixtures)`,
+    lit.offenders.length === 0, JSON.stringify(lit.offenders.slice(0, 3)));
+  check('the fixture really was written under the isolated home (isolation did not skip the work)',
+    fs.existsSync(path.join(PROJ, `${SID}.jsonl`)), path.join(PROJ, `${SID}.jsonl`));
+}
 
 ws.close();
 console.log(failed ? `\n${failed} FAILED (${passed} passed)` : `\nALL PASS (${passed})`);

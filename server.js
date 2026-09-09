@@ -2009,7 +2009,7 @@ server.listen(PORT, HOST, () => {
   // One-shot data migrations (src/server/migrations.js, plan B step 1): the
   // ledger-driven registry runs BEFORE any session restore touches the data
   // it may reshape. Failures notice + retry next boot, never block startup.
-  try { require('./src/server/migrations.js').create({ rootDir: __dirname, serverNotice }).runLocalMigrations(); usage.reloadRateLimitCache?.(); /* a repair may have unlinked data/usage-cache.json AFTER setupUsage loaded it (r6) */ }
+  try { require('./src/server/migrations.js').create({ rootDir: __dirname, serverNotice }).runLocalMigrations(); usage.reloadRateLimitCache?.(); usageHistory.reloadCursors?.(); /* a repair may have unlinked data/usage-cache.json AFTER setupUsage loaded it (r6) */ }
   catch (e) { console.warn('[migrate] local registry failed to run:', e.message); }
   migrateLegacyHomeProjects();
   restoreSessions();

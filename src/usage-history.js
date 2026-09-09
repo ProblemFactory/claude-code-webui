@@ -67,6 +67,15 @@ class UsageHistory {
     this._resolveAccount = resolveAccount;
     try { fs.mkdirSync(this.dir, { recursive: true }); } catch {}
     this._cursors = this._loadJson(this.cursorsFile, {});
+    // Re-read the cursor map from disk (2.369.85): a one-shot migration that
+    // PURGES fixture rows also drops their cursors, but this object was built
+    // (and loaded _cursors.json) BEFORE runLocalMigrations() ran, so the first
+    // scan() wrote the stale in-memory map straight back over the purged file
+    // — the migration is ledger-gated and never ran again (test-litter r3
+    // verifier). Same shape as usage-routes' reloadRateLimitCache(): the
+    // boot-time consumer re-reads after the repair instead of the repair
+    // reaching into a live object.
+    this.reloadCursors = () => { this._cursors = this._loadJson(this.cursorsFile, {}); };
     this._pricing = this._loadPricing();
     this._scanning = false;
     this._lastScan = 0;

@@ -13,8 +13,9 @@ import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createRequire } from 'node:module';
-import { freePorts, scratch } from './scratch.mjs';
+import { freePorts, scratch, scratchHome, fixtureSid } from './scratch.mjs';
 const require = createRequire(import.meta.url);
+const { fixtureLitter } = require('../src/fixture-guard.js');
 
 const repo = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CHROME = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium'].find((p) => fs.existsSync(p));
@@ -23,8 +24,21 @@ if (!CHROME) { console.log('SKIP: no chrome/chromium'); process.exit(0); }
 const [PORT, CDP_PORT] = await freePorts(2); // per-process (scripts/scratch.mjs) — fixed ports collided across concurrent gates
 const wt = scratch('chatpage-smoke');
 const CWD = scratch('chatpage-test');
-const SID = 'e2e00000-0000-4000-8000-000000000001';
-const PROJ = path.join(os.homedir(), '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
+const SID = fixtureSid('1');
+// ISOLATED $HOME (2026-09-09). This suite used to write its 42 MB synthetic
+// transcript into the developer's REAL ~/.claude/projects, because the server
+// it spawns inherited HOME and can only discover what lives under its own
+// home. The machine's PRODUCTION instance polls that directory every 5 s: the
+// fixture was listed as a stopped "conversation" and its FABRICATED usage
+// blocks were ingested into the permanent ledger (measured 2026-09-09: 70,533
+// rows for THIS session id, of the instance's 79,533 fabricated rows, claiming
+// Fable tokens nobody ever spent). The server
+// gets its own home, the fixture goes there, and the census at the end proves
+// the real one was untouched.
+const fakeHome = scratchHome('chatpage-home', fs);
+const PROJ = path.join(fakeHome, '.claude', 'projects', CWD.replace(/[/._]/g, '-'));
+const REAL_PROJECTS = path.join(os.homedir(), '.claude', 'projects');
+const realBefore = (() => { try { return new Set(fs.readdirSync(REAL_PROJECTS)); } catch { return new Set(); } })();
 let failed = 0;
 const check = (n, c, e) => { if (c) console.log(`  ✓ ${n}`); else { failed++; console.error(`  ✗ ${n}${e ? '\n    ' + e : ''}`); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -74,18 +88,22 @@ execSync('npm run build', { cwd: wt, stdio: 'ignore' });
 // UNMINIFIED bundle for the worktree: scrollTop-write stacks must carry real
 // function names so each jump can be attributed to its exact call site.
 execSync('npx esbuild src/client.js --bundle --outfile=public/bundle.js --format=iife --platform=browser --target=es2020 --loader:.css=css', { cwd: wt, stdio: 'ignore' });
-const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), VIBESPACE_SKIP_AGENT_HOOKS: '1' }, stdio: 'ignore' });
+const srv = spawn(process.execPath, ['server.js'], { cwd: wt, env: { ...process.env, PORT: String(PORT), HOME: fakeHome, VIBESPACE_SKIP_AGENT_HOOKS: '1' }, stdio: 'ignore' });
 const chrome = spawn(CHROME, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--no-first-run', '--disable-gpu', '--window-size=1400,1000',
   '--disable-background-timer-throttling', `--user-data-dir=${scratch('chatpage-chrome')}`, 'about:blank'], { stdio: 'ignore' });
 const cleanup = () => {
   try { chrome.kill('SIGKILL'); } catch {}
   try { srv.kill('SIGKILL'); } catch {}
   try { execSync(`git worktree remove --force ${wt}`, { cwd: repo, stdio: 'ignore' }); } catch {}
-  try { fs.rmSync(scratch('chatpage-chrome'), { recursive: true, force: true }); } catch {}
-  try { fs.rmSync(PROJ, { recursive: true, force: true }); } catch {}
-  try { fs.rmSync(CWD, { recursive: true, force: true }); } catch {}
+  for (const d of [scratch('chatpage-chrome'), fakeHome, CWD]) { try { fs.rmSync(d, { recursive: true, force: true }); } catch {} }
 };
 process.on('exit', cleanup);
+// SIGNALS TOO (2026-09-09): 'exit' does not fire for a default-terminated
+// SIGINT/SIGTERM, which is how a Ctrl-C or a runner timeout ends this suite —
+// the exact case that left a 42 MB fixture behind for the production instance
+// to ingest. The fixture lives under an isolated home now, so a missed cleanup
+// is only disk; the handlers keep it from being disk FOREVER.
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { cleanup(); process.exit(143); });
 for (let i = 0; i < 40; i++) { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); break; } catch { await sleep(250); } }
 
 const WebSocket = require('ws');
@@ -205,6 +223,25 @@ if (analysis.jumps.length) console.log('  jumps:', JSON.stringify(analysis.jumps
 // settled-vs-set drift on each step (loads may legitimately grow scrollHeight;
 // what must NOT happen is the viewport landing far from where the user was)
 check('no anchor-shift/teleport jumps while paging', analysis.jumpCount === 0, `${analysis.jumpCount} jumps`);
+
+// ── 5. THE REAL HOME IS UNTOUCHED. Not "no new entry at all": this box runs
+// many real sessions concurrently and a genuine project dir may appear
+// mid-run. What must be impossible is a FIXTURE entry — anything this suite
+// (or any suite sharing the convention) could have written. src/fixture-guard.js
+// owns the predicate; the sweep suite runs the same one over the whole dir.
+{
+  const after = (() => { try { return fs.readdirSync(REAL_PROJECTS, { withFileTypes: true }); } catch { return []; } })();
+  const added = after.filter((d) => !realBefore.has(d.name))
+    .map((d) => ({ name: d.name, mtimeMs: (() => { try { return fs.statSync(path.join(REAL_PROJECTS, d.name)).mtimeMs; } catch { return Date.now(); } })() }));
+  const lit = fixtureLitter(added);
+  check(`the real ~/.claude/projects gained no fixture entry (${added.length} new entr${added.length === 1 ? 'y' : 'ies'} from concurrent real sessions, 0 of them fixtures)`,
+    lit.offenders.length === 0, JSON.stringify(lit.offenders.slice(0, 3)));
+  check('…and this suite\'s OWN project dir is not among them (it lives under the isolated home)',
+    !after.some((d) => d.name === path.basename(PROJ)), path.basename(PROJ));
+  check('the fixture really was written (the isolation did not just skip the work)',
+    fs.existsSync(path.join(PROJ, `${SID}.jsonl`)) && fs.statSync(path.join(PROJ, `${SID}.jsonl`)).size > 30e6,
+    path.join(PROJ, `${SID}.jsonl`));
+}
 
 ws.close();
 console.log(failed === 0 ? 'ALL PASS' : `${failed} FAILED`);

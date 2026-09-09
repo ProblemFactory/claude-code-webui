@@ -199,6 +199,13 @@ export const SUITES = [
   { name: 'test-restore-smoke', tier: 'fast' }, // the end-to-end boot + session-lifecycle + 29-route GET battery (the lost-export class only shows at boot or route-run time). 8.9s measured: the most expensive thing the fast tier is willing to pay for
   { name: 'test-chat-trim-guard', tier: 'fast' }, // fold-dominated window trim guard (inc-mtajy6wr white-screen) pins
   { name: 'test-chat-e2e', tier: 'fast' }, // ONE real haiku turn through the full chat pipeline (oat token slot; SKIPs without ~/.config/vibespace/ci-oat)
+  // LAST ON PURPOSE (2026-09-09): the standing sweep for test-fixture litter in
+  // the developer's REAL ~/.claude/projects. Within the fast tier this really
+  // does run after every suite that could write one — the heavy tier is
+  // detached, so a heavy-tier leak is caught by the NEXT push's fast tier. It
+  // claims no port and creates no fixed /tmp path (scratch()), reads the real
+  // home only, and prints the rule it applied.
+  { name: 'test-fixture-isolation', tier: 'fast' },
 
   // ── HEAVY TIER — MEASURED cheap→expensive. Two origins, both stated per
   // row: the suites that already paid for the 11.5-minute battery (chrome,
