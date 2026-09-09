@@ -499,7 +499,7 @@ const { checkClaudeGoalStatus } = require('./src/server/goal-sync.js').create({
 // setupSessionPty + attachToDtach + the session-meta store.
 const { setupSessionPty, attachToDtach, readSessionMeta, writeSessionMeta,
   deleteSessionMeta, sessionMetaOwnerConflict, _metaTombstones,
-  applyTaskToolUpdate, emitTaskListTodos, updateSessionTodos,
+  applyTaskToolUpdate, emitTaskListTodos, updateSessionTodos, reattachLocalPty, ptyQuietSince,
 } = require('./src/server/session-stdout.js').create({
   rootDir: __dirname, BUFFERS_DIR, META_DIR, DTACH_CMD, USAGE_SCANNER_PATH,
   CLAUDE_STREAM_TYPES, _seenStreamTypes, activeSessions,
@@ -512,7 +512,7 @@ const { setupSessionPty, attachToDtach, readSessionMeta, writeSessionMeta,
   noteModelSeen: (...a) => noteModelSeen(...a),
   noteHarnessModels: (...a) => noteHarnessModels(...a), // ACP harnesses learn their model list from the agent (S8)
   recordUsageAttribution: (...a) => recordUsageAttribution(...a),
-  daemonPtyShim: (...a) => daemonPtyShim(...a),
+  daemonPtyShim: (...a) => daemonPtyShim(...a), agentEnv: (...a) => require('./src/ws-handler').agentEnv(...a), // the ONE local re-attach spawns with the sanitized env
   sbSeenFirst: (...a) => sbSeenFirst(...a),
   getDeviceMgr: () => deviceMgr,
   getHosts: () => { try { return hosts; } catch { return null; } },
@@ -1693,7 +1693,7 @@ registerWsHandler(wss, {
   agentdRemote: { ensureAgentdOnHost, agentdHostToken, agentdDir: AGENTD_DIR, attachBundle: path.join(__dirname, 'data', 'bin', 'vibespace-agentd-attach.js') },
   dialBridge,
   activeSessions, WS_OPEN, broadcastActiveSessions, broadcastToSession, resizeSessionToMin,
-  setupSessionPty, refreshWebuiPids, deleteSessionMeta, writeSessionMeta, readSessionMeta, autoResume,
+  setupSessionPty, reattachLocalPty, ptyQuietSince, refreshWebuiPids, deleteSessionMeta, writeSessionMeta, readSessionMeta, autoResume,
   readLayouts, writeLayouts, getSyncStore, serverSetting, integrationEnabled,
   sessionCounterRef, createSessionMessages,
   SOCKETS_DIR, BUFFERS_DIR, PTY_WRAPPER, CHAT_WRAPPER,

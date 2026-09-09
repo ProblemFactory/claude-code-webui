@@ -24,6 +24,7 @@ function create({ rootDir, BUFFERS_DIR, META_DIR, DTACH_CMD, USAGE_SCANNER_PATH,
   CLAUDE_STREAM_TYPES, _seenStreamTypes, activeSessions, engine,
   checkClaudeGoalStatus, broadcastToSession, broadcastActiveSessions,
   noteModelSeen, noteHarnessModels, recordUsageAttribution, daemonPtyShim, sbSeenFirst, getDeviceMgr,
+  agentEnv, // the SANITIZED spawn env (spawn-hygiene law) — the ONE local re-attach uses it, as ws-handler's detector always did
   getHosts, getUsageHistory, getTelemetry, getNoConvoRef, getDeliver, getPages, getPermissionRules }) {
   const hosts = mk(getHosts);
   const usageHistory = mk(getUsageHistory);
@@ -86,6 +87,15 @@ function updateSessionTodos(session, todos) {
 
 function setupSessionPty(session, id, ptyProcess, { cleanupOnExit = true } = {}) {
   session.pty = ptyProcess;
+
+  // LIVENESS STAMP — the ONE place every pty (local node-pty or daemonPtyShim)
+  // is wired, so "did ANY byte arrive from this bridge since T" has ONE answer
+  // for every mode and every stream protocol. It is registered FIRST and holds
+  // no other duty: the terminal branch SWALLOWS dtach's attach preamble and a
+  // chat consumer may not append every byte to session.buffer, so a reader
+  // that asks `session.buffer.length` cannot see the bytes that prove the
+  // bridge is alive. (This is why daemonPtyShim had to grow a listener SET.)
+  ptyProcess.onData(() => { session._lastPtyDataAt = Date.now(); });
 
   if (session.mode === 'chat') {
     // Dispatch by DECLARED protocol (P4 → S5): the harness descriptor's caps
@@ -320,6 +330,73 @@ function deleteSessionMeta(sockName) {
   try { fs.unlinkSync(path.join(META_DIR, sockName + '.json')); } catch {}
 }
 
+// ── SESSION LIVENESS (2026-09-09, the restore incident) ────────────────────
+// A restored dtach session must STREAM without the user typing — that is the
+// whole restart-survival promise. It stopped doing so because the daemon
+// attach path FIRE-AND-FORGOT the open: `openSession()` resolves as soon as
+// the `open-session` control frame is written, `handle.ready` (the daemon's
+// `session-open` reply / `session-error` / pre-ready link death) was never
+// awaited, and `setupSessionPty` ran on the shim regardless. An open that the
+// daemon never completed is then a SILENTLY dead pty: no journal line, the
+// session still LIVE in the sidebar, nothing to re-attach because the shim's
+// onExit never fires either. Production (2026-09-08 22:20 PDT, v2.369.77):
+// twelve sessions restored, one claude session showed "3 Bash · running…" for
+// ~8 minutes while its wrapper kept appending to its buffer FILE, and the only
+// thing that healed it was the ws input detector at 22:29:05 — i.e. the user
+// typing. HONEST LIMIT: the journal proves neither a `session-error` nor an
+// `[agentd] connection lost` in that window, so WHICH of the two silent shapes
+// (a reply that never came, or one nobody was listening for) hit those
+// sessions is not established; both are the same dead bridge and both are
+// covered below.
+//
+// THE PROBE IS A READ, NOT A WRITE. `dtach -a <sock> -E -r winch` emits its
+// redraw kickoff `\x1b[H\x1b[J` to the attaching client immediately even when
+// the program inside is silent (MEASURED: 1 ms locally; 2–50 ms through the
+// daemon over the mux; the terminal branch already strips it as the "attach
+// preamble"). So a healthy attach ALWAYS produces a byte within milliseconds
+// and a dead bridge never does — no stdin write, no wrapper cooperation, and
+// it works for chat AND terminal sessions. Writing a probe LINE was rejected
+// on measurement: chat-wrapper acks any stdin line but then forwards an
+// unrecognised JSON line straight to claude's stdin and wraps a NON-JSON line
+// as a user message (= a billed turn), and the sessions this probe exists for
+// are by construction running the PREVIOUS release's wrapper (the 2.361.1
+// version-skew class), so a new no-op verb cannot be assumed.
+const ATTACH_PROBE_MS = 4000;     // >> the measured 2–50 ms first byte; see the confirm stage below
+const ATTACH_PROBE_CONFIRM_MS = 600;
+const ATTACH_PROBE_MAX_HEALS = 2; // a bounded heal, never a loop
+const DEVICE_OPEN_READY_MS = 5000; // measured open-session→ready: 8 ms worst of 10 (sh), 2 ms (dtach -a), 11 ms for 12 concurrent
+
+/** Did ANY byte arrive from this session's pty since `since`? (the ONE reader
+ *  of the stamp — both liveness triggers ask it).
+ *  `>=`, not `>`: the stamp has MILLISECOND granularity and both callers take
+ *  `since` immediately before the thing they are timing, so a byte landing in
+ *  that same millisecond is the byte they are waiting for. The tie must fall
+ *  on "alive" because the healing side of it RESENDS the user's input — the
+ *  echo of a local terminal really can come back inside the same ms as the
+ *  write, and a duplicated keystroke is a worse answer than a missed heal we
+ *  get another chance at 4.6 s later. (The predicate this replaced compared a
+ *  monotone byte COUNT and had no tie to lose.) */
+function ptyQuietSince(session, since) { return !(Number(session._lastPtyDataAt) >= since); }
+
+/** THE ONE local re-attach — both liveness triggers land here (the attach
+ *  probe below, and ws-handler's broken-stdin detector after a user input).
+ *  The TRIGGERS differ because the evidence differs (no bytes since attach vs
+ *  no ack + no bytes since the write); the HEALING is one implementation.
+ *  Deliberately local: the daemon is the thing under suspicion. */
+function reattachLocalPty(id, session, why, { resend = null } = {}) {
+  if (!activeSessions.has(id) || !session.socketPath) return false;
+  console.log(`[${id}] ${why} — re-attaching dtach locally`);
+  try { global.__vsEvent?.('pty-reattach-local', why); } catch { }
+  if (session.pty) { try { session.pty.kill(); } catch { } }
+  const newPty = pty.spawn(DTACH_CMD, ['-a', session.socketPath, '-E', '-r', 'winch'], {
+    name: 'xterm-256color', cols: 120, rows: 30,
+    env: { ...agentEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+  });
+  setupSessionPty(session, id, newPty);
+  if (resend != null) setTimeout(() => { try { newPty.write(resend + '\n'); } catch { } }, 500);
+  return true;
+}
+
 // Attach a PTY to an existing dtach socket for I/O.
 // opts.repaint (the RE-attach path): dtach replays nothing on attach and a
 // plain shell never repaints, so after healing the bridge we push the buffer
@@ -336,22 +413,133 @@ function attachToDtach(id, socketPath, session, { repaint = false } = {}) {
       broadcastToSession(session, id, { type: 'output', sessionId: id, data });
     } catch { /* no buffer file — nothing to repaint */ }
   };
+  // Arm the liveness probe for THIS attach: if the bridge produced no byte at
+  // all, heal it locally. The confirm stage exists because a blocked event
+  // loop runs the timers phase before the poll phase — a 30 s boot stall
+  // (measured in the incident journal) would otherwise fire the verdict ahead
+  // of bytes that had long since arrived on the socket.
+  // `since` is a PARAMETER because the device path stamps bytes it buffered
+  // BEFORE the shim existed (see the early-data replay below): the window the
+  // probe judges has to start when the BRIDGE was opened, not when the last
+  // line of wiring ran, or a preamble we successfully caught reads as silence.
+  const armProbe = (ptyProcess, via, since = Date.now()) => {
+    const verdict = () => {
+      if (!activeSessions.has(id) || session.pty !== ptyProcess) return;   // replaced/torn down — not ours to judge
+      // The attach preamble landed: this bridge is alive. Clear the heal
+      // counter — the bound below is on CONSECUTIVE silent attaches, the same
+      // shape as `_reattachAttempts`, which the terminal branch resets on
+      // data. A lifetime cap would spend a long-lived session's two heals on
+      // two unrelated daemon hiccups days apart and then leave the third one
+      // dark until somebody typed, which is the incident.
+      if (!ptyQuietSince(session, since)) { session._attachProbeHeals = 0; return; }
+      if (!ptyProcess._daemon) {
+        // A local dtach -a that produced nothing means the SOCKET is stale;
+        // re-attaching locally again would only repeat it, and the pty's own
+        // exit drives the bounded re-attach ladder. Say so once.
+        console.warn(`[${id}] local dtach attach produced no output within ${ATTACH_PROBE_MS + ATTACH_PROBE_CONFIRM_MS} ms (${via}) — the dtach socket may be stale`);
+        try { global.__vsEvent?.('pty-attach-silent', via); } catch { }
+        return;
+      }
+      session._attachProbeHeals = (session._attachProbeHeals || 0) + 1;
+      if (session._attachProbeHeals > ATTACH_PROBE_MAX_HEALS) {
+        console.warn(`[${id}] device pty still silent after ${ATTACH_PROBE_MAX_HEALS} local re-attach(es) — giving up on this attach (${via})`);
+        return;
+      }
+      reattachLocalPty(id, session, `no byte from the device pty within ${ATTACH_PROBE_MS + ATTACH_PROBE_CONFIRM_MS} ms of attach (${via})`);
+    };
+    setTimeout(() => {
+      if (!activeSessions.has(id) || session.pty !== ptyProcess) return;
+      if (!ptyQuietSince(session, since)) return;
+      setTimeout(verdict, ATTACH_PROBE_CONFIRM_MS);
+    }, ATTACH_PROBE_MS);
+  };
   const localAttach = () => {
     const attachPty = pty.spawn(DTACH_CMD, ['-a', socketPath, '-E', '-r', 'winch'], {
       name: 'xterm-256color', cols: 120, rows: 30,
-      env: { ...process.env, TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+      env: { ...agentEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
     });
     setupSessionPty(session, id, attachPty);
     repaintClients();
+    armProbe(attachPty, 'local');
   };
   // M1: daemon owns the pty when enabled — the dtach attach runs INSIDE agentd
   // and relays over the mux. On ANY failure fall back to the local pty so a
   // daemon hiccup never loses a session.
+  //
+  // BOOT ORDERING (the incident's second half): server.js starts
+  // `deviceMgr.connect()` and calls restoreSessions() on the very next lines,
+  // so on a cold boot the daemon link is still being established — in the
+  // production journal the connect was in flight for the WHOLE restore
+  // (`spawned local daemon` 22:20:56, `routing ENABLED` 22:21:02, restore
+  // 22:20:22–22:20:53) and the link it finally produced had just streamed a
+  // new bundle into the old daemon and waited out its re-exec. A restored
+  // dtach session relays NOTHING while unattached and dtach replays nothing
+  // afterwards, so the continuity-preserving answer is to take the daemon
+  // path only when the link is ALREADY live: a local pty is available in the
+  // SAME TICK, with no blind window and no migration churn.
+  // Of the two options the task named, this one and not "connect first":
+  // awaiting the link would put that whole 40 s (spawn + version handshake +
+  // bundle upload + re-exec, MEASURED in the journal above) in front of every
+  // session's restore, and a daemon that never comes up would stall the boot
+  // that exists to bring those sessions back. Migrating a working local pty
+  // onto the daemon after 'routing ENABLED' was rejected for the same reason
+  // the gate exists: it is a teardown + re-attach on a bridge that is already
+  // relaying, i.e. a second blind window bought for nothing.
+  // WHAT THIS COSTS, precisely: `attachToDtach` has exactly two callers —
+  // boot-restore (gated local by the above) and the re-attach ladder in
+  // setupSessionPty's onExit, which fires long after 'routing ENABLED' and
+  // still takes the daemon. New sessions never took this path at all:
+  // ws-create spawns `dtach -c` under its own node-pty.
   const deviceMgr = getDeviceMgr();
-  if (deviceMgr && !session.host) {
-    deviceMgr.openSession({ cmd: DTACH_CMD, args: ['-a', socketPath, '-E', '-r', 'winch'], cols: 120, rows: 30 })
-      .then((h) => { setupSessionPty(session, id, daemonPtyShim(h)); repaintClients(); })
-      .catch((e) => { console.warn('[device] session attach failed — local pty fallback:', e.message); localAttach(); });
+  if (deviceMgr && !session.host && deviceMgr.status?.().connected) {
+    // OBSERVE THE OPEN. `handle.ready` resolves on the daemon's `session-open`
+    // and rejects on `session-error` / pre-ready link death (2.271.0 T1-6) —
+    // fire-and-forget made both of those a dead bridge nobody could see.
+    let abandoned = false;
+    deviceMgr.openSession({
+      cmd: DTACH_CMD, args: ['-a', socketPath, '-E', '-r', 'winch'], cols: 120, rows: 30,
+      // The daemon merges this over its OWN process env in spawnEnv(), which
+      // is the right base here: the local branch's `process.env` reaches
+      // NOTHING in attach mode — measured, `/usr/bin/dtach` imports no
+      // getenv/secure_getenv and carries no env-var name strings; its only
+      // env consumer is execvp, which runs on `-c`/`-n` CREATE only, and the
+      // agent CLI lives inside the dtach MASTER with the env it was spawned
+      // with. Shipping the whole server env over the mux on every attach
+      // would put every secret in it into a control frame for no effect.
+      env: { TERM: 'xterm-256color', COLORTERM: 'truecolor' },
+    }).then((h) => {
+      // CATCH THE BYTES THAT ARRIVE BEFORE THERE IS A LISTENER. The mux
+      // dispatches a whole socket read synchronously, so a `session-open`
+      // control frame and the dtach preamble that follows it can land in the
+      // SAME read; `ready` is a promise, so it settles a microtask later and
+      // `handle.onData` is still null when that data frame is dispatched — it
+      // would be dropped on the floor. Harmless for a chatty session, fatal
+      // for the probe's evidence on a SILENT one (an idle claude waiting on a
+      // prompt emits nothing else), which would make a healthy daemon heal on
+      // every attach. Buffer here, replay once the shim's listeners exist.
+      const early = [];
+      h.onData = (buf) => early.push(buf);
+      h._earlyData = early;
+      // Handle the rejection here too, so a `ready` nobody raced is never an
+      // unhandled rejection; and if we already fell back, kill the late open
+      // so two dtach clients never relay the same session twice.
+      h.ready.then(() => { if (abandoned) { try { h.kill(); } catch { } } }, () => { });
+      return new Promise((resolve, reject) => {
+        const t = setTimeout(() => reject(new Error(`device did not answer open-session within ${DEVICE_OPEN_READY_MS} ms`)), DEVICE_OPEN_READY_MS);
+        h.ready.then(() => { clearTimeout(t); resolve(h); }, (e) => { clearTimeout(t); reject(e); });
+      }).catch((e) => { abandoned = true; try { h.kill(); } catch { } throw e; });
+    }).then((h) => {
+      const openedAt = Date.now();
+      const shim = daemonPtyShim(h);   // reassigns h.onData to its listener SET
+      setupSessionPty(session, id, shim);
+      for (const buf of (h._earlyData || []).splice(0)) { try { h.onData(buf); } catch { } }
+      repaintClients();
+      armProbe(shim, 'device', openedAt);
+    }).catch((e) => {
+      console.warn(`[device] ${id}: session attach failed (${e.message}) — local pty fallback`);
+      try { global.__vsEvent?.('pty-device-open-failed', e.message); } catch { }
+      localAttach();
+    });
     return;
   }
   localAttach();
@@ -360,6 +548,7 @@ function attachToDtach(id, socketPath, session, { repaint = false } = {}) {
 // On startup, reconnect to existing dtach sockets
   return { setupSessionPty, attachToDtach, readSessionMeta, writeSessionMeta,
     deleteSessionMeta, sessionMetaOwnerConflict, _metaTombstones,
-    applyTaskToolUpdate, emitTaskListTodos, updateSessionTodos };
+    applyTaskToolUpdate, emitTaskListTodos, updateSessionTodos,
+    reattachLocalPty, ptyQuietSince }; // the ONE healer + the ONE liveness reader (ws-handler's input detector shares both)
 }
 module.exports = { create };
