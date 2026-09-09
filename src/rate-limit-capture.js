@@ -102,30 +102,43 @@ function captureRateLimitEvent({ cacheDir, key, identityIds, ev, now = Date.now(
   const dead = ev.status === 'rejected';
   const reading = dead || ev.utilization != null;
   const nowSec = Math.floor(now / 1000);
+  // THE WINDOW STATE IS A VERDICT ABOUT A READING, NOT A PROPERTY OF THE SLOT
+  // (r3). It is computed by the projection (`quota-model.toLegacyView`) from a
+  // usedPct + resetsAt + measuredAt triple; this producer spreads the previous
+  // bucket forward to keep the fields it is not restating, and the stamp used
+  // to ride along onto numbers it no longer describes. So: whenever we RE-STATE
+  // the numbers, we drop the verdict we are no longer entitled to and let the
+  // write path re-derive it — with `measuredAt: now`, which is the correct
+  // clock for this event. A `status`-only event changes no number, leaves the
+  // reading intact, and therefore keeps the stamp (dropping it there would hand
+  // `fromLegacy` the FILE's clock and flip a genuinely empty window to
+  // 'running' — B-8b12 in the other direction).
+  const restated = (b) => { const c = { ...b }; delete c.state; return c; };
   const applyTo = (cache) => {
     if (ev.kind === 'scoped') {
       const list = Array.isArray(cache.scopedWeekly) ? cache.scopedWeekly.slice() : [];
       const i = list.findIndex((s) => String(s.name || '').toLowerCase() === ev.scopedName);
-      const s = { ...(i >= 0 ? list[i] : { name: ev.scopedName }) };
-      if (ev.status === 'rejected') { s.utilization = 1; s.status = 'limited'; }
-      else if (ev.utilization != null) { s.utilization = ev.utilization; s.status = ev.status || s.status; }
+      let s = { ...(i >= 0 ? list[i] : { name: ev.scopedName }) };
+      if (ev.status === 'rejected') { s = restated(s); s.utilization = 1; s.status = 'limited'; }
+      else if (ev.utilization != null) { s = restated(s); s.utilization = ev.utilization; s.status = ev.status || s.status; }
       else if (ev.status) s.status = ev.status;
-      if (Number(ev.resetsAt) > 0) s.resetsAt = ev.resetsAt;
+      if (Number(ev.resetsAt) > 0) { if (s.resetsAt !== ev.resetsAt) s = restated(s); s.resetsAt = ev.resetsAt; }
       s.asOf = now; // fresh reading marker — the scoped pair guard keys on asOf
       if (i >= 0) list[i] = s; else list.push(s);
       cache.scopedWeekly = list;
       return cache; // primary write path consumes the return value
     }
-    const b = { ...(cache[ev.kind] || {}) };
+    let b = { ...(cache[ev.kind] || {}) };
     if (dead) {
+      b = restated(b);
       b.utilization = 1; b.status = 'limited';
       b.resetsAt = (Number(ev.resetsAt) || 0) > nowSec ? ev.resetsAt
         : (Number(b.resetsAt) || 0) > nowSec ? b.resetsAt
           : nowSec + (ev.kind === 'fiveHour' ? 5 * 3600 : 24 * 3600); // bounded guess — self-expires
     } else {
-      if (ev.utilization != null) { b.utilization = ev.utilization; b.status = ev.status || b.status; }
+      if (ev.utilization != null) { b = restated(b); b.utilization = ev.utilization; b.status = ev.status || b.status; }
       else if (ev.status) b.status = ev.status;
-      if ((Number(ev.resetsAt) || 0) > 0) b.resetsAt = ev.resetsAt;
+      if ((Number(ev.resetsAt) || 0) > 0) { if (b.resetsAt !== ev.resetsAt) b = restated(b); b.resetsAt = ev.resetsAt; }
     }
     cache[ev.kind] = b;
     if (ev.overage && Object.values(ev.overage).some((v) => v !== undefined)) cache.overage = { ...(cache.overage || {}), ...ev.overage, asOf: now };

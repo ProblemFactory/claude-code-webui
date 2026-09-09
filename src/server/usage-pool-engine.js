@@ -2278,6 +2278,14 @@ function markLimitBanner(session, text) {
     const nowSec = Math.floor(Date.now() / 1000);
     const bump = (b, fallbackResetSec) => ({
       ...(b || {}),
+      // THE WINDOW STATE IS A VERDICT ABOUT A READING (r3, same rule as
+      // rate-limit-capture's `restated`): this mark RE-STATES the utilization,
+      // so the verdict the projection computed for the numbers it replaces does
+      // not travel with it. Unconditional here because `bump` always restates.
+      // Leaving it on turned a bucket stamped 'empty' or 'unknown' into a wall
+      // the pool could not see — `bucketCounts` drops both, so the member the
+      // CLI had just rejected read back as healthy.
+      state: undefined,
       utilization: 1, status: 'limited',
       // keep a known FUTURE reset; else a bounded guess so the marker self-
       // expires (reset-passed ⇒ full) instead of pinning the account dead

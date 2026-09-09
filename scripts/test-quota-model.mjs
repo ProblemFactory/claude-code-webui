@@ -404,6 +404,12 @@ console.log('\n⑨ backend shape detection is by FIELDS, never by key name');
       // rather than asserting it in prose, because a claim in a comment can
       // never go red.
       'spent-only': 'reads the raw shape, but only ever asks "is this bucket spent" — an empty window can never answer yes',
+      // A class earned by MEASUREMENT too (⑯c): the module asks quota-model's
+      // predicate but reads the PROJECTED view, so its answer is exactly as
+      // good as `toLegacyView`. That is a real dependency and it is named, not
+      // filed under 'migrated' — a projection that loses a window makes this
+      // module wrong while every predicate it calls stays right.
+      'view-only': 'reads the DERIVED view (with quota-model`s predicate), never the accessor — so the projection`s own invariant is what protects it, and ⑯c drives it',
       mention: 'names a bucket field in prose only; it holds no bucket read',
       pending: 'NOT MIGRATED YET — named, with what it still does raw',
     };
@@ -414,7 +420,14 @@ console.log('\n⑨ backend shape detection is by FIELDS, never by key name');
       ['src/harnesses/codex-quota.js', ['parser', 'the codex rate_limits shapes']],
       ['src/adapters/claude-code.js', ['parser', 'parseGetUsageResponse — the get_usage control payload']],
       ['src/model-family.js', ['parser', 'the family projection over scopedWeekly names']],
-      ['src/account-pool-auto.js', ['migrated', 'bucketRemaining/weeklyDeadline call bucketCounts — an empty window is neither a constraint nor a deadline']],
+      // NOT 'migrated' (r3): it calls `bucketCounts`, which is why the
+      // empty-window harm cannot reach it — but it reads the DERIVED VIEW and
+      // never the accessor, so it can only ever be as right as the projection
+      // is. That gap is what hid a model limit's 5-hour window from the pool
+      // (⑯c). The honest class is 'view-only', and the invariant that keeps it
+      // safe is DRIVEN in ⑯c ("the view is never more optimistic than the
+      // accessor") rather than assumed here.
+      ['src/account-pool-auto.js', ['view-only', 'bucketRemaining/weeklyDeadline call bucketCounts, so no empty window can become a constraint or a deadline — but they read the projected view, so ⑯c drives the projection`s own invariant']],
       ['src/usage-anchors.js', ['migrated', 'an empty bucket anchors as no-bucket, like the fabricated status:unknown one']],
       ['src/usage-estimator.js', ['migrated', 'overlayCache never replaces a bucket the raw reading marks empty']],
       ['src/reading-lag.js', ['migrated', 'windowOf skips empty windows — a sliding reset is not identity evidence']],
@@ -725,5 +738,450 @@ console.log('\n⑨ backend shape detection is by FIELDS, never by key name');
   }
 }
 
+
+// ── ⑯ THE ROUND-3 DEFECTS: THREE WAYS A BUCKET STOPPED COUNTING ─────────────
+// All three were found by an adversarial verifier ON THIS BRANCH, all three
+// were reproduced end to end before being fixed, and all three cost money in
+// the same way: a bucket that makes a real claim is dropped from
+// `accountRemaining` / `weeklyDeadline` / `bucketRems` / the anchor stream, so
+// the pool goes on spending against a member that is actually walled.
+//
+// Each leg drives the REAL modules. Each negative control is a PATCHED COPY of
+// a real module written beside it (siblings, or the relative requires do not
+// resolve — the same idiom as test-auto-resume §12a and test-readings-attribution
+// §18), and every patch is ASSERTED TO HIT so a control can never quietly turn
+// into a second green arm.
+console.log('\n⑯ the round-3 defects: three ways a counting bucket stopped counting');
+{
+  const MUT = `vs-qmr3-mut-${process.pid}-`;
+  // Sweep any sibling left by a run that was SIGKILLed (a crashed suite must
+  // never be able to dirty the tree and block the release gate).
+  try {
+    for (const f of fs.readdirSync(path.join(ROOT, 'src'))) {
+      const m = /^vs-qmr3-mut-(\d+)-/.exec(f);
+      if (!m || Number(m[1]) === process.pid) continue;
+      try { process.kill(Number(m[1]), 0); continue; } catch { }   // still running: leave it
+      try { fs.unlinkSync(path.join(ROOT, 'src', f)); } catch { }
+    }
+  } catch { }
+  const mutants = [];
+  process.on('exit', () => { for (const f of mutants) { try { fs.unlinkSync(f); } catch { } } });
+
+  /** Write patched sibling copies of `names` (paths under src/) and return a
+   *  require()-able map. `patches` is {file: [[from, to], …]}; every entry must
+   *  hit exactly once. Cross-requires between the copies are re-pointed so the
+   *  mutant world is closed — a control that half-loads the real module is not
+   *  a control. */
+  const mutantWorld = (tag, names, patches) => {
+    const out = {}, hits = [];
+    const nameOf = (n) => `${MUT}${tag}-${path.basename(n)}`;
+    for (const n of names) {
+      let src = fs.readFileSync(path.join(ROOT, n), 'utf8');
+      for (const other of names) {
+        const rel = './' + path.basename(other);
+        if (src.includes(`require('${rel}')`)) src = src.split(`require('${rel}')`).join(`require('./${nameOf(other)}')`);
+      }
+      for (const [from, to] of (patches[n] || [])) {
+        hits.push([n, src.split(from).length - 1]);
+        src = src.split(from).join(to);
+      }
+      const dst = path.join(ROOT, 'src', nameOf(n));
+      fs.writeFileSync(dst, src);
+      mutants.push(dst);
+      out[n] = dst;
+    }
+    return { out, hits };
+  };
+  const load = (w, n) => require(w.out[n]);
+  const patchHit = (w, label) => ok(w.hits.length > 0 && w.hits.every(([, c]) => c === 1),
+    `⑯ NEGATIVE CONTROL setup: ${label} — every patch anchor hit exactly once (${JSON.stringify(w.hits)})`);
+
+  const POOL = require(path.join(ROOT, 'src/account-pool-auto.js'));
+  const CAP = require(path.join(ROOT, 'src/rate-limit-capture.js'));
+  const QMFILE = 'src/quota-model.js', WFILE = 'src/usage-cache-write.js', CFILE = 'src/rate-limit-capture.js';
+  const NOW = 1788970000000, nowSec = Math.floor(NOW / 1000);
+  const scratch = () => { const d = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qm16-')); tmpDirs.push(d); return d; };
+  // ⑯c builds the view-vs-accessor shape matrix; ⑯d re-drives it against its
+  // own mutant to show the matrix now covers the defect that walked past it.
+  let propShapes = null, propNow = 0;
+  const rd = (d, k) => JSON.parse(fs.readFileSync(path.join(d, k + '.json'), 'utf8'));
+
+  // ── ⑯a A STATED SPEND WITH NO RESET ───────────────────────────────────────
+  // `windowState` asked for the deadline BEFORE it asked whether anything had
+  // been spent, so "we know the utilization but not the reset" collapsed into
+  // 'unknown' — which `bucketCounts` drops.
+  console.log('\n  ⑯a a stated spend is decisive even when the reset is unknown');
+  {
+    // PURE: the rule itself.
+    ok(QM.windowState({ kind: '5h', usedPct: 100, resetsAt: null, measuredAt: NOW }) === 'running',
+      '⑯a a window the vendor says is 100 % gone is RUNNING, reset or no reset');
+    ok(QM.windowState({ kind: '5h', usedPct: 0.4, resetsAt: null, measuredAt: NOW }) === 'running',
+      '⑯a …any stated spend does it (the test is "> 0", not "looks big")');
+    // POSITIVE CONTROL: the rule did not swallow the honest-unknown case.
+    ok(QM.windowState({ kind: '5h', usedPct: 0, resetsAt: null, measuredAt: NOW }) === 'unknown',
+      '⑯a POSITIVE CONTROL: 0 % with no reset is still UNKNOWN — untouched and just-started stay indistinguishable');
+    ok(QM.windowState({ kind: '5h', usedPct: null, resetsAt: nowSec + 3000, measuredAt: NOW }) === 'unknown',
+      '⑯a POSITIVE CONTROL: …and no usage figure at all is still UNKNOWN (ignorance is never a claim)');
+
+    // REACHABILITY, from the product's own parser. THIS IS THE WHOLE PATH: the
+    // `· resets` clause is optional on a real claude panel line,
+    // `refreshViaCliPanel` deliberately refuses to project the 5-hour reset,
+    // and the panel is the on-demand ⟳ every member gets. So a member can be
+    // 95 % through its burst window with no reset anywhere in the product.
+    const panel = CLAUDEQ.parseCliUsageText('Current session: 95% used\nCurrent week (all models): 20% used · resets Jan 2, 3am (America/Los_Angeles)', NOW);
+    ok(panel && panel.fiveHour && panel.fiveHour.utilization === 0.95 && panel.fiveHour.resetsAt === undefined,
+      `⑯a REACHABILITY: a real panel line without "· resets" parses to a SPENT bucket with NO reset (${JSON.stringify(panel.fiveHour)})`);
+
+    // PRODUCT, end to end, through the one write path. Deliberately NO wall
+    // here: a wall supplies its own bounded-guess reset, which would let ⑯b's
+    // defect stand in for this one. This leg must fail for exactly one reason.
+    const world = (Q) => {
+      const dir = scratch();
+      Q.W.writeCacheObject({ cacheDir: dir, key: 'A', obj: { ...panel, fetchedAt: NOW }, measuredAt: NOW, source: 'cli-usage' });
+      Q.W.writeCacheObject({ cacheDir: dir, key: 'B', obj: { fiveHour: { utilization: 0.2, resetsAt: nowSec + 3000 }, sevenDay: { utilization: 0.1, resetsAt: nowSec + 300000 }, fetchedAt: NOW }, measuredAt: NOW, source: 'cli-usage' });
+      const caches = { A: rd(dir, 'A'), B: rd(dir, 'B') };
+      return {
+        caches,
+        rem: POOL.accountRemaining(caches.A, nowSec),
+        dec: POOL.decidePoolSwitch({ currentId: 'A', members: [{ id: 'A', name: 'A' }, { id: 'B', name: 'B' }], readCache: (id) => caches[id] ?? null, nowSec, hot: true, explain: true }),
+      };
+    };
+    const real = world({ W, CAP });
+    ok(real.rem.known && real.rem.remaining === 5,
+      `⑯a the member 95 % through its burst window reads 5 % remaining (${JSON.stringify(real.rem)})`);
+    ok(real.dec && real.dec.to === 'B',
+      `⑯a …and the pool LEAVES it (${JSON.stringify({ to: real.dec && real.dec.to, why: real.dec && real.dec.reason })})`);
+    ok(real.caches.A.fiveHour.state === undefined,
+      `⑯a …because the reset-less bucket counts on the strength of its spend alone (${JSON.stringify(real.caches.A.fiveHour)})`);
+
+    // NEGATIVE CONTROL: put the deadline test back in front of the spend test.
+    const w = mutantWorld('a', [QMFILE, WFILE, CFILE], {
+      [QMFILE]: [
+        ["  if (used == null) return 'unknown';", "  const resetsAt0 = posNum(win.resetsAt);\n  if (used == null || resetsAt0 == null) return 'unknown';"],
+        ["  const resetsAt = posNum(win.resetsAt);\n  if (resetsAt == null) return 'unknown';", '  const resetsAt = resetsAt0;'],
+      ],
+    });
+    patchHit(w, '⑯a restores the pre-fix ordering in windowState');
+    const pre = world({ W: load(w, WFILE), CAP: load(w, CFILE) });
+    ok(pre.caches.A.fiveHour.state === 'unknown' && pre.caches.A.fiveHour.utilization === 0.95,
+      `⑯a NEGATIVE CONTROL: with the old ordering the bucket is 95 % spent AND stamped unknown, so bucketCounts drops it (${JSON.stringify(pre.caches.A.fiveHour)})`);
+    ok(pre.rem.remaining === 80,
+      `⑯a NEGATIVE CONTROL: …the member reads ${pre.rem.remaining} % free on its 7d window alone — the burst window it is nearly through is invisible`);
+    ok(pre.dec === null || (pre.dec && pre.dec.to === null),
+      `⑯a NEGATIVE CONTROL: …and the pool stays on it (${JSON.stringify(pre.dec && pre.dec.reason)})`);
+  }
+
+  // ── ⑯b A STORED VERDICT MAY NOT OUTLIVE THE READING IT DESCRIBES ──────────
+  // `state` is a verdict computed by the projection from a
+  // (usedPct, resetsAt, measuredAt) triple, but it lives on the bucket object
+  // every producer spreads forward — so it rode onto numbers it no longer
+  // described. Two halves, two mechanisms, two negative controls.
+  console.log('\n  ⑯b a stored window verdict may not outlive the reading it describes');
+  {
+    const WEEK = 7 * 24 * 3600;
+    // B1 — THE BELT'S OWN CASE: a stale stamp that arrives from a FILE, not
+    // from a producer this build can patch. An older build stamped the bucket
+    // 'unknown' while it had no reset; the account has since been read properly
+    // and the bucket is 95 % spent and fully dated, but the stamp is still on
+    // disk. Nothing in this leg re-states the 5h bucket, so the producer half
+    // can never fire — only `fromLegacy`'s belt heals it, on the next write.
+    //
+    // NOT HYPOTHETICAL: four of the nine live claude cache files on this
+    // instance hold a reset-less `fiveHour`, which is precisely how this stamp
+    // gets written.
+    const b1 = (Q) => {
+      const dir = scratch();
+      const stale = {
+        fiveHour: { utilization: 0.95, resetsAt: nowSec + 4000, state: 'unknown' },
+        sevenDay: { utilization: 0.2, resetsAt: nowSec + 300000 },
+        fetchedAt: NOW, source: 'cli-usage',
+      };
+      fs.writeFileSync(path.join(dir, 'C.json'), JSON.stringify(stale));
+      // any later write that does NOT touch the 5h bucket
+      Q.CAP.captureRateLimitEvent({ cacheDir: dir, key: 'C', identityIds: ['C'], ev: { kind: 'sevenDay', status: 'allowed', utilization: 0.2, resetsAt: nowSec + 300000 }, now: NOW + 1000 });
+      const c = rd(dir, 'C');
+      return { c, rem: POOL.accountRemaining(c, nowSec) };
+    };
+    const r1 = b1({ W, CAP });
+    ok(r1.c.fiveHour.state === undefined,
+      `⑯b a stale stamp left on disk by an older build HEALS on the next write (${JSON.stringify(r1.c.fiveHour)})`);
+    ok(r1.rem.remaining === 5, `⑯b …and the 95 % bucket is worth 5 % remaining again (${JSON.stringify(r1.rem)})`);
+
+    // B2: an EMPTY stamp survives a real spend — the routine post-weekly-roll
+    // shape, and inc-msof8i22 / 2.305.0 re-opened (a spent model cap the pool
+    // cannot see).
+    const b2 = (Q) => {
+      const dir = scratch();
+      const weekOut = nowSec + WEEK - 30;
+      Q.W.writeCacheObject({
+        cacheDir: dir, key: 'D', measuredAt: NOW, source: 'cli-usage',
+        obj: { fiveHour: { utilization: 0.1, resetsAt: nowSec + 3000 }, sevenDay: { utilization: 0, resetsAt: weekOut }, scopedWeekly: [{ name: 'Fable', utilization: 0, resetsAt: weekOut }], fetchedAt: NOW },
+      });
+      const seeded = rd(dir, 'D');
+      Q.CAP.captureRateLimitEvent({ cacheDir: dir, key: 'D', identityIds: ['D'], ev: { kind: 'sevenDay', status: 'allowed', utilization: 0.9, resetsAt: weekOut }, now: NOW + 2000 });
+      Q.CAP.captureRateLimitEvent({ cacheDir: dir, key: 'D', identityIds: ['D'], ev: { kind: 'scoped', scopedName: 'fable', status: 'allowed', utilization: 1, resetsAt: weekOut }, now: NOW + 3000 });
+      const c = rd(dir, 'D');
+      return { seeded, c, weekOut, rem: POOL.accountRemaining(c, nowSec), dl: POOL.weeklyDeadline(c, nowSec), rems: POOL.bucketRems(c, nowSec) };
+    };
+    const r2 = b2({ W, CAP });
+    ok(r2.seeded.sevenDay.state === 'empty' && r2.seeded.scopedWeekly[0].state === 'empty',
+      '⑯b SETUP: at the weekly roll both budget windows are correctly stamped EMPTY (this stamp is right when it is written)');
+    ok(r2.rem.known && r2.rem.remaining === 0,
+      `⑯b …after three real readings climb them, the spent model cap is worth 0 % (${JSON.stringify(r2.rem)})`);
+    ok(r2.dl === r2.weekOut, `⑯b …the account has its weekly deadline back (${r2.dl})`);
+    ok(r2.rems.length === 3, `⑯b …and all three buckets are reported again (${JSON.stringify(r2.rems.map((x) => (x.label || x.kind) + ' ' + Math.round(x.remaining)))})`);
+
+    // B3 — THE PRODUCER HALF'S OWN CASE, which the belt structurally cannot
+    // catch: a window correctly stamped EMPTY, then re-stated by a real event
+    // that still reads 0 % but now carries a PINNED reset an hour out — the
+    // window did open, the member just barely used it. `usedPct` is 0, so "a
+    // stated spend voids the verdict" says nothing; only the producer, which
+    // knows it just replaced the numbers, can drop the verdict that described
+    // the old ones. The cost of keeping it is the member's real weekly
+    // deadline: EDF cannot rank an account whose deadline reads null.
+    const b3 = (Q) => {
+      const dir = scratch();
+      Q.W.writeCacheObject({ cacheDir: dir, key: 'E', measuredAt: NOW, source: 'cli-usage', obj: { sevenDay: { utilization: 0, resetsAt: nowSec + WEEK - 40 }, fetchedAt: NOW } });
+      const seeded = rd(dir, 'E');
+      const pinned = nowSec + 3600;
+      Q.CAP.captureRateLimitEvent({ cacheDir: dir, key: 'E', identityIds: ['E'], ev: { kind: 'sevenDay', status: 'allowed', utilization: 0, resetsAt: pinned }, now: NOW + 60000 });
+      const c = rd(dir, 'E');
+      return { seeded, c, pinned, dl: POOL.weeklyDeadline(c, nowSec) };
+    };
+    const r3 = b3({ W, CAP });
+    ok(r3.seeded.sevenDay.state === 'empty', '⑯b SETUP: the window starts out correctly stamped EMPTY (0 %, sliding reset)');
+    ok(r3.c.sevenDay.state === undefined,
+      `⑯b a window re-stated at 0 % with a now-PINNED reset becomes RUNNING — the EMPTY verdict described the old numbers (${JSON.stringify(r3.c.sevenDay)})`);
+    ok(r3.dl === r3.pinned, `⑯b …so the member gets its real weekly deadline back (${r3.dl})`);
+
+    // POSITIVE CONTROL: a status-only event changes no number, so the reading
+    // is unchanged and the verdict MUST survive — dropping it there would hand
+    // `fromLegacy` the file's clock and flip a genuinely empty window.
+    {
+      const dir = scratch();
+      const weekOut = nowSec + WEEK - 40;
+      W.writeCacheObject({ cacheDir: dir, key: 'F', measuredAt: NOW, source: 'cli-usage', obj: { sevenDay: { utilization: 0, resetsAt: weekOut }, fetchedAt: NOW } });
+      ok(rd(dir, 'F').sevenDay.state === 'empty', '⑯b POSITIVE CONTROL setup: a genuinely empty weekly window');
+      CAP.captureRateLimitEvent({ cacheDir: dir, key: 'F', identityIds: ['F'], ev: { kind: 'sevenDay', status: 'allowed' }, now: NOW + 30 * 60000 });
+      const c = rd(dir, 'F');
+      ok(c.sevenDay.state === 'empty',
+        `⑯b POSITIVE CONTROL: a status-only event 30 min later restates no number, so the EMPTY verdict survives (${JSON.stringify(c.sevenDay)})`);
+      ok(POOL.weeklyDeadline(c, nowSec) === null,
+        '⑯b POSITIVE CONTROL: …and the sliding reset still never becomes a deadline (this is the reason the stamp is trusted at all)');
+    }
+
+    // NEGATIVE CONTROL 1 — the belt: `fromLegacy` trusts a stamp unconditionally.
+    const wBelt = mutantWorld('b1', [QMFILE, WFILE, CFILE], {
+      [QMFILE]: [["if (STATES.includes(b.state) && !(usedPct > 0)) w.state = b.state;", 'if (STATES.includes(b.state)) w.state = b.state;']],
+    });
+    patchHit(wBelt, '⑯b restores the unconditional stored-state preserve');
+    const preBelt = { W: load(wBelt, WFILE), CAP: load(wBelt, CFILE) };
+    const p1 = b1(preBelt);
+    ok(p1.c.fiveHour.state === 'unknown' && p1.rem.remaining === 80,
+      `⑯b NEGATIVE CONTROL (belt): the stale on-disk stamp NEVER heals — the 95 % bucket stays invisible and the member reads ${p1.rem.remaining} % free`);
+    // …and the belt is what makes ⑯b's headline case survive an unpatched
+    // producer too, so it is measured on that shape as well.
+    const wBoth = mutantWorld('b1x', [QMFILE, WFILE, CFILE], {
+      [QMFILE]: [['if (STATES.includes(b.state) && !(usedPct > 0)) w.state = b.state;', 'if (STATES.includes(b.state)) w.state = b.state;']],
+      [CFILE]: [['const restated = (b) => { const c = { ...b }; delete c.state; return c; };', 'const restated = (b) => ({ ...b });']],
+    });
+    patchHit(wBoth, '⑯b removes BOTH halves (the branch as the verifier found it)');
+    const p2 = b2({ W: load(wBoth, WFILE), CAP: load(wBoth, CFILE) });
+    ok(p2.rem.remaining === 90 && p2.dl === null && p2.rems.length === 1,
+      `⑯b NEGATIVE CONTROL (both halves): the spent Fable cap is INVISIBLE (${p2.rem.remaining} % free, deadline ${p2.dl}, ${p2.rems.length} bucket row) — inc-msof8i22 re-opened`);
+
+    // NEGATIVE CONTROL 2 — the producer half: the writer keeps a verdict it
+    // just invalidated. Only this half catches the re-statement DOWN to 0 %,
+    // which is why there are two controls and not one.
+    const wProd = mutantWorld('b2', [CFILE], {
+      [CFILE]: [['const restated = (b) => { const c = { ...b }; delete c.state; return c; };', 'const restated = (b) => ({ ...b });']],
+    });
+    patchHit(wProd, '⑯b restores the producer that carries a stale verdict forward');
+    const p3 = b3({ W, CAP: load(wProd, CFILE) });
+    ok(p3.c.sevenDay.state === 'empty' && p3.dl === null,
+      `⑯b NEGATIVE CONTROL (producer): the stale EMPTY verdict rides onto the re-stated window, so the member's real 1-hour deadline reads ${p3.dl} — and the belt cannot help, because 0 % refutes nothing`);
+  }
+
+  // ── ⑯c THE VIEW MAY NEVER BE MORE OPTIMISTIC THAN THE SET ─────────────────
+  // A model limit's FIVE-HOUR window had no home in the legacy view: the scoped
+  // projection takes only BUDGET windows and `fiveHour` was read off the plan
+  // limit alone. `account-pool-auto` reads the VIEW.
+  console.log('\n  ⑯c the derived view may never be more optimistic than the set it projects');
+  {
+    // The two REAL codex push shapes (§⑫'s fixtures, with the Spark limit
+    // SPENT on its burst window — §⑫ only ever tested the 0 % direction).
+    const sparkSpent = {
+      ...sparkAt(T0), primary: { usedPercent: 90, windowDurationMins: 300, resetsAt: Math.round(T0 / 1000) + 1200 },
+      secondary: { usedPercent: 10, windowDurationMins: 10080, resetsAt: 1789509325 },
+    };
+    const nowC = Math.round(T0 / 1000);
+    const set = QM.mergeLimitSets(
+      CODEXQ.toLimitSet(CODEX_PLAN, { identity: 'cx', source: 'codex-rate-limits', fetchedAt: T0 }),
+      CODEXQ.toLimitSet(sparkSpent, { identity: 'cx', source: 'codex-rate-limits', fetchedAt: T0 + 3000 }),
+    );
+    const view = QM.toLegacyView(set);
+    const acc = QM.remaining(set, { nowSec: nowC });
+    const viaPool = POOL.accountRemaining(view, nowC);
+    ok(acc.known && acc.remaining === 10 && acc.kind === '5h',
+      `⑯c the ACCESSOR binds on the Spark burst window (${JSON.stringify(acc)})`);
+    ok(viaPool.known && viaPool.remaining === 10,
+      `⑯c …and the pool, which reads the VIEW, now agrees (${JSON.stringify(viaPool)})`);
+    ok(view.fiveHour && view.fiveHour.utilization === 0.9,
+      `⑯c …because fiveHour means THE BINDING BURST CONSTRAINT, not "the plan limit's" (${JSON.stringify(view.fiveHour)})`);
+    ok(view.scopedWeekly && view.scopedWeekly.length === 1 && view.scopedWeekly[0].utilization === 0.1,
+      '⑯c …and nothing was collapsed: the Spark WEEKLY window is still its own scoped row');
+
+    // POSITIVE CONTROL: the plan limit still wins when it is the binding one —
+    // this is a min, not "the model limit always".
+    const setPlanBinds = QM.mergeLimitSets(
+      CODEXQ.toLimitSet(CODEX_PLAN_FULL, { identity: 'cx2', source: 'codex-rate-limits', fetchedAt: T0 }),
+      CODEXQ.toLimitSet(sparkSpent, { identity: 'cx2', source: 'codex-rate-limits', fetchedAt: T0 + 3000 }),
+    );
+    ok(POOL.accountRemaining(QM.toLegacyView(setPlanBinds), nowC).remaining === 0,
+      '⑯c POSITIVE CONTROL: a SPENT plan limit still decides — the projection is a min, not a preference for model caps');
+    // POSITIVE CONTROL: an EMPTY model burst window is not a candidate (it makes
+    // no claim), so the plan's own bucket is what the view shows.
+    const setEmptySpark = QM.mergeLimitSets(
+      CODEXQ.toLimitSet(CODEX_PLAN, { identity: 'cx3', source: 'codex-rate-limits', fetchedAt: T0 }),
+      CODEXQ.toLimitSet(sparkAt(T0), { identity: 'cx3', source: 'codex-rate-limits', fetchedAt: T0 }),
+    );
+    const vEmpty = QM.toLegacyView(setEmptySpark);
+    ok(POOL.accountRemaining(vEmpty, nowC).remaining === 95,
+      '⑯c POSITIVE CONTROL: an EMPTY Spark burst window never displaces the plan bucket (§⑫’s 0 % direction still holds)');
+
+    // THE PROPERTY, DERIVED RATHER THAN ENUMERATED. The hole existed because
+    // one window KIND had nowhere to go in the projection; the guard against
+    // the next one is not a list of kinds but the invariant itself, driven over
+    // every shape this suite knows how to build.
+    const shapes = [];
+    for (const planW of [null, CODEX_PLAN, CODEX_PLAN_FULL]) {
+      for (const modelW of [null, sparkAt(T0), sparkSpent]) {
+        if (!planW && !modelW) continue;
+        let s = QM.makeLimitSet({ identity: 'p', fetchedAt: T0 });
+        if (planW) s = QM.mergeLimitSets(s, CODEXQ.toLimitSet(planW, { identity: 'p', source: 'codex-rate-limits', fetchedAt: T0 }));
+        if (modelW) s = QM.mergeLimitSets(s, CODEXQ.toLimitSet(modelW, { identity: 'p', source: 'codex-rate-limits', fetchedAt: T0 + 3000 }));
+        shapes.push(s);
+      }
+    }
+    // …plus a claude-shaped set (model caps are weekly-only there — the rule
+    // must be one rule, with no backend branch, and must not disturb claude).
+    shapes.push(QM.fromLegacy({
+      fiveHour: { utilization: 0.71, resetsAt: nowC + 2 * 3600 },
+      sevenDay: { utilization: 0.44, resetsAt: nowC + 3 * 86400 },
+      scopedWeekly: [{ name: 'Fable', utilization: 0.93, resetsAt: nowC + 3 * 86400 }],
+    }, { identity: 'cl', fetchedAt: T0, limitId: 'plan', familyOf: familyOfScopedBucket }));
+    // …and a set whose model burst window has ROLLED OVER while the plan's
+    // still binds. The first version of this matrix had only future resets, so
+    // the property could not see ⑯d — the defect this very fix introduced.
+    shapes.push(QM.makeLimitSet({
+      identity: 'rolled', fetchedAt: T0, source: 'codex-rate-limits',
+      limits: [
+        QM.makeLimit({ limitId: 'codex', scope: 'plan', fetchedAt: T0, windows: [{ kind: '5h', minutes: 300, usedPct: 50, resetsAt: nowC + 3000, measuredAt: T0 }] }),
+        QM.makeLimit({ limitId: 'codex_spark', name: 'Spark', scope: 'model', model: 'Spark', fetchedAt: T0, windows: [{ kind: '5h', minutes: 300, usedPct: 90, resetsAt: nowC - 60, measuredAt: T0 - 7200000 }] }),
+      ],
+    }));
+    // The view is asked with the SAME clock as the accessor: "which window
+    // binds" is a question about now, so comparing a real-clock projection with
+    // a `nowC` accessor would measure the leg's own inconsistency, not the
+    // product's.
+    const optimistic = shapes.filter((s) => {
+      const a = QM.remaining(s, { nowSec: nowC }), v = POOL.accountRemaining(QM.toLegacyView(s, { nowSec: nowC }), nowC);
+      return a.known && v.known && v.remaining > a.remaining + 1e-9;
+    });
+    propShapes = shapes; propNow = nowC;
+    ok(shapes.length === 10, `⑯c PROPERTY scope is non-vacuous (${shapes.length} shapes, codex plan × model × claude × a rolled-over burst window)`);
+    ok(!optimistic.length,
+      `⑯c PROPERTY: over every shape, the derived view is NEVER more optimistic than the accessor (${optimistic.length} violations)`);
+
+    // NEGATIVE CONTROL: read fiveHour off the plan limit alone again.
+    const wC = mutantWorld('c', [QMFILE], { [QMFILE]: [['const f5 = toBucket(bind5 || planW5);', 'const f5 = toBucket(planW5);']] });
+    patchHit(wC, '⑯c restores the plan-only fiveHour projection');
+    const QMpre = load(wC, QMFILE);
+    const vPre = QMpre.toLegacyView(set);
+    const poolPre = POOL.accountRemaining(vPre, nowC);
+    ok(vPre.fiveHour === undefined && poolPre.remaining === 90,
+      `⑯c NEGATIVE CONTROL: the Spark burst window vanishes and the pool reads ${poolPre.remaining} % where the accessor says ${acc.remaining} % (${JSON.stringify(vPre.fiveHour)})`);
+    // …and that this was a REGRESSION, not merely a gap: the pre-model commit's
+    // last-writer-wins collapse kept the Spark 5h and answered 10 %.
+    const collapsed = { ...CODEXQ.normalizeCodexRateLimit(CODEX_PLAN, T0), ...CODEXQ.normalizeCodexRateLimit(sparkSpent, T0 + 3000) };
+    ok(POOL.accountRemaining(collapsed, nowC).remaining === 10,
+      '⑯c NEGATIVE CONTROL: …while the collapse this model REPLACED answered 10 % — the projection had made the answer worse');
+    const violPre = shapes.filter((s) => {
+      const a = QM.remaining(s, { nowSec: nowC }), v = POOL.accountRemaining(QMpre.toLegacyView(s, { nowSec: nowC }), nowC);
+      return a.known && v.known && v.remaining > a.remaining + 1e-9;
+    });
+    ok(violPre.length > 0, `⑯c NEGATIVE CONTROL: …and the PROPERTY itself goes red on the same matrix (${violPre.length} violations)`);
+  }
+
+  // ── ⑯d "MORE CONSTRAINED" IS A QUESTION ABOUT NOW ─────────────────────────
+  // Found by driving ⑯c's own property with a PASSED reset, i.e. by this
+  // branch mutation-testing its own new leg. ⑯c's first spelling ranked the
+  // 5-hour windows by raw `usedPct`, which is not what "binding" means: a
+  // window whose reset has passed rolled over since we read it, so its stale
+  // utilization means nothing and it is FULL (`windowRemaining`'s rule, and
+  // `bucketRemaining` — the pool's — applies it to whatever bucket we emit).
+  // A 90 %-spent-but-rolled-over model window therefore DISPLACED a plan
+  // window with a real 50 % left, and the view came out MORE optimistic than
+  // the set: the exact defect ⑯c exists to prevent, inside the fix for it.
+  console.log('\n  ⑯d the binding burst window is decided on remaining, not on raw percentage');
+  {
+    const nowD = 1788970000, T = nowD * 1000;
+    const mk = (planPct, plan5Reset, modelPct, model5Reset) => QM.makeLimitSet({
+      identity: 'cx', fetchedAt: T, source: 'codex-rate-limits',
+      limits: [
+        QM.makeLimit({
+          limitId: 'codex', scope: 'plan', fetchedAt: T, windows: [
+            { kind: '5h', minutes: 300, usedPct: planPct, resetsAt: plan5Reset, measuredAt: T },
+            { kind: '7d', minutes: 10080, usedPct: 10, resetsAt: nowD + 300000, measuredAt: T },
+          ],
+        }),
+        QM.makeLimit({
+          limitId: 'codex_spark', name: 'Spark', scope: 'model', model: 'Spark', fetchedAt: T,
+          windows: [{ kind: '5h', minutes: 300, usedPct: modelPct, resetsAt: model5Reset, measuredAt: T - 7200000 }],
+        }),
+      ],
+    });
+    // The model window reads 90 % spent, but its reset PASSED ⇒ it is full.
+    const rolled = mk(50, nowD + 3000, 90, nowD - 60);
+    const accD = QM.remaining(rolled, { nowSec: nowD });
+    const poolD = POOL.accountRemaining(QM.toLegacyView(rolled, { nowSec: nowD }), nowD);
+    ok(accD.remaining === 50 && poolD.remaining === 50,
+      `⑯d a rolled-over model window never displaces a plan window that really binds (accessor ${accD.remaining} %, pool ${poolD.remaining} %)`);
+    // POSITIVE CONTROL: while it is genuinely running, it still takes the slot.
+    const live = mk(50, nowD + 3000, 90, nowD + 1200);
+    ok(POOL.accountRemaining(QM.toLegacyView(live, { nowSec: nowD }), nowD).remaining === 10,
+      '⑯d POSITIVE CONTROL: …while a RUNNING model window at 90 % still binds (the rule is not "prefer the plan")');
+    // THE PLAN WINS EVERY TIE — this is ⑭'s invariant, and after ⑯c it depends
+    // on the plan window being SEEDED rather than on iteration order. Every
+    // window of a set read long after it was measured ties at 100.
+    const stale = mk(50, nowD - 600, 90, nowD - 60);
+    const vStale = QM.toLegacyView(stale, { nowSec: nowD });
+    ok(vStale.fiveHour && vStale.fiveHour.utilization === 0.5,
+      `⑯d when every 5h window has rolled over they TIE at 100 %, and the plan's is the one emitted (${JSON.stringify(vStale.fiveHour)})`);
+
+    // NEGATIVE CONTROL: rank by raw percentage again (⑯c's first spelling).
+    const wD = mutantWorld('d', [QMFILE], {
+      [QMFILE]: [["const rank = (w) => (w && w.state === 'running' ? windowRemaining(w, now) : null);",
+        "const rank = (w) => (w && w.state === 'running' && w.usedPct != null ? 100 - w.usedPct : null);"]],
+    });
+    patchHit(wD, '⑯d ranks the 5h windows by raw usedPct again');
+    const QMd = load(wD, QMFILE);
+    const poolPreD = POOL.accountRemaining(QMd.toLegacyView(rolled, { nowSec: nowD }), nowD);
+    ok(poolPreD.remaining === 90,
+      `⑯d NEGATIVE CONTROL: ranking on the raw percentage reads ${poolPreD.remaining} % where the accessor says ${accD.remaining} % — the view is more optimistic than the set`);
+    ok(POOL.accountRemaining(QMd.toLegacyView(live, { nowSec: nowD }), nowD).remaining === 10,
+      '⑯d NEGATIVE CONTROL: …and it is right about the RUNNING case, which is why only the passed reset exposes it');
+    // THE PROPERTY NOW COVERS IT. ⑯c's matrix had only future resets, so this
+    // defect walked straight through the guard written to prevent its whole
+    // class. A property is worth exactly the shapes it is driven over, so the
+    // matrix earning its keep is itself an assertion.
+    const violD = (propShapes || []).filter((s) => {
+      const a = QM.remaining(s, { nowSec: propNow }), v = POOL.accountRemaining(QMd.toLegacyView(s, { nowSec: propNow }), propNow);
+      return a.known && v.known && v.remaining > a.remaining + 1e-9;
+    });
+    ok(propShapes && propShapes.length === 10 && violD.length > 0,
+      `⑯d …and ⑯c's PROPERTY, once its matrix carries a rolled-over window, goes red on this mutant too (${violD.length} violations over ${propShapes ? propShapes.length : 0} shapes) — it could not before`);
+  }
+}
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

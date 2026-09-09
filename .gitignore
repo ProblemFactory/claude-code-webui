@@ -63,6 +63,11 @@ src/vs-wake-mut-*.js
 # requires). Unlinked on exit, swept by PID at start; a SIGKILL must never be
 # able to dirty the tree and block the release gate.
 src/server/vs-readattr-mut-*.js
+# §⑯ of scripts/test-quota-model.mjs writes PATCHED COPIES of quota-model.js /
+# usage-cache-write.js / rate-limit-capture.js beside the real ones (siblings,
+# or their relative requires do not resolve). Unlinked on exit, swept by PID at
+# start; a SIGKILL must never be able to dirty the tree and block the gate.
+src/vs-qmr3-mut-*.js
 # scripts/test-auto-resume.mjs §12a writes PATCHED COPIES of
 # src/server/auto-resume.js beside the real one (they must be SIBLINGS or their
 # relative requires do not resolve). Unlinked on exit and swept at start, but a

@@ -125,8 +125,11 @@ function minutesOf(kind, stated) {
  *  'running' — anything spent, or a reset that has visibly PINNED (it is closer
  *              than a full window away, so the window opened at some earlier
  *              request and the boundary is now a real instant).
- *  'unknown' — no usage figure, or no reset, or no duration to compare against.
- *              We were not told; we do not guess.
+ *  'unknown' — no usage figure at all; or a window at 0 % with no reset and no
+ *              duration to compare against, so "untouched" and "just started"
+ *              are indistinguishable. We were not told; we do not guess. Note
+ *              what is NOT here: a window with a stated spend is never unknown,
+ *              however little else the payload said (see below).
  *
  *  Note the asymmetry on purpose: `elapsed <= jitter` also catches a NEGATIVE
  *  elapsed (a reset further out than one full window — clock skew between the
@@ -134,9 +137,27 @@ function minutesOf(kind, stated) {
 function windowState(win, { jitterSec = EMPTY_WINDOW_JITTER_SEC } = {}) {
   if (!win || typeof win !== 'object') return 'unknown';
   const used = num(win.usedPct);
-  const resetsAt = posNum(win.resetsAt);
-  if (used == null || resetsAt == null) return 'unknown';
+  if (used == null) return 'unknown';
+  // A STATED SPEND IS DECISIVE ON ITS OWN, AND IT IS TESTED FIRST (r3). The
+  // deadline is what tells an UNTOUCHED window apart from a running one; it has
+  // nothing to say about a window the vendor has just told us is 90 % gone.
+  // Asking for it first collapsed "we know the utilization but not the reset"
+  // into 'unknown' — and 'unknown' is dropped by `bucketCounts`, so the bucket
+  // vanished from `accountRemaining` / `weeklyDeadline` / `bucketRems` / the
+  // anchor stream and the pool went on spending against it.
+  //
+  // REACHABLE, NOT THEORETICAL: the `· resets` clause of a claude panel line is
+  // OPTIONAL (claude-quota's `parseCliUsageText`, and scripts/test-cli-usage-
+  // parse.mjs pins the reset-less shape), `refreshViaCliPanel` deliberately
+  // refuses to project the 5-hour one ("its window starts with the first
+  // request; a stale one would be a lie"), and `parseOAuthUsage` maps a missing
+  // reset to 0 the same way. Four of the nine live claude cache files on this
+  // instance hold exactly that shape. A wall then marks the bucket spent and
+  // the pool reads the account as HEALTHY — measured end to end: remaining
+  // 80 %, `decidePoolSwitch` 'healthy', on a member the CLI had just rejected.
   if (used > 0) return 'running';
+  const resetsAt = posNum(win.resetsAt);
+  if (resetsAt == null) return 'unknown';
   const minutes = minutesOf(str(win.kind), win.minutes);
   const measuredAt = posNum(win.measuredAt);
   if (!minutes || measuredAt == null) return 'unknown';
@@ -549,8 +570,12 @@ function legacyWindowLimit(set) {
 }
 
 /** typed set → the historical `{fiveHour, sevenDay, scopedWeekly, …}` shape. */
-function toLegacyView(set) {
+function toLegacyView(set, { nowSec = null } = {}) {
   const out = {};
+  // The projection has to rank the 5-hour windows, and "which one binds" is a
+  // question about NOW (a reset that has passed makes its window full again).
+  // Same default as `remaining()`/`deadline()` so the three cannot disagree.
+  const now = num(nowSec) != null ? num(nowSec) : Math.floor(Date.now() / 1000);
   const plan = legacyWindowLimit(set);
   const toBucket = (w) => {
     if (!w) return null;
@@ -574,7 +599,62 @@ function toLegacyView(set) {
     if (w.state && w.state !== 'running') b.state = w.state;
     return b;
   };
-  const f5 = toBucket(windowOfKind(plan, '5h'));
+  // THE VIEW MAY NEVER BE MORE OPTIMISTIC THAN THE SET IT PROJECTS (r3).
+  //
+  // `scopedWeekly` gives a model limit's BUDGET window a home, and the plan
+  // limit's own windows have theirs — but a model limit's FIVE-HOUR window had
+  // none at all, because `isBudgetKind` excludes '5h' from the scoped
+  // projection and `fiveHour` was read off the plan limit alone. So a model cap
+  // 90 % through its burst window simply vanished from the derived view, and
+  // `account-pool-auto` reads the VIEW, not the accessor: measured on the two
+  // real codex push shapes from this instance's buffers (plan 7d 33 %,
+  // `codex_bengalfox`/"GPT-5.3-Codex-Spark" 5h 90 % + 7d 10 %), the accessor
+  // answered 10 % remaining and the pool answered 67 % — a 57-point drift at
+  // the exact seam B-9213 is about, and a REGRESSION: the base commit's
+  // last-writer-wins collapse happened to keep the Spark 5h and answered 10 %.
+  //
+  // `fiveHour` therefore means what every reader has always used it for — THE
+  // BINDING BURST CONSTRAINT ON THIS ACCOUNT — i.e. the min over every counting
+  // 5-hour window in the set. One rule, no backend branch: claude's model caps
+  // are weekly-only, so this can only ever pick the plan window there, and the
+  // codex case is the one that has more than one. Windows that make no claim
+  // are not candidates (an empty or unknown window cannot be "the binding
+  // constraint"), and with no counting 5h window anywhere the plan's own bucket
+  // is still emitted verbatim — the panel must keep seeing a limit the vendor
+  // reported, marked with its state.
+  //
+  // RANKED BY REMAINING, NOT BY `usedPct` — AND THAT NEEDS THE CLOCK. A window
+  // whose reset has PASSED rolled over since we read it, so its stale
+  // utilization means nothing and it is FULL: that is `windowRemaining`'s rule
+  // and `bucketRemaining` (the pool's) applies it to whatever bucket we emit.
+  // Ranking on the raw percentage therefore let a 90 %-spent-but-rolled-over
+  // model window DISPLACE a plan window with a real 50 % left, and the view
+  // came out MORE optimistic than the set — the exact defect this projection
+  // exists to prevent, in the fix for it (found by driving the property with a
+  // passed reset; measured accessor 50 % vs pool 90 %). `nowSec` is the same
+  // clock `remaining()`/`deadline()` take, so the invariant holds by
+  // construction rather than by a second, weaker ordering.
+  // THE PLAN WINDOW IS SEEDED FIRST AND WINS EVERY TIE. This field has always
+  // meant the plan limit's burst window; another limit takes the slot only when
+  // it is STRICTLY more constrained, which is the whole and only claim being
+  // made here. (Ranking without the seed made ties fall to iteration order —
+  // and every window of a set read long after it was measured ties at 100, so
+  // a Spark bucket displaced the plan limit again: §⑭'s invariant, undone by
+  // the fix for §⑯c.)
+  const planW5 = windowOfKind(plan, '5h');
+  const rank = (w) => (w && w.state === 'running' ? windowRemaining(w, now) : null);
+  let bind5 = null, bindRem = null;
+  const consider = (w) => {
+    const r = rank(w);
+    if (r == null) return;
+    if (bindRem == null || r < bindRem) { bind5 = w; bindRem = r; }
+  };
+  consider(planW5);
+  for (const l of limitsOf(set)) {
+    if (!l || l === plan) continue;
+    consider(windowOfKind(l, '5h'));
+  }
+  const f5 = toBucket(bind5 || planW5);
   const f7 = toBucket(windowOfKind(plan, '7d'));
   if (f5) out.fiveHour = f5;
   if (f7) out.sevenDay = f7;
@@ -623,13 +703,36 @@ function fromLegacy(legacy, { identity = null, source = null, fetchedAt = null, 
       : num(b.usedPercent);
     const w = makeWindow({ kind, minutes: b.windowMinutes, usedPct, resetsAt: b.resetsAt, measuredAt: at, status: b.status });
     if (b.resetsAtEstimated) w.resetsAtEstimated = true;
-    // A STORED STATE OUTRANKS A RE-DERIVED ONE. `windowState` needs the instant
-    // the vendor answered, and a legacy bucket read back off disk usually has
-    // only the FILE's `fetchedAt` — which is a different (later) clock the
-    // moment a preserve-merge carried the bucket forward. The producer decided
-    // 'empty' when it had the real measurement; re-deriving it here from a
-    // borrowed clock is how a settled verdict would silently flip.
-    if (STATES.includes(b.state)) w.state = b.state;
+    // A STORED STATE OUTRANKS A RE-DERIVED ONE — BUT ONLY WHILE THE READING IT
+    // DESCRIBES IS UNCHANGED (r3).
+    //
+    // Why the stamp is trusted at all: `windowState` needs the instant the
+    // vendor answered, and a legacy bucket read back off disk usually has only
+    // the FILE's `fetchedAt` — a different (later) clock the moment a
+    // preserve-merge carried the bucket forward. Re-deriving 'empty' from that
+    // borrowed clock computes `elapsed = fetchedAt − measuredAt > jitter` and
+    // silently flips a settled verdict to 'running', which is B-8b12 itself: a
+    // sliding reset becomes an EDF deadline and an auto-resume arm time.
+    //
+    // Why it may not be trusted unconditionally: the stamp is a VERDICT ABOUT A
+    // READING, and it lives on the bucket object that every producer spreads
+    // forward (`{...(cache[kind] || {})}` in rate-limit-capture, `bump()` in
+    // markLimitBanner). So a producer that re-measured the bucket carried the
+    // OLD verdict onto the NEW numbers. Measured: a 5h bucket stamped 'unknown'
+    // while it had no reset kept that stamp through a fully dated 95 % reading
+    // (pool read 80 % free instead of 5 %); a 7d + scoped pair stamped 'empty'
+    // at the weekly roll kept it while three real events climbed them to 90 %
+    // and 100 % (pool read 90 % free instead of 0, `weeklyDeadline` null, and
+    // `bucketRems` listed only the 5h row) — inc-msof8i22 / 2.305.0 re-opened.
+    //
+    // A STATED SPEND VOIDS THE STAMP, and that needs no clock: 'empty' means
+    // NOTHING HAS BEEN SPENT, so `usedPct > 0` refutes it outright and the
+    // re-derivation returns 'running' from the spend alone. This is the belt
+    // that does not depend on having enumerated the producers; the producers
+    // also drop what they may not re-state (see rate-limit-capture's `applyTo`
+    // and usage-pool-engine's `bump`), which is the half that also covers a
+    // re-measurement DOWN to 0 %.
+    if (STATES.includes(b.state) && !(usedPct > 0)) w.state = b.state;
     return w;
   };
   const w5 = bucket(src.fiveHour, '5h'); if (w5) planWindows.push(w5);
