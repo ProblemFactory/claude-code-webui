@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.369.79 — test-auto-resume's prose-reset expectation is timezone-honest (the .78 Actions fast mirror's only red)
+
+- Codex's exhaustion sentence ("try again at Sep 13th, 2026 8:36 PM") states no timezone and the parser resolves it in the SERVER's local zone by design (the wrapper that printed it runs on this machine). The leg compared against a fixed `-07:00` — this box's zone — so the UTC runner read the same sentence seven hours earlier. The expectation is now built in local time; 221/221 under TZ=UTC, America/Los_Angeles and Asia/Shanghai. Gate-only change, nothing to update for.
+
 ## 2.369.78 — auto-resume after a usage limit is GENERIC over every harness (owner ruling 2026-09-08: "只要支持 hook/注入的 harness 都支持, 形式可以不一样")
 
 - **Two descriptor hooks, one harness-neutral core.** How a LIMIT shows up is the descriptor's `quota.signalFromStream` (claude-quota / codex-quota; null for shell); how a TURN is restarted is the new `descriptor.resume` verb — claude = a user message on the wrapper's chat-input, codex = the wrapper rpc lane's `turn/start` (the same lane conversation-deliver already uses, origin kind 'resume', no second injector), opencode/ACP = the agent's session prompt, shell = null. The capability `backend-caps.autoResume {signal, resume}` is DERIVED from what the descriptor implements — a harness cannot be offered the toggle or armed without both hooks (the codex thread that sat idle 32 h past its weekly reset is the incident: the codex consumer never armed anything). Session Properties / settings / the engine / the module all gate on that row, never on a backend id (source census). Same semantics everywhere: arm at the signal's reset (+ grace), the 90 s false-positive delay, announce, disarm on work, the loop breaker, hourly cap, same-identity quarantine, restart survival; codex's reset-credit rung stays first; a machine login with no pool arms and fires like a pooled session.

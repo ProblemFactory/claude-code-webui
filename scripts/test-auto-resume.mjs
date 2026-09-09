@@ -814,7 +814,12 @@ function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, r
     ok('codex: the CLI\'s own exhaustion record ARMS the session (the enum the wire really sends)', st.armed === true, JSON.stringify(st));
     ok('…as a WATCH, because the reset is six days out (no timed continue is promised)', st.watch === true && st.resume === 'turn-start');
     ok('…anchored on the reset the CLI stated in PROSE, to the minute (the record carries no resetsAt and no rateLimits)',
-      Math.abs(st.resetsAt - Date.parse('2026-09-13T20:36:23-07:00')) < 61000, new Date(st.resetsAt).toISOString());
+      // The sentence states NO timezone and the parser resolves it in the
+      // SERVER's local zone (the wrapper that printed it runs on this machine),
+      // so the expectation is built in local time too — a fixed `-07:00` was
+      // this box's zone, and the Actions runner (UTC) read the same sentence
+      // seven hours earlier (2.369.79: the .78 fast mirror's only red).
+      Math.abs(st.resetsAt - new Date(2026, 8, 13, 20, 36, 23).getTime()) < 61000, new Date(st.resetsAt).toISOString());
     ok('…and it recorded WHICH wall it is waiting on', st.lane === 'codex' && st.bucket === 'sevenDay', JSON.stringify(st));
     ok('…and no turn was spent doing it', w.fired.length === 0);
 
