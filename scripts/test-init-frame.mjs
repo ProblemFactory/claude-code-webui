@@ -666,8 +666,14 @@ console.log('— health facts on the attach path (round 4)');
     && (cvSrc.match(/setInitHealth\(/g) || []).length === 1);
   ok('WIRING: applyStatus stays the AUTHORITY for replayed records (it carries the server\'s newest-init pick over the whole record list) and passes no replay flag',
     /this\._applyInitHealth\(status\.initFrame\);/.test(cvSrc));
-  ok('WIRING: the same-epoch reconnect applies the attach payload\'s chatStatus — the only attach path that dropped it, which is why its catch-up REPLAY used to be the chip\'s only writer there',
-    /if \(msg\.chatStatus\) this\.applyStatus\(msg\.chatStatus\);\s*\n\s*\/\/ Sync streaming label from server/.test(cvSrc));
+  // Since 2.369.83 the same block ALSO applies the rest of the live meta
+  // (`_applyLiveMeta(msg)` — the queue strip's ghost-row incident) between the
+  // chatStatus line and the streaming-label sync, so the pin anchors on the
+  // ORDER of the three statements inside the block, not on byte adjacency (a
+  // byte-adjacent pin turned the .83 heavy tier red on a merge that changed no
+  // behaviour — 2.369.84).
+  ok('WIRING: the same-epoch reconnect applies the attach payload\'s chatStatus (then the rest of its live meta) — the only attach path that dropped it, which is why its catch-up REPLAY used to be the chip\'s only writer there',
+    /if \(msg\.chatStatus\) this\.applyStatus\(msg\.chatStatus\);[\s\S]{0,2000}?this\._applyLiveMeta\(msg\);\s*\n\s*\/\/ Sync streaming label from server/.test(cvSrc));
   ok('WIRING: the card and the chip import the SAME label (no second literal left in chat-renderers)',
     /initHealthLabel/.test(crSrc) && /initHealthLabel/.test(sbSrc) && !/t\('MCP \{name\}', \{ name: i\.name \}\)/.test(crSrc));
   ok('WIRING: the chip is NOT gated on what is in the slab — a guard that depends on where the transcript is scrolled fails while paging (`replay` is the caller\'s provenance claim, not a window bound)',

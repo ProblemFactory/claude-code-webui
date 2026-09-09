@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.369.84 — the lsof liveness budget follows the box's measured latency (gate-only)
+
+- `LSOF_BUDGET_MS` 20 s → 45 s: one `lsof +D` on the dev box measured 11.8 s a day ago and 23.9 s today (~4,000 processes; it walks every fd table). A budget below the real latency turned test-discovery-interpret red on the fast gate while the suite's own legs already say a timeout is not evidence. 26/26 in 148 s on this box. Nothing to update for.
+- **test-init-frame's same-epoch-reconnect wiring pin anchors on statement ORDER, not byte adjacency.** The .83 merge inserted the `_applyLiveMeta(msg)` block between the `applyStatus` line and the streaming-label sync — behaviour intact, pin red, heavy tier red on a merge that changed nothing it measured. The pin now requires chatStatus → live meta → label sync in that order inside the block (140/140).
+
 ## 2.369.83 — the queue strip tells the truth across a restart (a message that had already run stayed in the strip, red, "no longer queued")
 
 - **After any (re)attach the queue strip's rows come from the WRAPPER, not from the client's memory or a rebuilt normalizer's guess.** A restart rebuilds the server's normalizer from the transcript, which holds no queue events at all, so the attach payload carried an empty queue while the client kept the rows it had; the wrapper had emptied its queue an hour earlier. Now the attach payload says whether the server is GUESSING (`queueKnown:false`), the server asks the running wrapper to republish its queue (an empty answer included — gated on the wrapper's own verb table, so a pre-verb wrapper is never asked), and the client shows no row nobody can act on until the answer lands.

@@ -342,7 +342,7 @@ function listOpenCodexRolloutPaths({ sessionsDir } = {}) {
  *  written"). The shell twin never had this bug because a shell consumes
  *  `lsof …`'s STDOUT and ignores its status. Read the output; treat only a
  *  spawn-level failure (no lsof, timeout, buffer overflow) as "cannot tell". */
-const LSOF_BUDGET_MS = 20000;
+const LSOF_BUDGET_MS = 45000; // 2.369.84: measured 11.8 s (2026-09-08) → 23.9 s (2026-09-09, ~4,000 processes) on the dev box for ONE `lsof +D`; a budget below the box's real latency is a red gate, never evidence
 let _lsofWarnAt = 0;
 /** An answer lsof could not give is not an empty answer. */
 function lsofUnknown(arr, why) {
