@@ -22,7 +22,21 @@ const { wrapperCaps } = require('./wrapper-files.js');
 
 const STASH_CAP = 30; // per-conversation; oldest fall off
 
-function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activeSessions, emitPeerCard, log = () => { } }) {
+// THE SPEND CEILING ON THIS LADDER (design-account-hardening §4.4c / P9).
+// Rungs 0-2 all put a message into a LIVE agent session: when that session is
+// idle the CLI opens a BILLED TURN for it, exactly as if somebody had typed.
+// Nine conversations can be parked on one subscription, so the jobs engine's
+// 30s-per-conversation flood floor bounds pacing and nothing else.
+// A REFUSAL HERE LOSES NOTHING: the caller stashes (rung 3) and the message is
+// injected into the conversation's next context — the same words, riding a turn
+// that was going to happen anyway. That is why this gate is safe to fail
+// CLOSED and why its refusal is not a dropped promise.
+// WHO PAYS, when the ladder cannot see a live local session: a REMOTE
+// conversation bills that machine's own binding, which this server genuinely
+// cannot name. It is charged to a NAMED bucket (`host:<id>` / `unattributed`)
+// rather than guessed at or waved through — the instance/day ceiling still
+// applies to it, and the name says what we do not know.
+function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activeSessions, emitPeerCard, authorizeSpend = null, noteSpend = null, log = () => { } }) {
   const stashFile = path.join(dataDir, 'msg-stash.json');
   let stash = {};
   try { stash = JSON.parse(fs.readFileSync(stashFile, 'utf-8')) || {}; } catch { }
@@ -83,6 +97,18 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
     } catch { return null; }
   }
 
+  /** The LIVE LOCAL session carrying this conversation, if any — the only
+   *  thing on this machine that can name the credential slot a turn would
+   *  bill. (findRpcPeer answers a narrower question: a codex session whose
+   *  wrapper adverts the peer lane.) */
+  function localSessionFor(cid) {
+    if (!activeSessions) return null;
+    try {
+      for (const [, s] of activeSessions) if ((s.backendSessionId || s.claudeSessionId) === cid) return s;
+    } catch { }
+    return null;
+  }
+
   /** One delivery attempt down the ladder. Returns {ok, lane, kind, peerName?,
    *  hostId?, reason?} — the caller decides whether a miss stashes (jobs and
    *  agent-msg both do; a future fire-and-forget source may not).
@@ -104,6 +130,31 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
     // Unknown/absent origin = 'peer', the conservative lane (an older caller
     // never silently gains the steer behaviour).
     const kind = opts.kind === 'notification' ? 'notification' : 'peer';
+    // THE CEILING (see the header). `spendReason` types the producer for the
+    // budget's journal/inbox; jobs pass 'job-notification', agent messaging
+    // 'peer-message'. An unknown/absent reason is 'peer-message', the same
+    // conservative default the lane itself uses.
+    const spendReason = opts.spendReason && typeof opts.spendReason === 'string' ? opts.spendReason : 'peer-message';
+    let charged = null;
+    if (authorizeSpend) {
+      const session = localSessionFor(cid);
+      // the owner-host lookup is only needed for the NAMED fallback bucket —
+      // a live local session answers the question by itself
+      const hid0 = session ? null : ownerHostOf(cid);
+      const identity = session ? null : { key: hid0 ? 'host:' + hid0 : '__unattributed__', name: hid0 ? `conversation on ${hid0}` : 'unattributed conversation' };
+      let v = null;
+      try { v = authorizeSpend({ reason: spendReason, session, identity, cid }); }
+      catch (e) { log('[deliver] spend authorizer threw (refusing, the stash keeps the message):', e.message); return { ok: false, reason: 'spend authorizer failed: ' + e.message, refused: 'spend' }; } // FAIL CLOSED (P8)
+      if (v && v.ok === false) return { ok: false, reason: `spend budget: ${v.detail || v.why}`, refused: 'spend', why: v.why, retryAfter: v.retryAfter || 0 };
+      charged = { reason: spendReason, session, identity };
+    }
+    // CHARGED WHERE THE FRAME LEAVES US. For rungs 0/1/2 that is the delivery;
+    // for the rpc-queue rung the wrapper may still answer `ok:false` and the
+    // caller re-stashes, so that one over-charges by one turn in the failure
+    // case. Deliberate: the conservative direction for money is to assume the
+    // turn happened, and the alternative (charging on the wrapper's reply)
+    // would need a correlation this lane does not carry.
+    const spent = () => { if (charged && noteSpend) { try { noteSpend(charged); } catch (e) { log('[deliver] spend accounting failed:', e.message); } } };
     const cardOk = () => { try { emitPeerCard?.(cid, { fromName: opts.fromName || null, text: opts.cardText || text }); } catch (e) { log('[deliver] card emit failed:', e.message); } };
     // rung 0: VibeSpace channel socket (experimental, per-session opt-in)
     try {
@@ -113,7 +164,7 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
           const sock = path.join(dataDir, 'channel-socks', wid + '.sock');
           if (!fs.existsSync(sock)) continue;
           const rc = await peerMsg.postChannelEvent(sock, text, { kind: 'peer_message' });
-          if (rc.ok) { cardOk(); return { ok: true, lane: 'channel', kind, peerName: s.name || null }; }
+          if (rc.ok) { spent(); cardOk(); return { ok: true, lane: 'channel', kind, peerName: s.name || null }; }
         }
       }
     } catch (e) { log('[deliver] channel lane failed (falling through):', e.message); }
@@ -122,7 +173,7 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
       const peer = peerMsg.findPeer(cid);
       if (peer) {
         const r = await peerMsg.postToPeer(peer, text);
-        if (r.ok) { cardOk(); return { ok: true, lane: 'message', kind, peerName: peer.name || null }; }
+        if (r.ok) { spent(); cardOk(); return { ok: true, lane: 'message', kind, peerName: peer.name || null }; }
         log(`[deliver] local peer post to ${peer.socketPath} failed: ${r.reason}`);
         return { ok: false, lane: 'message', reason: r.reason };
       }
@@ -145,6 +196,7 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
     if (rpc) {
       try {
         rpc.s.pty.write(JSON.stringify({ type: 'peer-message', text, fromName: opts.fromName || null, cardText: opts.cardText || null, kind }) + '\n');
+        spent();
         return { ok: true, lane: 'rpc-queue', kind, peerName: rpc.s.name || null };
       } catch (e) { log('[deliver] rpc-queue write failed (falling through): ' + e.message); }
     }
@@ -158,7 +210,7 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
         // the stash rung honestly instead (the background connect still heals).
         const dm = await (hosts.deviceBounded ? hosts.deviceBounded(hid, 6000) : hosts.device(hid));
         const r = await dm.peerPost({ cid, text });
-        if (r && r.ok) { cardOk(); return { ok: true, lane: 'remote-message', kind, peerName: r.peerName || null, hostId: hid }; }
+        if (r && r.ok) { spent(); cardOk(); return { ok: true, lane: 'remote-message', kind, peerName: r.peerName || null, hostId: hid }; }
         return { ok: false, lane: 'remote-message', hostId: hid, reason: (r && r.reason) || 'remote daemon could not reach the inbox' };
       } catch (e) {
         // capability gate / daemon down — an honest miss, the stash covers it

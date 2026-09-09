@@ -138,10 +138,25 @@ Everything VibeSpace adds *into* your agent sessions lives here — and all of i
 | `agents.injectPreamble` | text | `''` | Custom standing instructions injected once per session (≤4000 chars) |
 | `agents.perTurnExtra` | text | `''` | Custom text injected with EVERY prompt (≤500 chars) |
 | `agents.stopNudgeExtra` | text | `''` | Custom text prepended to the stop nudge (≤500 chars) |
+| `agents.stopNudgeMaxUnanswered` | number | `3` | Stop nudging a session that has **never** reported a board status after this many nudges (any status report resets the count). `0` = never give up |
 | `agents.allowGroupManagement` | boolean | `false` | Let designated "Group manager" sessions create/configure Task Groups via CLI |
 | `agents.groupManagementRoots` | string | `~` | Comma-separated path prefixes manager agents may use for group folders |
 
 > **Removed 2026-09-07: `agents.opencodeServeAutostart`.** The OpenCode background service (`opencode serve` on 127.0.0.1, which makes STOPPED OpenCode conversations list / open / resume / fork) is now the built-in **OpenCode background service** plugin — ⚙ → Plugins — and it is **off by default**. The first time you use OpenCode, VibeSpace offers to turn it on (once; "Not now" is remembered for the whole instance). `VIBESPACE_OPENCODE_SERVE=0/1` still overrides the plugin as an ops switch and the Plugins panel shows it as "forced by the environment". A stored value for the old setting is ignored — no migration.
+
+### Spending
+
+Every turn VibeSpace starts **without you** — the auto-continue after a usage limit, the Stop bookkeeping nudge, Background Work notifications, messages from another session, a Codex reset credit — passes ONE authorizer with the ceilings below. Turns *you* type are never counted. The counters are per **credential slot** (the account a turn will actually bill, so nine conversations parked on one subscription share one budget) and they are **persisted** in `data/spend-budget.json`: a release restart no longer hands the automatic spenders a fresh hour. A refusal is journalled and filed in the "For you" inbox, and nothing is lost — a notification that cannot be delivered live is injected into that conversation's next turn instead.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `spend.unattendedPerIdentityHour` | number | `12` | Most unattended turns on ONE account in a rolling hour. `0` = no automatic turns at all |
+| `spend.unattendedPerIdentityDay` | number | `60` | The same ceiling over a rolling 24 hours |
+| `spend.unattendedPerInstanceDay` | number | `200` | The ceiling across every account together — the bound that still holds when a subscription is added mid-incident |
+| `spend.budgetNoticePct` | number | `80` | File one "For you" item when a budget reaches this share. `0` = never warn |
+| `spend.allowOverageTurns` | boolean | `false` | OFF: while an account reports it is using **paid overage**, every turn VibeSpace would have started by itself on it is refused (with overage on, utilization stays under 100% while every token is billed pay-per-use). Turns you type always run |
+| `pool.reserveFloorPct` | number | `15` | Keep this much of each account's **weekly** quota in reserve: below it a member stops being a *voluntary* pool switch target. It still serves its own conversations, and a conversation whose account is genuinely dead may still escape onto it. `0` = no floor |
+| `pool.avoidOverageMembers` | boolean | `false` | Also keep the pool from switching conversations *onto* an account billing paid overage (escapes ignore it) |
 
 ### Claude
 

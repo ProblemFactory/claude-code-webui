@@ -425,8 +425,8 @@ const {
   armWorkflowUsageWatcher, darkSources, darkTaintedAccounts, kickPoolEval,
   markLimitBanner, maybePoolAutoSwitch, maybePoolAutoSwitchForPool, notePoolAuthFailure,
   maybeRepinLockedModel, maybeStopOnFallback, modelsMatch, onMemberReadingFresh, autoCliReady, lastMemberReadAt, // …+ the new-member wake (2026-09-08)
-  poolChooserForModel, poolReadCache, probeUsageForAccountKey,
-  noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, fireIdentityFor, probeUsageViaSession, recordCodexQuotaSignal, recordRateLimitEvent, resolveUsageKey,
+  poolChooserForModel, poolReadCache, probeUsageForAccountKey, readRawUsageCache, spendGuard, // the ONE raw usage-cache read (overage lives there — design §1.4) + THE SPEND CEILING (§4.4c): ONE authorizer in front of every turn nobody typed, per credential slot, persisted ⇒ src/server/spend-guard.js
+  noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, fireIdentityFor, memberLoginState, probeUsageViaSession, recordCodexQuotaSignal, recordRateLimitEvent, resolveUsageKey,
   sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,
   usageIdentityAccountIds, usageIdentityGroups, usageIdentityGroupsCached,
   writeUsageCacheForKey, clearSealedOrders, pushSealedOrders,
@@ -440,7 +440,7 @@ const {
   getHosts: () => { try { return hosts; } catch { return null; } },
   getUsageHistory: () => { try { return usageHistory; } catch { return null; } },
   recordUsageAttribution: (...a) => recordUsageAttribution(...a),
-  adapterRegistry, readUserState: () => { try { return persistenceRouter.readUserState(); } catch { return {}; } },
+  adapterRegistry, readUserState: () => { try { return persistenceRouter.readUserState(); } catch { return {}; } }, getUserTodos: () => { try { return userTodos; } catch { return null; } }, // lazy: the inbox a refused spend is reported in is created further down (TDZ otherwise)
 });
 // ── Effective-size computation (min cols/rows across clients + PTY resize + broadcast) ──
 // Only clients that have sent a REAL `resize` (terminal fit) drive the PTY
@@ -1250,7 +1250,7 @@ const deliver = require('./src/server/conversation-deliver.js').create({
   peerMsg: require('./src/peer-messaging.js'),
   getHosts: () => hosts,
   getConvIndex: () => hosts && hosts.convIndex,
-  serverSetting, activeSessions,
+  serverSetting, activeSessions, authorizeSpend: (req) => spendGuard.authorize(req), noteSpend: (rec) => spendGuard.note(rec), // THE SPEND CEILING (design §4.4c): every rung can open a BILLED turn on an idle session; a refusal is not a dropped message (the caller stashes and it rides the next injection)
   // 2.363.0: render the peer card at delivery time — server-posted injections
   // are body-less at the CLI, only the delivery site can show them live.
   emitPeerCard: (cid, card) => {
@@ -1281,7 +1281,7 @@ app.post('/api/sessions/:id/msg-reachability', (req, res) => {
   try { writeSessionMeta(s.sockName, { ...readSessionMeta(s.sockName), msgReachability: s._msgReachability }); } catch { }
   res.json({ ok: true, level: lv });
 });
-setupAgentRoutes({ app, activeSessions, tasks, sessionStatus, SessionStatusManager, userTodos, sessionStatusKey, serverSetting, scheduleCtxSync, remoteCtxBaseFor, readUserState: () => persistenceRouter.readUserState(), getJobs: jobsWiring.getJobs, deliver, getPublishedPages: () => publishedPages, getDesignKit: () => designKit }); // lazy getters: both are created further down (TDZ at boot otherwise)
+setupAgentRoutes({ app, activeSessions, tasks, sessionStatus, SessionStatusManager, userTodos, sessionStatusKey, serverSetting, spendGuard, scheduleCtxSync, remoteCtxBaseFor, readUserState: () => persistenceRouter.readUserState(), getJobs: jobsWiring.getJobs, deliver, getPublishedPages: () => publishedPages, getDesignKit: () => designKit }); // lazy getters: both are created further down (TDZ at boot otherwise)
 app.get('/api/agent-hooks', (req, res) => res.json({ ...agentHooksStatus(), integrationOff: !integrationEnabled() }));
 app.post('/api/agent-hooks/install', (req, res) => {
   // The master switch outranks the button: boot/toggle would strip the entries
@@ -1488,7 +1488,7 @@ const portForwards = new PortForwardManager({
 jobsWiring.jm.d.getPorts = () => portForwards; // late singleton — lazy getter, never a Proxy
 setTimeout(() => { portForwards.restore().catch(() => {}); }, 5500);
 const instanceUrl = require('./src/server/instance-url.js').create({ dataDir: path.join(__dirname, 'data'), port: PORT, serverSetting, log: (...a) => console.log(...a), authEnabled: () => auth.enabled, broadcast: (m) => bcastAll(m), plugins: { status: (id) => plugins.status(id), frpPublish: (...a) => plugins.frpPublish(...a), frpUnpublish: (...a) => plugins.frpUnpublish(...a), setSelfDialSub: (...a) => plugins.setSelfDialSub?.(...a) } }); // ONE resolver for "this instance's URL" (frp mapping layered OVER agentd.publicUrl, never written into it) + the ONLY publisher of the 'vibespace-instance' proxy; plugins arrives later so its accessors are lazy ⇒ src/server/instance-url.js
-const autoResume = require('./src/server/auto-resume.js').create({ dataDir: path.join(__dirname, 'data'), activeSessions, serverSetting, beforeFire: (id, s) => { try { return beforeAutoResumeFire(id, s); } catch { return true; } }, fireIdentity: (id, s) => { try { return fireIdentityFor(s); } catch { return null; } }, log: (...a) => console.log(...a), broadcast: (id, m) => { const s = activeSessions.get(id); if (s) broadcastToSession(s, id, m); }, notify: (id, s, text) => { try { feedPeerCard(s, { fromName: 'VibeSpace', text }); } catch { } }, sendToSession: (id, s, text) => { try { const ad = adapterRegistry.get(s.backend); if (!ad || !s.pty || s.mode !== 'chat') return false; const { stdinPayload, userMsg } = ad.formatChatInput(text, Date.now() + '-auto'); s._isStreaming = true; s.pty.write(stdinPayload + '\n'); if (userMsg) { userMsg.originKind = 'auto-resume'; if (userMsg.payload) userMsg.payload.webui_origin = 'auto-resume'; s.buffer = (s.buffer + JSON.stringify(userMsg) + '\n').slice(-500000); feedLive(s, userMsg); } return true; } catch (e) { console.warn('[auto-resume] send failed:', e.message); return false; } } }); // continue a limited session when its quota resets ⇒ src/server/auto-resume.js
+const autoResume = require('./src/server/auto-resume.js').create({ dataDir: path.join(__dirname, 'data'), activeSessions, serverSetting, beforeFire: (id, s) => { try { return beforeAutoResumeFire(id, s); } catch (e) { console.warn('[auto-resume] pre-fire gate threw — refusing the continue (fail closed):', e && e.message); return false; } }, fireIdentity: (id, s) => { try { return fireIdentityFor(s); } catch { return null; } }, authorizeSpend: (id, s, identity) => spendGuard.authorize({ reason: 'auto-resume', session: s, sessionId: id, sessionName: s && s.name, identity }), noteSpend: (id, s, identity) => spendGuard.note({ reason: 'auto-resume', session: s, identity }), log: (...a) => console.log(...a), broadcast: (id, m) => { const s = activeSessions.get(id); if (s) broadcastToSession(s, id, m); }, notify: (id, s, text) => { try { feedPeerCard(s, { fromName: 'VibeSpace', text }); } catch { } }, sendToSession: (id, s, text) => { try { const ad = adapterRegistry.get(s.backend); if (!ad || !s.pty || s.mode !== 'chat') return false; const { stdinPayload, userMsg } = ad.formatChatInput(text, Date.now() + '-auto'); s._isStreaming = true; s.pty.write(stdinPayload + '\n'); if (userMsg) { userMsg.originKind = 'auto-resume'; if (userMsg.payload) userMsg.payload.webui_origin = 'auto-resume'; s.buffer = (s.buffer + JSON.stringify(userMsg) + '\n').slice(-500000); feedLive(s, userMsg); } return true; } catch (e) { console.warn('[auto-resume] send failed:', e.message); return false; } } }); // continue a limited session when its quota resets ⇒ src/server/auto-resume.js
 autoResume.start();
 const permissionRules = require('./src/server/permission-rules.js').create({ activeSessions, adapterRegistry, accounts, agentEnv: (...a) => require('./src/ws-handler').agentEnv(...a), buffersDir: BUFFERS_DIR, codexCmdRef: () => CODEX_CMD, telemetry: { record: (e) => { try { telemetry.record(e); } catch { } } } }); permissionRules.registerRoutes(app); instanceUrl.registerRoutes(app); instanceUrl.restore(); Object.defineProperty(app.locals, 'instancePublicUrl', { get: () => { try { return instanceUrl.url(); } catch { return null; } } }); app.get('/api/port-forwards', (req, res) => res.json({ forwards: portForwards.list() })); // permissionRules = the READ-ONLY "where does this rule come from" view (owner ruling 10) + the human-triggered zero-network local oracles (ruling 6) ⇒ src/server/permission-rules.js
 app.get('/api/hosts/:id/ports', async (req, res) => {
@@ -2087,7 +2087,7 @@ function shutdown() {
   try { flushLayouts(); } catch {}
   try { sessionStatus.flush(); } catch {} // debounced session-status writes
   try { userTodos.flush(); } catch {} // debounced user-todo writes
-  try { telemetry.flush(); } catch {} // buffered telemetry records (2.219.0)
+  try { telemetry.flush(); } catch {} try { spendGuard.flush(); } catch {} // buffered telemetry records (2.219.0) + the unattended-spend ledger (a debounced-only write would hand the next boot a fresh hour — the whole point of persisting it)
   try { sysinfo.persistHistory(); } catch {} // resource-history ring (2.223.0)
   try { jobsWiring.shutdown(); try { deliver.flush(); } catch { }; } catch {} // jobs store flush + engine lock release
   process.exit(0);

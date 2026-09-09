@@ -2,6 +2,38 @@
 
 Moved VERBATIM out of CLAUDE.md (tier-2 pass).
 
+## THE CEILING ON EVERY TURN NOBODY TYPED (2026-09-08 — docs/design-account-hardening.md §4.4c / P9, owner decisions D2 / D3 / D6 / D8)
+
+This one has **no incident report**, which is the point: §1.4 of the design lists it under *"money that leaks with no incident attached"*, so it had to be MEASURED rather than argued.
+
+**THE SHAPE.** Producers in this tree can start a BILLED turn with no per-occurrence owner action. Each carried a local floor — auto-resume's loop breaker (3 immediate fires per session per hour), the Stop nudge's `s._lastStopNudge`, the jobs engine's 30 s per-conversation flood floor. Not one of them is a bound on MONEY: they pace ONE producer, they are per SESSION while the bill belongs to the SUBSCRIPTION (nine conversations can be parked on one), and they live in memory on an instance that restarts several times a day.
+
+**MEASURED**, on this instance's whole transcript corpus (8,087 files). A `find ~/.claude/projects -mtime -3` sample is a TRAP and this work fell into it first: `-mtime` selects **files**, and a long-lived conversation's file carries records from two months back, so the same grep reports "550 nudges in 3 days" when the truth is 550 over two months. Corrected:
+
+```
+603 Stop-nudge mini-turns · 72 conversations · 2026-07-10 → 2026-09-09
+999 forced assistant records · 536,353,861 cache-read + 513,458 output tokens
+peaks: 93 in one day · 184 in a rolling 72h · 21 on ONE conversation in ONE hour
+```
+
+(this instance runs `stopNudgeStaleMinutes=0` **and** `stopNudgeCooldownMinutes=0` — every-stop mode — which is exactly why the cooldown was never the bound). Alongside it, auto-resume's 130 billed continues in one night (its own essay below).
+
+**THE FIX.** ONE authorizer: PURE `src/spend-authorizer.js` (the closed reason set, rolling hour/day windows, two-phase authorize/note, the 80 % notice, and `overageState` — the ONE reader of a record captured since 2.289.0 that had ZERO consumers) + ORCH `src/server/spend-guard.js` (persisted `data/spend-budget.json`, one journal line per (reason, identity, why) per 5 min, one "For you" item per (identity, why) per 6 h, telemetry). It is **constructed inside the pool engine**, because every input it needs is resolved there and its identity must be the engine's OWN `fireIdentityFor` — not a fifth derivation of session→account (§2 of the design: four rival derivations produced five incidents in three days). Wired at every producer: auto-resume (before the pre-fire gate AND again after it, on the identity the continue actually lands on — the gate can re-point the link), the delivery ladder for Background Work notifications and agent messages, the Stop nudge, and the codex reset credit.
+
+Plus the three things §1.4 named and nobody read:
+
+- **Paid overage** now refuses unattended spend (D3b). With overage on, `utilization` stays under 1 while every token is billed pay-per-use, so `accountRemaining()` ranked the account spending real money as the one with the MOST headroom. It is also rendered in BOTH quota panels (the taskbar popup and Manage Agents, where the owner picks a switch target), from the same PURE verdict. On this instance the record is present on 6 of 7 subscriptions and reads `inUse:false` (`org_level_disabled`) — dormant here by measurement, not by hope.
+- **The EDF reserve floor** (D2, 15 % weekly by default): below it a member stops being a VOLUNTARY switch/placement target while a HARD-DEAD current member may still escape onto it, and the escape SAYS which bar it landed on. `poolBlockedNotice` learned the shape too — when a bar is the only thing that emptied the candidate list it says *"every other member is held back by your spending limits"* instead of "out of quota", which prescribes waiting for a reset that has nothing to do with it.
+- **Both money gates fail CLOSED**: `beforeAutoResumeFire`'s `catch { return true; }` and the identical shape at the wiring site in server.js. Two sites, so fixing either one alone would have stayed green.
+
+**INVARIANTS.** A floor on one producer's PACING is not a bound on MONEY · the unit of a spend ceiling is the CREDENTIAL SLOT the turn will bill, never the session · a ceiling that does not survive a restart is a scheduling detail (the Stop nudge's cooldown was an unregistered in-memory field the session-schema detector could not even SEE, because it matched only `session._x =` while the live session is passed around as `s`) · TWO PHASE, because an authorization that never became a turn must not consume budget · ignorance never blocks (an unreadable credential, an absent overage record) but an UNNAMEABLE IDENTITY does, since a ceiling nobody can be charged against is not a ceiling · a refusal must LOSE NOTHING (the delivery ladder stashes and the same words ride the conversation's next turn) and must always reach the user (journal + inbox, never a second in-chat card class) · every declared reason has a producer and every producer's reason is declared, both directions asserted, because a spare slot is what the next producer slides into without anyone deciding anything · and **measure the ceiling against the real history before claiming it fixes anything**.
+
+**HONEST BOUNDARY (measured, not asserted).** Replayed through the real guard against those 603 nudges, the shipped D6 numbers refuse **20** (seven credential slots) to **55** (all on one slot) of them: this is a BACKSTOP against bursts and loops, not a routine throttle. The nudge exit condition saves nothing on that history either — 63 of the 72 nudged conversations received exactly one nudge each — it bounds the pathological long-lived non-reporting session, and its population is an upper bound because `data/session-status.json` keeps only the live sessions' keys.
+
+**SIDE FIX, same class.** `scripts/test-session-schema.mjs` now reads ANY receiver (with a non-session allowlist whose rows fail when they stop matching), and the nine fields it could never see are registered with owners: `_lastStopNudge`, `_childPid`, `_restoreAgentTasks`, `_preambleSeen`, `_toolsIntroSeen`, `_mgrIntroSeen`, `_groupSeenAt`, `_ctxSig`, `_groupSnap`.
+
+**GATE**: `scripts/test-spend-paths.mjs` (97, fast tier) — §2 is a grep-derived census over `git ls-files -- src server.js data/bin` minus `src/lib/`, it PRINTS the set it walked, its allowlist rows die when they stop matching, and a synthetic producer in a scratch tree is its negative control (the same producer, wired, is the positive one). The rest drives the REAL modules.
+
 ## A MEMBER BECAME USABLE AND NOBODY NOTICED (2026-09-08 02:00–02:31, from this instance's own journal)
 
 **THE SHAPE.** Pool "全部" hit 0 % on every member. The owner added a subscription in the middle of it. Eight fable conversations were parked on the newcomer **while it had no usage reading at all**, re-armed for a reset **eight hours away**, and released only when the owner typed a prompt into one of them seven minutes later.

@@ -126,6 +126,7 @@ export const SUITES = [
   { name: 'test-task-wakeup-card', tier: 'fast' }, // background-task lifecycle closure incl. the real record order (tool_result BEFORE the completion notification); also joined the gate late (same class)
   { name: 'test-agentd-upgrade-loop', tier: 'fast' },
   { name: 'test-pool-auto', tier: 'fast' },
+  { name: 'test-spend-paths', tier: 'fast' }, // THE SPEND CEILING (design-account-hardening §4.4c/P9 + D2/D3/D6/D8): the grep-derived census of every producer that can start a turn nobody typed, the persisted per-identity budget, overage, the EDF reserve floor and the four fail-closed sites. 0.6s, no ports, no fixed /tmp path
   { name: 'test-rate-limit-capture', tier: 'fast' },
   { name: 'test-public-links', tier: 'fast' }, // every "link to something here" surface uses the instance's public address (not the browser origin)
   { name: 'test-remote-shell', tier: 'fast' },

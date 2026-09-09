@@ -15,7 +15,12 @@ const { mk } = require('./lazy.js');
 
 function create({ app, rootDir, USAGE_CACHE_DIR, activeSessions, wss, WS_OPEN, getAutoResume = () => null, getOtelIngest = () => null, getQuotaProbe = () => null,
   broadcastToSession, serverNotice, serverSetting, getAccounts, getHosts,
-  getUsageHistory, recordUsageAttribution, adapterRegistry, readUserState = () => ({})}) {
+  getUsageHistory, recordUsageAttribution, adapterRegistry, readUserState = () => ({}),
+  // THE SPEND CEILING (design §4.4c / P9) — the engine's own unattended
+  // spender is the codex reset credit (real stored value, consumed with
+  // nobody present). Absent = not wired (a harness); scripts/test-spend-paths
+  // pins the real wiring in server.js.
+  authorizeSpend = null, noteSpend = null, getUserTodos = () => null}) {
   // late-bound singletons: created after this module in boot order, used only
   // at runtime — the Proxy re-resolves per property access, never caches
   const accounts = mk(getAccounts);
@@ -42,6 +47,10 @@ function create({ app, rootDir, USAGE_CACHE_DIR, activeSessions, wss, WS_OPEN, g
 // conversations (headless instances degrade to hot behavior until a client
 // appears — the switch itself never waits on a browser).
 const { decidePoolSwitch, rankPoolMembers, poolBlockedNotice, conversationDisplayName, SWITCH_THRESHOLD_PCT: POOL_HARD_PCT } = require('../account-pool-auto.js');
+// THE ONE READER of `cache.overage` (design §1.4: it was written by
+// rate-limit-capture and read by nobody). PURE; the spend authorizer and
+// the two panels ask the same function.
+const { overageState } = require('../spend-authorizer.js');
 const { captureRateLimitEvent } = require('../rate-limit-capture.js'); // was a FREE IDENTIFIER since extraction #5 — passive rate_limit_event capture silently dead for 3 days (5th lost binding; the try/catch swallowed the ReferenceError into a log line). The PARSE now reaches the engine through the claude harness's quota.signalFromStream (S4) — one classifier per harness.
 // ── THE harness registry (S4, docs/design-harness-plugins.md §2.4): each
 // harness declares its QuotaSignalSource = normalize / signalFromStream /
@@ -472,6 +481,55 @@ function poolReadLogin() {
     return memo.get(id);
   };
 }
+// ── THE SPEND CEILING, CONSTRUCTED (design-account-hardening §4.4c / P9) ────
+// It lives here because every input it needs is already resolved in this
+// module — the identity (`fireIdentityFor`, this file's own answer to "which
+// credential slot would a turn started right now bill"), the RAW usage cache
+// (overage), and the credential state the pool already reads. A second
+// construction site would mean a second set of answers, which is exactly the
+// failure §2 of the design catalogues. server.js re-exports it to the three
+// consumers outside this module (auto-resume, the delivery ladder, the Stop
+// nudge); the inbox is resolved lazily because it is created later in boot.
+const spendGuard = require('./spend-guard.js').create({
+  dataDir: path.join(rootDir, 'data'),
+  serverSetting,
+  identityOf: (session) => fireIdentityFor(session),
+  readCacheFor: (key) => readRawUsageCache(key),
+  credentialStateOf: (key) => memberLoginState(key),
+  getUserTodos,
+  log: (...a) => console.log(...a),
+});
+
+// ── THE TWO VOLUNTARY-MOVE BARS (design-account-hardening D2 + D3c) ─────────
+// Both are SETTINGS resolved per decision and handed to the PURE decision as
+// inputs; neither changes what an ESCAPE from a hard-dead member may do.
+//   reserveFloorPct  — EDF drains the soonest-deadline member, and the measured
+//                      result was 60% → 95% of a weekly window in 12.4 hours.
+//                      Below the floor a member is not a voluntary target.
+//   avoidOverageMembers — while `cache.overage.inUse` is true the account bills
+//                      pay-per-use, so `utilization` stays under 1 while every
+//                      token costs money and EDF actively PREFERS it. Default
+//                      OFF (D3 recommends one week of data first); the SPEND
+//                      side of the same fact is always on (the authorizer).
+function reserveFloorPct() {
+  const n = Number(serverSetting('pool.reserveFloorPct'));
+  return Number.isFinite(n) && n >= 0 ? Math.min(100, n) : 15;
+}
+/** The RAW usage cache for one key — no estimator overlay. The overage record
+ *  is a fact a producer STATED; an estimate may not authorize an irreversible
+ *  act (P7), and it may not bar one either. */
+function readRawUsageCache(id) {
+  try { return JSON.parse(fs.readFileSync(path.join(USAGE_CACHE_DIR, String(id).replace(/[^\w.-]/g, '_') + '.json'), 'utf-8')); }
+  catch { return null; }
+}
+function overageMemberIds(members) {
+  try {
+    if (serverSetting('pool.avoidOverageMembers') !== true) return null;
+    const out = new Set();
+    for (const m of members || []) if (overageState(readRawUsageCache(m.id)).inUse === 'yes') out.add(m.id);
+    return out.size ? out : null;
+  } catch { return null; }
+}
 function poolChooserForModel(poolId, { model } = {}) {
   try {
     const a = accounts.get(poolId);
@@ -485,7 +543,8 @@ function poolChooserForModel(poolId, { model } = {}) {
     // the default serves this family, stay (fewest distinct billing dirs);
     // if it doesn't, the switch verdict IS the placement.
     const { decidePoolSwitch } = require('../account-pool-auto.js');
-    const d = decidePoolSwitch({ currentId: cur, members: healthyPoolMembers(poolId), readCache, nowSec: Date.now() / 1000, hot: true, readLogin: poolReadLogin() });
+    const mem = healthyPoolMembers(poolId);
+    const d = decidePoolSwitch({ currentId: cur, members: mem, readCache, nowSec: Date.now() / 1000, hot: true, readLogin: poolReadLogin(), reserveFloorPct: reserveFloorPct(), overageIds: overageMemberIds(mem) });
     return (d && d.to) || cur;
   } catch (e) { console.warn('[pool] chooser failed (falling back to default target):', e.message); return null; }
 }
@@ -1523,7 +1582,18 @@ async function beforeAutoResumeFire(id, session) {
       return false;
     }
     return true;
-  } catch { return true; }
+  } catch (e) {
+    // FAIL CLOSED (P8). This is the gate auto-resume asks before it spends a
+    // turn: it probes fresh quota, re-runs the pool decision and re-reads the
+    // verdict. An exception means NONE of that happened, and `return true`
+    // turned every failure of the money gate into a green light — the same
+    // shape as the wiring's own `catch { return true; }` in server.js, so a
+    // throw was answered with a billed turn at BOTH layers. A refusal here
+    // costs one tick (30s) and says why.
+    console.warn(`[auto-resume] pre-fire gate failed for ${id} — refusing the continue (fail closed): ${e && e.message}`);
+    try { global.__vsEvent?.('spend-gate-error', 'beforeAutoResumeFire'); } catch { }
+    return false;
+  }
 }
 function recordRateLimitEvent(session, msg) {
   try {
@@ -1656,9 +1726,22 @@ function recordCodexQuotaSignal(session, payload) {
         if (!session.pty || session.mode !== 'chat') return false;
         const now = Date.now();
         if (session._codexResetTriedAt && now - session._codexResetTriedAt < 10 * 60e3) return false;
+        // A stored reset credit is money the owner already paid for, spent
+        // while nobody is present — the same consent class as an auto-resume
+        // continue, so it passes the SAME ceiling (design §4.4c: the seven
+        // producers, this is the one that does not open a turn but still
+        // spends). Fail closed: an authorizer that throws does not get to
+        // green-light a purchase.
+        if (authorizeSpend) {
+          let av = null;
+          try { av = authorizeSpend({ reason: 'codex-reset-credit', session, sessionId: session._webuiId, sessionName: session.name || null }); }
+          catch (e) { console.warn('[codex] spend authorizer threw — not spending a reset credit:', e.message); return false; }
+          if (av && av.ok === false) { console.log(`[codex] reset credit refused for ${session._webuiId} (spend budget: ${av.why})`); return false; }
+        }
         session._codexResetTriedAt = now;
         session._codexLastResetsAt = Number(resetsAtSec) || 0;
         session.pty.write(JSON.stringify({ type: 'codex-reset-credit' }) + '\n');
+        if (noteSpend) { try { noteSpend({ reason: 'codex-reset-credit', session }); } catch (e) { console.warn('[codex] spend accounting failed:', e.message); } }
         serverNotice(`codex-reset-${session._webuiId}-${now}`, `Codex hit a usage limit — trying a stored rate-limit reset credit before switching accounts.`);
         global.__vsEvent?.('codex-reset-credit-try', session._accountId || 'global');
         return true;
@@ -2464,7 +2547,7 @@ function maybePoolAutoSwitchForPool(poolId, { force = false } = {}) {
       // never pick a member that just answered THIS session with a limit
       // rejection (verdict-level twin of the same fact)
       const rejected = [...sessionWalledMembers(sid, now)];
-      const ds = decidePoolSwitch({ currentId: curFor, members, readCache: projected, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), exclude: rejected, readLogin, explain: true });
+      const ds = decidePoolSwitch({ currentId: curFor, members, readCache: projected, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), exclude: rejected, readLogin, reserveFloorPct: reserveFloorPct(), overageIds: overageMemberIds(members), explain: true });
       if (!ds || !ds.to) {
         // "there is nowhere for this conversation to go" is the state only the
         // USER can fix. The FACT is handed to auto-resume every time (it is
@@ -2515,7 +2598,7 @@ function maybePoolAutoSwitchForPool(poolId, { force = false } = {}) {
         }
       } catch (e) { console.warn('[pool] per-session re-point failed:', e.message); }
     }
-    const d = decidePoolSwitch({ currentId, members, readCache, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), readLogin, explain: true });
+    const d = decidePoolSwitch({ currentId, members, readCache, nowSec: now / 1000, proactive: hot, hot, pessimism: darkTaintedAccounts(), readLogin, reserveFloorPct: reserveFloorPct(), overageIds: overageMemberIds(members), explain: true });
     if (!d) return;
     if (!d.to) {
       // A pool sitting on a DEAD account with nowhere to go used to be
@@ -2650,6 +2733,7 @@ function maybeStopOnFallback(session, id, from, to) {
     poolChooserForModel, poolReadCache, probeUsageForAccountKey,
     noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, quotaVerdictFor, probeUsageViaSession, recordRateLimitEvent, recordCodexQuotaSignal, resolveUsageKey,
     probeQuotaForKey, quotaSourceFor, quotaBackendFor, // S4 caps-routed quota probe + the per-harness QuotaSignalSource lookup (functional seams for test-quota-source)
+    overageState, readRawUsageCache, reserveFloorPct, overageMemberIds, spendGuard, // the ONE overage reader, the two voluntary-move bars (D2/D3) and THE SPEND CEILING (§4.4c)
     observedMemberFor, sessionBillingMember, wallKeyFor, rejectionSlotFor, readingSlotFor, corroborateReading, memberLoginState, healthyPoolMembers, switchCandidates, poolReadLogin, slotTransitions, nearArmVeto, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
     _wallRing, _sessionWalls, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, SESSION_WALL_MS, // wall-ground-truth + token-slot + session-wall seams (test-auto-resume §11, test-auto-resume-loop)
     _poolAutoLast, _poolSwitchAt, // the eval gate (10s) + dwell belt (180s) are WALL-CLOCK: a suite winds them back instead of sleeping through them

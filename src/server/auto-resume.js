@@ -176,7 +176,19 @@ function writeJsonAtomic(file, obj) {
  * @param deps.broadcast      (sessionId, msg) => void — per-session UI state
  * @param deps.notify         (sessionId, session, text) => void — a visible line in the chat
  */
-function create({ dataDir, activeSessions, sendToSession, serverSetting, broadcast = () => { }, notify = null, beforeFire = null, fireIdentity = null, notifyDelayMs = 90000, log = () => { } }) {
+/**
+ * @param deps.authorizeSpend (id, session, identity) => {ok, why, detail, retryAfter}
+ *        THE SPEND CEILING (design-account-hardening §4.4c / P9). The loop
+ *        breaker below bounds this producer's PACING; the authorizer bounds the
+ *        MONEY, per credential slot, across every producer and across restarts.
+ *        They COMPOSE — the breaker runs first (it is free and its refusals are
+ *        the ones with a story to tell), and neither may be bypassed. Absent
+ *        (harness without the guard wired) = allow; scripts/test-spend-paths.mjs
+ *        pins the real wiring in server.js so "absent" can only mean a test.
+ * @param deps.noteSpend (id, session, identity) => void — charged only when a
+ *        continue was actually delivered.
+ */
+function create({ dataDir, activeSessions, sendToSession, serverSetting, broadcast = () => { }, notify = null, beforeFire = null, fireIdentity = null, authorizeSpend = null, noteSpend = null, notifyDelayMs = 90000, log = () => { } }) {
   const file = path.join(dataDir, 'auto-resume.json');
   let armed = new Map(); // webuiId -> { at, resetsAt, reason, cid, fired }
   let fires = new Map(); // webuiId -> loop-breaker record (see FIRE_* above)
@@ -454,6 +466,23 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     return out;
   }
 
+  /** THE SPEND CEILING, asked. Returns true when the turn may be paid for.
+   *  A refusal is JOURNAL-ONLY here and deliberately so: the guard itself
+   *  already told the user (one "For you" item per identity per reason per 6h,
+   *  plus telemetry), and the loop-breaker's in-chat budget belongs to the
+   *  refusals that describe THIS conversation's own pacing. Saying it twice,
+   *  once per session, is how the round-2 "it also refused me" cards happened.
+   *  The arm is NOT dropped: the promise still stands, it is the money that is
+   *  out — a later hour, or a raised budget, continues the session. */
+  function spendOk(id, session, ident, kind) {
+    if (!authorizeSpend) return true;
+    let v = null;
+    try { v = authorizeSpend(id, session, ident || null); } catch (e) { log('[auto-resume] spend authorizer threw: ' + e.message); return false; } // FAIL CLOSED (P8)
+    if (!v || v.ok !== false) return true;
+    log(`[auto-resume] ${id}: refused ${kind === 'now' ? 'an immediate' : 'a timed'} continue onto ${(ident && ident.name) || 'this account'} (spend budget: ${v.why})`);
+    return false;
+  }
+
   /** ONE fire path for BOTH callers — the timed tick and the immediate
    *  (pool-switch) fireNow. Two things used to differ between them and both
    *  differences were bugs: the immediate path skipped the pre-fire gate
@@ -469,6 +498,12 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     const label = ident ? ident.name : null;
     const chk = canFire(id, key, kind, now);
     if (!chk.ok) { logRefusal(id, session, key, label, chk, kind); return false; }
+    // THE CEILING, asked BEFORE the gate as well as after it (same shape as
+    // canFire/chk2): the pre-fire gate probes quota and can re-point the link,
+    // so a budget that is already spent must stop us before we pay for that
+    // work, and the identity the continue actually LANDS on must be checked
+    // again once the gate has had its say.
+    if (!spendOk(id, session, ident, kind)) return false;
     const deliver = () => {
       const a2 = armed.get(id);
       if (!a2 || a2.fired || a2.resetsAt !== a.resetsAt) return false;   // re-armed/disarmed while gating
@@ -500,10 +535,21 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       // WHAT UNBLOCKED US decides both the journal line and the card, from the
       // ARMED RECORD (one source, one wording) — see continueNoticeFor
       const note = continueNoticeFor({ kind, armReason: a2.reason, label: label2, moved, cause });
+      // THE CEILING, on the identity the continue actually lands on. The gate
+      // can have moved us onto a member whose budget is spent — charging the
+      // one we resolved before it is the round-2 defect in a second currency.
+      // It sits BELOW the (pure, side-effect-free) card computation and ABOVE
+      // the send: nothing between them spends, and test-auto-resume-loop's
+      // round-2 pin measures the distance from `moved` to `continueNoticeFor`.
+      if (!spendOk(id, session, ident2, kind)) return false;
       const ok = sendToSession(id, session, CONTINUE_PROMPT);
       if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); return false; }
       armed.delete(id);
       noteFired(id, key2, kind, Date.now());
+      // CHARGED ONLY WHEN THE TURN HAPPENED (two-phase): everything above can
+      // refuse, and an authorization that never became a turn must not eat an
+      // identity's hourly budget.
+      if (noteSpend) { try { noteSpend(id, session, ident2 || null); } catch (e) { log('[auto-resume] spend accounting failed: ' + e.message); } }
       save();
       _cancelArmNotify(id);
       log(kind === 'now'

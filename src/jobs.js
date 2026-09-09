@@ -207,7 +207,7 @@ class JobManager {
     // exactly as they were: a floored batch is drained as ONE injected block by
     // agent-routes (renderNotifStash), never re-delivered per entry.
     const deliver = this.d.deliverToConversation
-      ? this.d.deliverToConversation(cid, text, { fromName: 'Background Work · ' + (job.name || job.id), kind: 'notification' })
+      ? this.d.deliverToConversation(cid, text, { fromName: 'Background Work · ' + (job.name || job.id), kind: 'notification', spendReason: 'job-notification' })
       : Promise.resolve({ ok: false, reason: 'no delivery lane wired' });
     Promise.resolve(deliver).then((r) => {
       if (r && r.ok) {

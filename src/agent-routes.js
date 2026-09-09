@@ -11,7 +11,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
-function setupAgentRoutes({ app, activeSessions, tasks, sessionStatus, SessionStatusManager, userTodos, sessionStatusKey, serverSetting, integrationEnabled, scheduleCtxSync, remoteCtxBaseFor, readUserState, getJobs, deliver, getPublishedPages = () => null, getDesignKit = () => null }) {
+function setupAgentRoutes({ app, activeSessions, tasks, sessionStatus, SessionStatusManager, userTodos, sessionStatusKey, serverSetting, spendGuard = null, integrationEnabled, scheduleCtxSync, remoteCtxBaseFor, readUserState, getJobs, deliver, getPublishedPages = () => null, getDesignKit = () => null }) {
 app.post('/api/agent/user-todo', (req, res) => {
   const hit = agentSession(req, res);
   if (!hit) return;
@@ -617,6 +617,9 @@ app.get('/api/agent/prompt-context', (req, res) => {
     res.json({ success: true, context: ctx });
   } catch (e) { res.json({ success: true, context: '' }); }
 });
+// Sessions we have already announced the nudge exit condition for — one
+// journal line per session per boot (the refusal itself repeats every stop).
+const _nudgeExitSaid = new Set();
 // Stop-time bookkeeping nudge (2.79.0): fired by the Stop hook (claude) and
 // the codex wrapper's turn/completed. Returns block+reason ONLY when the
 // session's board state is stale (no status update in 10 min) AND we haven't
@@ -642,11 +645,52 @@ app.get('/api/agent/stop-check', (req, res) => {
     const clamp0 = (v, lo, hi, dflt) => (Number.isFinite(v) ? (v <= 0 ? 0 : Math.min(hi, Math.max(lo, v))) : dflt);
     const staleMin = clamp0(Number(serverSetting('agents.stopNudgeStaleMinutes')), 1, 240, 10);
     const cooldownMin = clamp0(Number(serverSetting('agents.stopNudgeCooldownMinutes')), 2, 720, 30);
-    if (cooldownMin > 0 && s._lastStopNudge && now - s._lastStopNudge < cooldownMin * 60 * 1000) return res.json({ block: false });
     const key = sessionStatusKey(s, id);
+    // THE COOLDOWN IS PERSISTED (D8, design §1.4). `s._lastStopNudge` lives on
+    // the live session object, so every release restart handed the largest
+    // measured automatic spender a fresh cooldown — and this instance restarts
+    // several times a day. The spend guard keeps the same fact on disk, keyed
+    // by the SESSION-STATUS key (the id that survives a re-attach); the field
+    // stays as the in-memory mirror (src/session-schema.js names this file's
+    // store as its home). Whichever is newer wins: a store that is not wired
+    // (a harness building these routes alone) degrades to the old behaviour.
+    const nudgeRec = (() => { try { return spendGuard?.nudgeRec?.(key) || null; } catch { return null; } })();
+    const lastNudgeAt = Math.max(Number(s._lastStopNudge) || 0, Number(nudgeRec?.at) || 0);
+    if (cooldownMin > 0 && lastNudgeAt && now - lastNudgeAt < cooldownMin * 60 * 1000) return res.json({ block: false });
     const rec = sessionStatus.get(key) || sessionStatus.get(`webui:${id}`);
-    if (staleMin > 0 && rec && rec.at && now - rec.at < staleMin * 60 * 1000) return res.json({ block: false });
+    const sawStatus = !!(rec && rec.at);
+    if (staleMin > 0 && sawStatus && now - rec.at < staleMin * 60 * 1000) return res.json({ block: false });
+    // EXIT CONDITION (D8): a session that has NEVER reported a status is being
+    // asked to do bookkeeping it does not do — a Task-Group-less session, an
+    // agent that ignores the tool, a wrapper whose CLI has no such command.
+    // Nudging it forever buys a billed mini-turn per stop and nothing else, so
+    // after N unanswered nudges we stop asking. Any status report at all
+    // resets the counter (that is what "answered" means).
+    const maxUnanswered = clamp0(Number(serverSetting('agents.stopNudgeMaxUnanswered')), 1, 100, 3);
+    if (!sawStatus && maxUnanswered > 0 && (nudgeRec?.n || 0) >= maxUnanswered) {
+      if (!_nudgeExitSaid.has(key)) {
+        _nudgeExitSaid.add(key);
+        if (_nudgeExitSaid.size > 500) _nudgeExitSaid.clear();
+        console.log(`[stop-nudge] ${key}: ${nudgeRec.n} nudges with no status report — this session is not asked again (agents.stopNudgeMaxUnanswered)`);
+      }
+      return res.json({ block: false });
+    }
+    // THE SPEND CEILING (design §4.4c / P9): this returns block+reason, and the
+    // CLI answers it with a REAL turn on the session's credential slot —
+    // measured on this instance's own transcripts, 603 of them in two months
+    // (21 on one conversation inside one hour, 93 on the busiest day).
+    // Refusing is silent to the AGENT on purpose (the hook contract has no way
+    // to say "later"), but never silent to the USER: the guard journals it and
+    // files one "For you" item per identity per reason.
+    if (spendGuard) {
+      let auth = null;
+      try { auth = spendGuard.authorize({ reason: 'stop-nudge', session: s, sessionId: id, sessionName: s.name || null }); }
+      catch (e) { console.warn('[stop-nudge] spend authorizer threw — not nudging (fail closed):', e.message); return res.json({ block: false }); }
+      if (auth && auth.ok === false) return res.json({ block: false });
+    }
     s._lastStopNudge = now;
+    try { spendGuard?.noteNudge?.(key, { at: now, sawStatus }); } catch { }
+    try { spendGuard?.note?.({ reason: 'stop-nudge', session: s }); } catch { }
     // Per-hook custom text (2.88.0): user extra rides at the top of the nudge.
     const extra = customExtra('agents.stopNudgeExtra', 500);
     // Steps list only ENABLED tools (2.211.0) — status is guaranteed on here.
@@ -1041,7 +1085,7 @@ app.post('/api/agent/msg/send', async (req, res) => {
   if (_msgRate.size > 500) { const cut = Date.now() - 600000; for (const [k, v] of _msgRate) if (v.ts < cut) _msgRate.delete(k); }
   const fromName = s.name || 'unnamed session';
   const framed = `Message from session "${fromName}" (via vibespace-msg; reply: vibespace-msg send "${fromName}" "..."):\n${text}`;
-  const r = deliver ? await deliver.deliverToConversation(target.cid, framed, { fromName, cardText: text }) : { ok: false, reason: 'delivery not wired' };
+  const r = deliver ? await deliver.deliverToConversation(target.cid, framed, { fromName, cardText: text, spendReason: 'peer-message' }) : { ok: false, reason: 'delivery not wired' };
   if (r.ok) return res.json({ delivered: true, lane: r.lane, peerName: r.peerName || target.t.name || null, machine: r.hostId || null });
   deliver?.stashFor(target.cid, { source: 'agent', fromName, text });
   res.json({ delivered: false, stashed: true, reason: r.reason || 'unreachable', note: 'queued — injected into that session on its next turn' });

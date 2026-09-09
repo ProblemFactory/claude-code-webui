@@ -7,7 +7,10 @@ import { backendFeatureCaps } from './agent-meta.js';
 // panel's latest number, and — for a member that can no longer produce one at
 // all — how old the last REAL reading is. DOM-free so scripts/test-readings-
 // attribution.mjs pins it in node.
-import { corroborationNote, readingSource, stampText, staleSince } from './usage-source.js';
+import { corroborationNote, overageChip, readingSource, stampText, staleSince } from './usage-source.js';
+// The ONE overage verdict (PURE, CJS — the same function the spend
+// authorizer and the pool's voluntary-target rule read).
+import { overageState } from '../spend-authorizer.js';
 
 export function installUsageMeter(App, ctx = {}) {
   Object.assign(App.prototype, {
@@ -278,6 +281,11 @@ export function installUsageMeter(App, ctx = {}) {
       const parts = [escHtml(t('Updated {ago}', { ago: agoText(snap.fetchedAt) }))];
       parts.push(`<span class="usage-src" title="${escHtml(src.tip)}">${escHtml(t('via {source}', { source: src.label }))}</span>`);
       if (corr) parts.push(`<span class="usage-src">${escHtml(corr)}</span>`);
+      // REAL MONEY, said where the number is read. An account billing paid
+      // overage keeps a utilization under 100% while every token costs, so the
+      // donut alone is the most misleading thing on this panel.
+      const ovc = overageChip(overageState(snap), { t });
+      if (ovc) parts.push(`<span class="usage-src usage-overage" title="${escHtml(ovc.tip)}">${escHtml(ovc.label)}</span>`);
       let warn = '';
       if (stale) {
         const stampedFrom = stale.since ? stampText(stale.since) : t('unknown');

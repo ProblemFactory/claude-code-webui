@@ -1,6 +1,14 @@
 # Account hardening: one identity, one write path, one spend ceiling
 
-**Status**: DESIGN — owner decisions pending (§6). No code has been written against this document.
+**Status**: DESIGN — owner decisions pending (§6), **except the P4 SPEND HALF, which shipped 2026-09-08**
+(the pieces that do not depend on the lease or the write-path phases): the spend authorizer + persisted
+per-identity budget (§4.4c, D6's numbers as settings), overage gating (D3b, plus D3c behind a default-off
+setting), the EDF reserve floor (D2), the Stop nudge's persisted cooldown + exit condition (D8), both money
+gates failing closed (§1.4), the widened session-schema detector (§4.4f) and `test-spend-paths` (§3 P9).
+Everything else here — the lease, `identityOf`, the single write path, the turn-boundary rule, the rebind
+executor, the reconciler and the re-runnable repair — is still unbuilt, and P4's own `usage-reconcile` and
+repair halves with it. See docs/kb-bugfix-invariants.md, "THE CEILING ON EVERY TURN NOBODY TYPED", for what
+was measured and what the shipped ceiling does NOT do.
 **Motivation**: five money-relevant incidents shipped fixes on top of each other in three days
 (2026-09-05 → 2026-09-08), the fifth arriving **94 seconds after the fully-fixed build booted**.
 **Companions**: docs/design-wall-machine.md (the turn-granular wall state machine this builds on),
@@ -80,10 +88,10 @@ set**, fired a success notice, and marked itself applied forever (`run-at-most-o
 
 | Leak | Evidence | Status |
 |---|---|---|
-| **Overage is captured and discarded.** `cache.overage` is written (`src/rate-limit-capture.js:131`) and read by **nobody**; claude's `spend {used,limit,pct}` and codex's `spendControlReached` (`src/harnesses/codex-quota.js:75`) likewise have zero consumers. `accountRemaining()` sees only `utilization`, so an account past its allowance and billing pay-per-use ranks as the member with the **most** remaining. | grep: 0 readers | unaddressed |
-| **Seven producers can start a billed turn with no per-occurrence owner action**; only auto-resume consults quota, and `src/server/conversation-deliver.js` consults nothing at all — not quota, not login, not the pool's blocked state. | *(audit)* census | unbounded |
-| **The Stop bookkeeping nudge** forces an extra frontier-model turn per stop. | 526 forced turns / 311M cache-read tokens across 7 conversations in 3 days *(audit)*; its only rate limiter is `s._lastStopNudge` — **0 occurrences in `src/session-schema.js`**, so it is not persisted and resets on every release restart | unbounded |
-| **The money gate fails open twice**: `usage-pool-engine.js:1331` `catch { return true; }` and again in the wiring at `server.js:1491`. | verified | unaddressed |
+| **Overage is captured and discarded.** `cache.overage` is written (`src/rate-limit-capture.js:131`) and read by **nobody**; claude's `spend {used,limit,pct}` and codex's `spendControlReached` (`src/harnesses/codex-quota.js:75`) likewise have zero consumers. `accountRemaining()` sees only `utilization`, so an account past its allowance and billing pay-per-use ranks as the member with the **most** remaining. | grep: 0 readers | **CLOSED 2026-09-08**: one reader (`overageState`, PURE) asked by the authorizer, the pool's voluntary-target rule and BOTH panels |
+| **Seven producers can start a billed turn with no per-occurrence owner action**; only auto-resume consults quota, and `src/server/conversation-deliver.js` consults nothing at all — not quota, not login, not the pool's blocked state. | *(audit)* census; re-derived by `test-spend-paths` §2 from `git ls-files` and PRINTED | **CLOSED 2026-09-08**: all of them pass one authorizer; the census fails an unwired producer |
+| **The Stop bookkeeping nudge** forces an extra frontier-model turn per stop. | 526 forced turns / 311M cache-read tokens across 7 conversations in 3 days *(audit)*; its only rate limiter is `s._lastStopNudge` — **0 occurrences in `src/session-schema.js`**, so it is not persisted and resets on every release restart | **CLOSED 2026-09-08** (D8): persisted in the guard's store + an exit condition + the ceiling. Re-measured over the WHOLE corpus (a `-mtime -3` sample selects FILES, not records): 603 nudges / 72 conversations / two months, 999 forced assistant records, 536M cache-read tokens, peaks 93 a day and 21 on one conversation in one hour |
+| **The money gate fails open twice**: `usage-pool-engine.js:1331` `catch { return true; }` and again in the wiring at `server.js:1491`. | verified | **CLOSED 2026-09-08**: both fail closed, with a named reason + `spend-gate-error` telemetry; `test-spend-paths` §9 reads the gate's own body (the fix's comment quotes the retired shape, so comments are stripped first) |
 | **The dwell belt is exempted by an estimate.** Both belts skip when `d.fromRemaining < POOL_HARD_PCT`, and `fromRemaining` arrives through `estOverlayCache`. In I5's second cascade the raw cache returned `hold` at 6%; only the overlay's last point produced `4.97%`, which both tripped exhaustion **and** released the brake that exists to contain bad switches. | verified at `:1920`, `:1985` | unaddressed |
 | **Provenance reaches one panel of four.** `src/lib/usage-source.js` is imported by `src/lib/usage-meter.js` only. Manage Agents — where the owner picks a switch target and decides which login to fix — renders the same donuts with no source, no corroboration, no stale-login warning. | grep: 1 importer | unaddressed |
 | **A producer we ship has no name.** `src/usage-routes.js:611,625` writes `source: 'on-demand-remote'`, absent from `usage-source.js`'s table ⇒ every manually-refreshed remote row renders *"Unrecognised reading source — reported verbatim"* about our own writer. | verified | unaddressed |
@@ -350,6 +358,12 @@ lease-open precondition instead of an unreachable float tiebreak.
 reproducing I5; a switch delivered with **zero** websocket clients connected.
 
 ### P4 — BOUNDED SPEND & HONEST SURFACES
+
+**SHIPPED 2026-09-08 (the spend half):** the spend authorizer + persisted budget + overage gating +
+EDF reserve floor + the Stop nudge (D8) + both money gates failing closed + overage provenance in BOTH
+quota panels, gated by `scripts/test-spend-paths.mjs` (a grep-derived producer census). **NOT shipped:**
+the rebind budget (it needs the §4.4b executor), `usage-reconcile`, the re-runnable repair, the rest of
+the Manage Agents provenance work and the promotion of the ungated money suites.
 
 The spend authorizer + budget + overage gating + EDF reserve floor + rebind budget ·
 `usage-reconcile` · the re-runnable repair · provenance in Manage Agents · promote the ungated
