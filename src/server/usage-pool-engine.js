@@ -16,11 +16,14 @@ const { mk } = require('./lazy.js');
 function create({ app, rootDir, USAGE_CACHE_DIR, activeSessions, wss, WS_OPEN, getAutoResume = () => null, getOtelIngest = () => null, getQuotaProbe = () => null,
   broadcastToSession, serverNotice, serverSetting, getAccounts, getHosts,
   getUsageHistory, recordUsageAttribution, adapterRegistry, readUserState = () => ({}),
-  // THE SPEND CEILING (design §4.4c / P9) — the engine's own unattended
-  // spender is the codex reset credit (real stored value, consumed with
-  // nobody present). Absent = not wired (a harness); scripts/test-spend-paths
-  // pins the real wiring in server.js.
-  authorizeSpend = null, noteSpend = null, getUserTodos = () => null}) {
+  // THE SPEND CEILING (design §4.4c / P9) is CONSTRUCTED here (`spendGuard`,
+  // below) — the engine's own unattended spender, the codex reset credit, asks
+  // that object directly. It deliberately takes NO authorizeSpend/noteSpend
+  // deps: r2 found that server.js never passed them, so the gate on the reset
+  // credit was dead code in production while a harness that DID pass them made
+  // the suite green. A gate whose call site depends on a dep the one real
+  // caller does not hand over is a gate nobody has.
+  getUserTodos = () => null}) {
   // late-bound singletons: created after this module in boot order, used only
   // at runtime — the Proxy re-resolves per property access, never caches
   const accounts = mk(getAccounts);
@@ -129,7 +132,14 @@ const { UsageAnchors, identityKeyFor, costBetweenMulti } = require('../usage-anc
 // Every re-point now appends {sessionId, from, to, at, why} here, so the past
 // is a lookup. Bounded + archive-never-destroy: src/slot-transitions.js.
 const { SlotTransitions } = require('../slot-transitions.js');
-const { loginState } = require('../login-state.js'); // THE credential-state reader (shared with the panels + the migration)
+// THE credential-state readers, BOTH of them (src/login-state.js documents the
+// split): `loginState` answers for a credential SLOT — the file a re-pointed
+// symlink hands a running CLI — and `accountLoginState` answers for an ACCOUNT,
+// which is the same file OR a long-lived token (B-211a) delivered as spawn env.
+// They are two questions, so the two callers differ: slot validation asks the
+// first, anything reasoning about whether an ACCOUNT can serve a request asks
+// the second.
+const { loginState, accountLoginState } = require('../login-state.js');
 const { capsOf } = require('../backend-caps.js'); // per-backend switching capabilities (P4 slice) — replaces backend-id special cases
 // Which QuotaSignalSource speaks for a backend. A FALSY backend is the
 // legacy-record case (accounts._acctBackend / boot-restore's `m.backend ||
@@ -495,7 +505,9 @@ const spendGuard = require('./spend-guard.js').create({
   serverSetting,
   identityOf: (session) => fireIdentityFor(session),
   readCacheFor: (key) => readRawUsageCache(key),
-  credentialStateOf: (key) => memberLoginState(key),
+  // the ACCOUNT reader, not the slot one — an oat-only subscription serves
+  // turns with no credential file at all (see accountCredentialState)
+  credentialStateOf: (key) => accountCredentialState(key),
   getUserTodos,
   log: (...a) => console.log(...a),
 });
@@ -941,6 +953,34 @@ function memberLoginState(id) {
   _loginStateMemo.set(id, { sig, st });
   if (_loginStateMemo.size > 256) _loginStateMemo.delete(_loginStateMemo.keys().next().value);
   return st;
+}
+/** THE credential state of one claude ACCOUNT — the file OR a valid long-lived
+ *  token (B-211a). This is the reader for "can this identity serve a request
+ *  right now", which is what the SPEND CEILING asks about a session that is
+ *  already running.
+ *
+ *  NOT `memberLoginState` (r2, reproduced): that one answers for a credential
+ *  SLOT, and it is deliberately oat-blind because re-pointing a symlink can
+ *  never hand a token to a running CLI. Asking it about an ACCOUNT gives the
+ *  wrong answer for an `oatOnly` subscription — a supported, spawnable
+ *  configuration with NO credential file on disk (`resolveForSpawn` returns
+ *  `{oatOnly:true, localEnv:{CLAUDE_CODE_OAUTH_TOKEN}}`) — which the file
+ *  reader calls 'missing'/unusable. Every unattended producer was then refused
+ *  on it FOREVER, with a reason ("cannot authorize a request right now") that
+ *  is factually false about an account serving turns normally, and unlike the
+ *  hour/day caps that refusal never expires.
+ *  null = no opinion (a pseudo key, a codex account, an unreadable roster) —
+ *  P6: ignorance is not a claim, and the authorizer treats null as 'unknown'. */
+function accountCredentialState(id) {
+  if (!id || typeof id !== 'string' || !/^sub-/.test(id)) return null;
+  let fp = null, minted = null;
+  try {
+    const a = accounts.get(id);
+    if (!a || (a.backend || 'claude') !== 'claude') return null;
+    fp = accounts.subCredsPath(id);
+    minted = Number(a.oatMintedAt) || null;
+  } catch { return null; }
+  try { return accountLoginState(fp, { oatMintedAt: minted, backend: 'claude' }); } catch { return null; }
 }
 /** THE member a pooled session's requests are BILLED to: its link, validated
  *  against the credential slot. Every blocking decision uses this — the wall's
@@ -1732,16 +1772,22 @@ function recordCodexQuotaSignal(session, payload) {
         // producers, this is the one that does not open a turn but still
         // spends). Fail closed: an authorizer that throws does not get to
         // green-light a purchase.
-        if (authorizeSpend) {
+        // THE MODULE'S OWN GUARD, not an injected dep (r2): `spendGuard` is
+        // constructed above in this very file and the reset-credit path runs
+        // long after the factory returns, so there is nothing to inject and
+        // nothing that can arrive null. The dep version of this gate shipped
+        // DEAD — server.js never passed it — and the suite leg that "proved"
+        // it passed a payload that reached no branch at all.
+        {
           let av = null;
-          try { av = authorizeSpend({ reason: 'codex-reset-credit', session, sessionId: session._webuiId, sessionName: session.name || null }); }
+          try { av = spendGuard.authorize({ reason: 'codex-reset-credit', session, sessionId: session._webuiId, sessionName: session.name || null }); }
           catch (e) { console.warn('[codex] spend authorizer threw — not spending a reset credit:', e.message); return false; }
           if (av && av.ok === false) { console.log(`[codex] reset credit refused for ${session._webuiId} (spend budget: ${av.why})`); return false; }
         }
         session._codexResetTriedAt = now;
         session._codexLastResetsAt = Number(resetsAtSec) || 0;
         session.pty.write(JSON.stringify({ type: 'codex-reset-credit' }) + '\n');
-        if (noteSpend) { try { noteSpend({ reason: 'codex-reset-credit', session }); } catch (e) { console.warn('[codex] spend accounting failed:', e.message); } }
+        try { spendGuard.note({ reason: 'codex-reset-credit', session }); } catch (e) { console.warn('[codex] spend accounting failed:', e.message); }
         serverNotice(`codex-reset-${session._webuiId}-${now}`, `Codex hit a usage limit — trying a stored rate-limit reset credit before switching accounts.`);
         global.__vsEvent?.('codex-reset-credit-try', session._accountId || 'global');
         return true;
@@ -2734,7 +2780,7 @@ function maybeStopOnFallback(session, id, from, to) {
     noteSessionProduced, noteTurnEnd, noteWallSignal, beforeAutoResumeFire, quotaVerdictFor, probeUsageViaSession, recordRateLimitEvent, recordCodexQuotaSignal, resolveUsageKey,
     probeQuotaForKey, quotaSourceFor, quotaBackendFor, // S4 caps-routed quota probe + the per-harness QuotaSignalSource lookup (functional seams for test-quota-source)
     overageState, readRawUsageCache, reserveFloorPct, overageMemberIds, spendGuard, // the ONE overage reader, the two voluntary-move bars (D2/D3) and THE SPEND CEILING (§4.4c)
-    observedMemberFor, sessionBillingMember, wallKeyFor, rejectionSlotFor, readingSlotFor, corroborateReading, memberLoginState, healthyPoolMembers, switchCandidates, poolReadLogin, slotTransitions, nearArmVeto, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
+    observedMemberFor, sessionBillingMember, wallKeyFor, rejectionSlotFor, readingSlotFor, corroborateReading, memberLoginState, accountCredentialState, healthyPoolMembers, switchCandidates, poolReadLogin, slotTransitions, nearArmVeto, fireIdentityFor, demoteWalledAccount, wallCount, sessionWalledMembers,
     _wallRing, _sessionWalls, OBSERVED_ORG_RECENT_MS, WALL_RING_MS, SESSION_WALL_MS, // wall-ground-truth + token-slot + session-wall seams (test-auto-resume §11, test-auto-resume-loop)
     _poolAutoLast, _poolSwitchAt, // the eval gate (10s) + dwell belt (180s) are WALL-CLOCK: a suite winds them back instead of sleeping through them
     sessionModelFor, sweepUsageAnchors, usageCacheKeyFor,

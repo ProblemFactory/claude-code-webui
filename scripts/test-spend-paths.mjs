@@ -70,6 +70,7 @@ const arMod = require(path.join(REPO, 'src/server/auto-resume.js'));
 const deliverMod = require(path.join(REPO, 'src/server/conversation-deliver.js'));
 const { AccountManager } = require(path.join(REPO, 'src/accounts.js'));
 const { decidePoolSwitch } = require(path.join(REPO, 'src/account-pool-auto.js'));
+const { capsOf, notificationDelivery } = require(path.join(REPO, 'src/backend-caps.js')); // §5b reads the LANE off the caps row, never a backend id
 const { setupAgentRoutes } = require(path.join(REPO, 'src/agent-routes.js'));
 
 // ── §1 THE PURE RULES ───────────────────────────────────────────────────────
@@ -136,12 +137,96 @@ console.log('\n§1 the pure decision (src/spend-authorizer.js)');
   A.pruneBudget(src, now + A.DAY_MS + 1);
   ok('§1 …and it never mutates the caller\'s ledger (a refused authorization leaves no half-pruned state)', src.identities.x.length === 1);
 
-  ok('§1 overageState is THREE-state (yes / no / unknown), never a boolean', A.overageState({ overage: { inUse: true } }).inUse === 'yes'
+  // DATED, because that is what the producer writes: src/rate-limit-capture.js
+  // stamps `asOf` on the very line it merges the overage record.
+  const ovRec = (extra = {}) => ({ overage: { inUse: true, asOf: now, ...extra } });
+  ok('§1 overageState is THREE-state (yes / no / unknown), never a boolean', A.overageState(ovRec(), { now }).inUse === 'yes'
     && A.overageState({ overage: { inUse: false } }).inUse === 'no' && A.overageState({}).inUse === 'unknown' && A.overageState(null).inUse === 'unknown');
-  ok('§1 …and it carries the SPEND figure when the payload has one', A.overageText({ overage: { inUse: true }, spend: { used: 12.5, limit: 50 } }) === 'paid overage in use — $12.50 of $50.00 this period',
-    A.overageText({ overage: { inUse: true }, spend: { used: 12.5, limit: 50 } }));
+  ok('§1 …and it carries the SPEND figure when the payload has one', A.overageText({ ...ovRec(), spend: { used: 12.5, limit: 50 } }, { now }) === 'paid overage in use — $12.50 of $50.00 this period',
+    A.overageText({ ...ovRec(), spend: { used: 12.5, limit: 50 } }, { now }));
   ok('§1 …and says nothing at all when overage is off or unknown', A.overageText({ overage: { inUse: false } }) === null && A.overageText({}) === null);
+  // …and the SENTENCE runs on the same clock as the GATE: a text built with its
+  // own Date.now() would say "paid overage in use" about a record the
+  // authorizer has already expired — two faces of one record, disagreeing.
+  ok('§1 …and it is silent about a record the authorizer has expired (one clock, both faces)',
+    A.overageText({ overage: { inUse: true, asOf: now - A.OVERAGE_STALE_MS - 1 } }, { now }) === null
+    && A.overageText({ ...ovRec(), spend: { used: 1, limit: 2 } }, { now }) !== null);
+
+  // ── r2: THE CLAIM THAT BLOCKS IS THE ONE THAT NEEDS A DATE ────────────────
+  // `asOf` was captured and never consulted, so a record that stopped being
+  // refreshed refused every unattended turn FOREVER — including the continue
+  // for an auto-resume-armed session, which is by definition idle and produces
+  // no events to refresh it with — and `retryAfter` printed a reset instant in
+  // the PAST. Measured on this instance: seven live records, ages up to 33 h on
+  // a cache refreshed 4 minutes ago, and 0 of 7 carrying a `resetsAt`.
+  {
+    const ovAuth = (cache) => A.authorizeUnattendedSpend({ reason: 'auto-resume', identity: ID, state: A.emptyBudget(), overage: A.overageState(cache, { now }), now });
+    const fresh = { overage: { inUse: true, asOf: now - 60e3 } };
+    const aged = { overage: { inUse: true, asOf: now - A.OVERAGE_STALE_MS - 1 } };
+    const ended = { overage: { inUse: true, asOf: now - 60e3, resetsAt: Math.floor((now - 3600e3) / 1000) } };
+    const undated = { overage: { inUse: true } };
+    ok('§1 a FRESH overage record still refuses (D3b is intact — this is the positive control)',
+      ovAuth(fresh).ok === false && ovAuth(fresh).why === 'overage-in-use');
+    ok('§1 …and it SAYS how old the evidence is (a refusal that never dates itself cannot be told from a stale file)',
+      / \(last reported 1 min ago\)/.test(ovAuth(fresh).detail), ovAuth(fresh).detail);
+    ok('§1 a STALE record neither blocks nor claims (P6) and says which rung expired it',
+      ovAuth(aged).ok === true && A.overageState(aged, { now }).inUse === 'unknown'
+      && A.overageState(aged, { now }).evidence === 'stale' && A.overageState(aged, { now }).stated === 'yes');
+    ok('§1 …a record whose OWN resetsAt has passed describes a period that ENDED, so it is not a claim about now',
+      ovAuth(ended).ok === true && A.overageState(ended, { now }).evidence === 'period-ended');
+    ok('§1 …and an UNDATED record cannot claim the present either', ovAuth(undated).ok === true && A.overageState(undated, { now }).evidence === 'undated');
+    ok('§1 NEGATIVE CONTROL: an expired claim never turns into a REFUSAL of a different kind — it simply stops blocking',
+      ovAuth(aged).why === null && ovAuth(ended).why === null && ovAuth(undated).why === null);
+    ok('§1 …and a still-future resetsAt keeps its retryAfter in the FUTURE (the old shape printed an instant in the past)',
+      ovAuth({ overage: { inUse: true, asOf: now - 60e3, resetsAt: Math.floor((now + 3600e3) / 1000) } }).retryAfter > now);
+    ok('§1 …while `inUse:no` is deliberately NOT date-bounded (it blocks nothing, so no decision changes)',
+      A.overageState({ overage: { inUse: false, asOf: now - A.OVERAGE_STALE_MS * 4 } }, { now }).inUse === 'no');
+  }
   ok('§1 the PURE module imports nothing (P1: one rule, no tier crossings)', !/^\s*(const|let|var)\s+\w+\s*=\s*require\(/m.test(read('src/spend-authorizer.js')));
+
+  // ── r2: THE OFFERED RANGE AND THE ENFORCEABLE RANGE ARE ONE SET ───────────
+  // Round 1 kept a flat `MAX_STAMPS = 4 * 200` while the settings schema
+  // offered 2000 per identity/day and 10000 per instance/day and budgetLimits
+  // clamped at 100000/1000000 — so every value the UI accepted above 800 was
+  // silently unenforceable: 1500 charged spends against a 1000/day cap counted
+  // 800 and authorized the 1501st. A setting that reads as a money bound and is
+  // not one is worse than no setting.
+  {
+    const schema = read('src/lib/settings-schema.js');
+    const maxOf = (key) => {
+      const i = schema.indexOf(`'${key}': {`);
+      if (i < 0) return null;
+      const m = /max:\s*(\d+)/.exec(schema.slice(i, i + 400));
+      return m ? Number(m[1]) : null;
+    };
+    const rows = { perIdentityHour: 'spend.unattendedPerIdentityHour', perIdentityDay: 'spend.unattendedPerIdentityDay', perInstanceDay: 'spend.unattendedPerInstanceDay' };
+    const schemaMax = Object.fromEntries(Object.entries(rows).map(([k, key]) => [k, maxOf(key)]));
+    ok('§1 the census can read all three schema rows (an unreadable schema would make the next assert vacuous)',
+      Object.values(schemaMax).every((v) => Number.isFinite(v)), JSON.stringify(schemaMax));
+    ok('§1 the authorizer\'s clamp IS the schema\'s own max, row for row — widening one without the other goes red here',
+      Object.entries(schemaMax).every(([k, v]) => A.CAP_MAX[k] === v), JSON.stringify({ schemaMax, CAP_MAX: A.CAP_MAX }));
+    // and the ledger can COUNT to the biggest cap the schema offers
+    const bigLimits = { perIdentityHour: 200, perIdentityDay: 2000, perInstanceDay: 10000, noticePct: 0 };
+    ok('§1 retention is a FUNCTION of the limits, so the biggest offered cap is reachable',
+      A.stampCap(bigLimits) > bigLimits.perInstanceDay && A.stampCap(bigLimits) <= A.CAP_MAX.perInstanceDay + 128,
+      String(A.stampCap(bigLimits)));
+    // the reproduction, end to end, at a cap ABOVE the retired constant
+    const L2 = { perIdentityHour: 1000, perIdentityDay: 1000, perInstanceDay: 1000, noticePct: 0 };
+    let st2 = A.emptyBudget();
+    for (let i = 0; i < 1000; i++) st2 = A.noteUnattendedSpend(st2, { identity: ID, at: now + i, limits: L2 }).state;
+    const c2 = A.spendCounts(st2, ID.key, now + 1000);
+    ok('§1 a 1000/hour cap really counts 1000 (the retired 800-stamp ledger topped out below every value above it)',
+      c2.hour === 1000, JSON.stringify(c2));
+    ok('§1 …and the 1001st is REFUSED (this authorized before: the ceiling could not be reached, so it never fired)',
+      A.authorizeUnattendedSpend({ reason: 'auto-resume', identity: ID, state: st2, limits: L2, now: now + 1000 }).why === 'hour-cap');
+    ok('§1 NEGATIVE CONTROL: the retired flat retention would still top out at 800 on that same ledger',
+      st2.identities[ID.key].slice(-800).length === 800 && c2.hour > 800);
+    ok('§1 …and the ledger stays BOUNDED (retention never exceeds the clamped instance cap plus head-room)',
+      st2.identities[ID.key].length <= A.CAP_MAX.perInstanceDay + 128);
+    // the clamp itself
+    ok('§1 a setting ABOVE the schema max is clamped to it, never silently accepted as unenforceable',
+      A.budgetLimits((k) => ({ 'spend.unattendedPerInstanceDay': 999999 }[k])).perInstanceDay === A.CAP_MAX.perInstanceDay);
+  }
 }
 
 // ── §2 THE CENSUS ───────────────────────────────────────────────────────────
@@ -160,8 +245,14 @@ const PRIMITIVES = [
   { id: 'stop-nudge', re: /block:\s*true/, why: 'the Stop hook arbiter — block+reason IS an extra billed mini-turn' },
   { id: 'reset-credit', re: /type:\s*'codex-reset-credit'/, why: 'consumes a stored reset credit (money already paid for)' },
 ];
-// GATED = the file routes the decision through the one authorizer.
-const GATED_RE = /authorizeSpend|spendGuard|spend-authorizer/;
+// GATED = the file ASKS THE GATE. It must be a CALL, never a mention: r2 found
+// `src/server/usage-pool-engine.js` reported GATED because it CONSTRUCTS the
+// guard (`require('./spend-guard.js').create({…})`) while its own producer —
+// the codex reset credit — went through `authorizeSpend`, a dep server.js never
+// passed. The census said "gated" about the one file that also happens to be
+// where the guard is built, so the producer inside it was invisible. Matching
+// the call shape means the construction line alone no longer satisfies it.
+const GATED_RE = /(?:authorizeSpend|spendGuard\.authorize|authorizeUnattendedSpend)\s*\(/;
 // NOT a spend site — each entry says why, and an entry that stops matching
 // anything FAILS (a dead allowlist row hides the next real producer).
 const ALLOW = [
@@ -243,6 +334,19 @@ function trackedServerSource() {
     const cHits2 = censusOver(scratch, ['src/server/new-producer.js']);
     ok('§2 POSITIVE CONTROL: the same producer, wired to the authorizer, is clean',
       cHits2.length === 1 && cHits2[0].gated === true, JSON.stringify(cHits2));
+    // r2's OWN blind spot, as a permanent control: a file that BUILDS the guard
+    // and holds a producer that does not ask it must be caught. The round-1
+    // regex matched the word `spendGuard` anywhere, so this file read GATED and
+    // the assert below ("the wired consumers are all in the GATED set") was a
+    // false green about the one producer that was in fact dead in production.
+    fs.writeFileSync(path.join(scratch, 'src/server/new-producer.js'),
+      "'use strict';\nconst spendGuard = require('./spend-guard.js').create({ dataDir: 'x' });\n"
+      + "function notifyOwner(session, text) {\n  const { stdinPayload } = adapter.formatChatInput(text, 'x');\n  session.pty.write(stdinPayload + '\\n');\n}\nmodule.exports = { notifyOwner, spendGuard };\n");
+    const cHits3 = censusOver(scratch, ['src/server/new-producer.js']);
+    ok('§2 NEGATIVE CONTROL: a file that CONSTRUCTS the guard but never ASKS it is NOT gated (r2: this is how the reset credit hid)',
+      cHits3.length === 1 && cHits3[0].gated === false, JSON.stringify(cHits3));
+    ok('§2 …and the retired regex would have called that same file gated (the blind spot, kept as a control)',
+      /authorizeSpend|spendGuard|spend-authorizer/.test(fs.readFileSync(path.join(scratch, 'src/server/new-producer.js'), 'utf8')));
   }
 
   // WIRING PIN — the census proves a file ASKS; these prove server.js HANDS it
@@ -256,6 +360,23 @@ function trackedServerSource() {
   ok('§2 WIRING: the delivery ladder is created WITH authorizeSpend + noteSpend',
     /authorizeSpend: \(req\) => spendGuard\.authorize\(req\), noteSpend: \(rec\) => spendGuard\.note\(rec\)/.test(srv));
   ok('§2 WIRING: the agent routes (the Stop nudge lives there) receive the guard', /setupAgentRoutes\(\{[^)]*spendGuard,/.test(srv));
+  // THE ENGINE'S OWN PRODUCER (r2). The other three consumers get the guard
+  // handed to them by server.js and have a pin each; the codex reset credit
+  // lives INSIDE the file that constructs it, so its pin is that it asks the
+  // module-local object DIRECTLY — never an injected dep. That dep was the
+  // defect: `create()` declared `authorizeSpend = null` and server.js never
+  // passed it, so the gate was dead in production while a harness that DID pass
+  // it kept §9(d) green.
+  {
+    const eng = read('src/server/usage-pool-engine.js');
+    ok('§2 WIRING: the codex reset credit asks the module-local guard, not an injected dep',
+      /spendGuard\.authorize\(\{ reason: 'codex-reset-credit'/.test(eng) && /spendGuard\.note\(\{ reason: 'codex-reset-credit'/.test(eng));
+    ok('§2 …and the engine takes NO authorizeSpend/noteSpend deps any more (a gate depending on a dep nobody passes is nobody\'s gate)',
+      !/authorizeSpend\s*=\s*null/.test(eng) && !/noteSpend\s*=\s*null/.test(eng));
+    ok('§2 …and the guard the reset credit asks is the one this file constructs',
+      eng.indexOf("require('./spend-guard.js').create({") > 0
+      && eng.indexOf("require('./spend-guard.js').create({") < eng.indexOf("spendGuard.authorize({ reason: 'codex-reset-credit'"));
+  }
   ok('§2 WIRING: the two callers of the ladder TYPE themselves (jobs ⇒ job-notification, agent messaging ⇒ peer-message)',
     /spendReason: 'job-notification'/.test(read('src/jobs.js')) && /spendReason: 'peer-message'/.test(read('src/agent-routes.js')));
   ok('§2 WIRING: the ledger is FLUSHED on the routine restart path (a debounced-only write hands the next boot a fresh hour)',
@@ -309,6 +430,74 @@ console.log('\n§3 the guard: persisted counters, one journal line, one inbox it
   const before = inbox.length;
   g3.note({ reason: 'stop-nudge', session: { id: 'sub-c' } });
   ok('§3 …and NOT again inside the same window', inbox.length === before);
+}
+
+// ── §3b THE CREDENTIAL READER IS THE ACCOUNT'S, NOT THE SLOT'S (r2) ─────────
+// `credentialStateOf` was wired to `memberLoginState`, which reads the
+// credential FILE and is deliberately oat-blind: it answers for a credential
+// SLOT, and re-pointing a symlink can never hand a long-lived token to a
+// running CLI. Asked about an ACCOUNT it is wrong for a supported, spawnable
+// configuration — B-211a `oatOnly`, where `resolveForSpawn` returns
+// `{oatOnly:true, localEnv:{CLAUDE_CODE_OAUTH_TOKEN}}` and there is NO
+// credential file at all. Every unattended producer was refused on such an
+// account FOREVER (unlike the hour/day caps this refusal never expires), with a
+// reason — "cannot authorize a request right now" — that is factually false
+// about an account serving turns normally.
+console.log('\n§3b an oat-only subscription serves turns, so the ceiling must not call it dead');
+{
+  const dataDir = tmpdir('vs-spend-oat-');
+  const am = new AccountManager({ dataDir });
+  if (!am.poolSupported()) {
+    console.log('  · SKIP (pooled accounts are unsupported on ' + process.platform + ')');
+  } else {
+    const OAT = am.createSubscription({ name: 'OatOnly' }).id;
+    am.setOat(OAT, 'sk-ant-oat01-' + 'z'.repeat(48));
+    // NEGATIVE CONTROL: wiped credential file, no token — nothing can serve it
+    const DEAD = am.createSubscription({ name: 'Wiped' }).id;
+    fs.writeFileSync(path.join(am.subDir(DEAD), '.credentials.json'),
+      JSON.stringify({ claudeAiOauth: { accessToken: '', refreshToken: '', expiresAt: 0, refreshTokenExpiresAt: Date.now() + 29 * 86400e3 } }), { mode: 0o600 });
+    // the shape the product actually spawns — the whole reason this matters
+    let spawn = null; try { spawn = am.resolveForSpawn(OAT, 'claude'); } catch (e) { spawn = { err: e.message }; }
+    ok('§3b the account is SPAWNABLE with no credential file (oatOnly ⇒ the token rides spawn env)',
+      spawn && spawn.oatOnly === true && !!spawn.localEnv?.CLAUDE_CODE_OAUTH_TOKEN, JSON.stringify(spawn).slice(0, 140));
+
+    // THE ENGINE'S OWN READERS, both of them, on the same account
+    const eng2 = engMod.create({
+      app: { get() { }, post() { }, put() { }, delete() { }, use() { }, locals: {} },
+      rootDir: path.dirname(dataDir), USAGE_CACHE_DIR: path.join(dataDir, 'usage-cache'),
+      activeSessions: new Map(), wss: { clients: new Set() }, WS_OPEN: 1,
+      broadcastToSession() { }, serverNotice() { }, serverSetting: () => undefined,
+      getAccounts: () => am, getHosts: () => null, getUsageHistory: () => null,
+      recordUsageAttribution() { }, adapterRegistry: { get() { return null; } },
+      getAutoResume: () => null, getOtelIngest: () => ({ observedOrgFor: () => null }), getQuotaProbe: () => null,
+      getUserTodos: () => null,
+    });
+    ok('§3b the SLOT reader still calls it unusable — deliberately, and that is its correct answer about a slot',
+      eng2.memberLoginState(OAT)?.usable === false, JSON.stringify(eng2.memberLoginState(OAT)));
+    ok('§3b the ACCOUNT reader says it CAN serve, and names the channel',
+      eng2.accountCredentialState(OAT)?.usable === true && eng2.accountCredentialState(OAT)?.state === 'oat',
+      JSON.stringify(eng2.accountCredentialState(OAT)));
+    ok('§3b NEGATIVE CONTROL: a wiped account with no token is still dead to BOTH readers',
+      eng2.memberLoginState(DEAD)?.usable === false && eng2.accountCredentialState(DEAD)?.usable === false);
+    ok('§3b …and a key that is not a claude subscription gets NO OPINION from either (P6)',
+      eng2.accountCredentialState('__global__') === null && eng2.accountCredentialState('pool-x') === null);
+
+    // and the GUARD, through the engine's own construction, refuses nothing
+    for (const reason of Object.keys(A.SPEND_REASONS)) {
+      const v = eng2.spendGuard.authorize({ reason, identity: { key: OAT, name: 'OatOnly' } });
+      ok(`§3b the ceiling AUTHORIZES ${reason} on the oat-only account`, v.ok === true, v.why + ': ' + v.detail);
+    }
+    const vd = eng2.spendGuard.authorize({ reason: 'auto-resume', identity: { key: DEAD, name: 'Wiped' } });
+    ok('§3b NEGATIVE CONTROL: the wiped account is still refused (the fix widens nothing else)',
+      vd.ok === false && vd.why === 'identity-cannot-serve', JSON.stringify(vd).slice(0, 140));
+
+    // WIRING PIN: the guard must be built with the ACCOUNT reader
+    const engSrc = read('src/server/usage-pool-engine.js');
+    ok('§3b WIRING: the guard is constructed with accountCredentialState, not memberLoginState',
+      /credentialStateOf: \(key\) => accountCredentialState\(key\)/.test(engSrc));
+    ok('§3b …and memberLoginState is still what SLOT validation asks (the two questions stay two)',
+      /const st = memberLoginState\(linkedId\)/.test(engSrc));
+  }
 }
 
 // ── §4 THE REAL AUTO-RESUME + THE REAL POOL ENGINE ──────────────────────────
@@ -442,6 +631,150 @@ console.log('\n§5 the delivery ladder: a refusal stashes, an allowed delivery i
   ok('§5 the ledger charged the delivered one ONLY', (led.budget.identities['sub-a'] || []).length === 1, JSON.stringify(led.budget.identities));
 }
 
+// ── §5b A DELIVERY THAT OPENS NO TURN IS NOT A SPEND (r2) ───────────────────
+// The ladder charged a full unattended turn for EVERY accepted delivery,
+// including a notification STEERED into a turn already running — which the
+// wrapper folds into that turn (it carries only itself, the queue is untouched)
+// and which therefore bills nothing. Twelve mid-turn Background Work
+// notifications on one subscription exhausted the default 12/hour ceiling on
+// zero turns, and the NEXT auto-resume continue — the one that does cost money
+// — was refused with 'hour-cap'. Everything else still charges: claude's
+// cli-inbox QUEUES a mid-turn delivery and runs it as its own billed turn, and
+// a codex `peer` frame is thread/queue/add, likewise its own turn afterwards.
+console.log('\n§5b a steered notification opens no turn, so it spends no budget');
+{
+  const mkLadder = () => {
+    const dataDir = tmpdir('vs-spend-steer-');
+    fs.mkdirSync(path.join(dataDir, 'session-buffers'), { recursive: true });
+    // the wrapper sidecar the rpc rung gates on (caps.peerMessage)
+    fs.writeFileSync(path.join(dataDir, 'session-buffers', 'w1.json'), JSON.stringify({ caps: { peerMessage: true } }));
+    const settings = { 'spend.unattendedPerIdentityHour': 12 };
+    const guard = guardMod.create({
+      dataDir, serverSetting: (k) => settings[k],
+      identityOf: () => ({ key: 'slot-A', name: 'Alpha' }),
+      getUserTodos: () => null, log: () => { },
+    });
+    const frames = [];
+    const S = {
+      backend: 'codex', mode: 'chat', _webuiId: 'w1', backendSessionId: 'cid-1',
+      _isStreaming: true, pty: { write: (x) => frames.push(String(x)) }, name: 'busy',
+    };
+    const sessions = new Map([['w1', S]]);
+    const deliver = deliverMod.create({
+      dataDir, activeSessions: sessions,
+      peerMsg: { findPeer: () => null, postToPeer: async () => ({ ok: false }), postChannelEvent: async () => ({ ok: false }) },
+      getHosts: () => null, getConvIndex: () => null, serverSetting: () => undefined, emitPeerCard: () => { },
+      authorizeSpend: (req) => guard.authorize(req), noteSpend: (rec) => guard.note(rec), log: () => { },
+    });
+    const charged = () => (guard.snapshot().budget.identities['slot-A'] || []).length;
+    return { deliver, guard, S, frames, charged };
+  };
+  // the LANE fact this is gated on, read off the caps row (never a backend id)
+  ok('§5b codex declares the steer lane for notifications; claude does not',
+    notificationDelivery(capsOf('codex')) === 'steer' && notificationDelivery(capsOf('claude')) === 'cli-inbox');
+
+  {   // THE INCIDENT: three notifications into a session that is MID-TURN
+    const L = mkLadder();
+    for (let i = 0; i < 3; i++) await L.deliver.deliverToConversation('cid-1', 'job ' + i, { kind: 'notification', spendReason: 'job-notification' });
+    ok('§5b all three are DELIVERED (this is not a refusal — the message rides the running turn)', L.frames.length === 3);
+    ok('§5b …and the ledger charged NOTHING for them (they opened no turn)', L.charged() === 0, String(L.charged()));
+    ok('§5b …so the auto-resume continue — a REAL billed turn — is still authorized',
+      L.guard.authorize({ reason: 'auto-resume', session: L.S }).ok === true);
+    ok('§5b the ladder SAYS it steered, so the caller and the journal can tell the two apart',
+      (await L.deliver.deliverToConversation('cid-1', 'job 4', { kind: 'notification', spendReason: 'job-notification' })).steered === true);
+  }
+  {   // POSITIVE CONTROL 1: the same session, IDLE ⇒ turn/start ⇒ a billed turn
+    const L = mkLadder(); L.S._isStreaming = false;
+    await L.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    ok('§5b POSITIVE CONTROL: an IDLE target opens a turn, and it IS charged', L.charged() === 1, String(L.charged()));
+  }
+  {   // POSITIVE CONTROL 2: a HUMAN peer message queues as its own turn, always
+    const L = mkLadder();
+    await L.deliver.deliverToConversation('cid-1', 'hi', { kind: 'peer', spendReason: 'peer-message' });
+    ok('§5b POSITIVE CONTROL: a human PEER message is charged even mid-turn (queued ⇒ its own turn afterwards)', L.charged() === 1, String(L.charged()));
+  }
+  {   // POSITIVE CONTROL 3: claude's cli-inbox lane is never treated as free
+    const dataDir = tmpdir('vs-spend-steer-cl-');
+    const guard = guardMod.create({ dataDir, serverSetting: () => 12, identityOf: () => ({ key: 'slot-A', name: 'Alpha' }), getUserTodos: () => null, log: () => { } });
+    const sessions = new Map([['w1', { backend: 'claude', mode: 'chat', claudeSessionId: 'cid-1', _isStreaming: true, pty: { write() { } } }]]);
+    const deliver = deliverMod.create({
+      dataDir, activeSessions: sessions,
+      peerMsg: { findPeer: () => ({ socketPath: '/tmp/x', name: 'p' }), postToPeer: async () => ({ ok: true }), postChannelEvent: async () => ({ ok: false }) },
+      getHosts: () => null, getConvIndex: () => null, serverSetting: () => undefined, emitPeerCard: () => { },
+      authorizeSpend: (req) => guard.authorize(req), noteSpend: (rec) => guard.note(rec), log: () => { },
+    });
+    await deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    ok('§5b POSITIVE CONTROL: claude MID-TURN is charged — its CLI queues the delivery and then runs it as its own billed turn',
+      (guard.snapshot().budget.identities['slot-A'] || []).length === 1);
+  }
+  {   // THE SETTLEMENT: the prediction can be wrong, and the wrapper says so
+    const L = mkLadder();
+    await L.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    ok('§5b a predicted-free delivery is held UNSETTLED, not silently forgotten', L.deliver._unsettledCount('cid-1') === 1);
+    ok('§5b …the wrapper answering `mode:steered` confirms it was free', L.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'steered' }) === 'free' && L.charged() === 0);
+    await L.deliver.deliverToConversation('cid-1', 'job2', { kind: 'notification', spendReason: 'job-notification' });
+    ok('§5b …but a steer that FELL BACK to the queue really did open a turn, and is charged THEN',
+      L.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'queued' }) === 'charged' && L.charged() === 1);
+    ok('§5b an unknown conversation settles to nothing (no phantom charges)', L.deliver.settleRpcDelivery('cid-nope', { ok: true, mode: 'queued' }) === null);
+  }
+  // ── r2 round 2: A MODE-LESS ANSWER IS NOT AN ANSWER ABOUT OUR FRAME ───────
+  // Reproduced: a Stop landing between our write and the wrapper's reply emits
+  // `peer_message_result {ok:false, text}` ABOUT AN EARLIER queued item, the
+  // settlement shifted our pending entry on it, and the real answer — a
+  // `thread/queue/add`, a BILLED turn — then found an empty queue and charged
+  // nothing. The rule is the PRODUCER's, so the census below derives it.
+  {
+    const wrapper = read('data/bin/codex-chat-wrapper.js');
+    const emitters = [...wrapper.matchAll(/emitTaskEvent\('peer_message_result', \{([^}]*)\}/g)].map((m) => m[1]);
+    ok('§5b the wrapper has all six peer_message_result emitters (an unreadable census makes the next two vacuous)',
+      emitters.length === 6, String(emitters.length));
+    ok('§5b every ok:TRUE answer carries a `mode` — that is what makes it an answer about the frame we just wrote',
+      emitters.filter((e) => /ok: true/.test(e)).length === 3 && emitters.filter((e) => /ok: true/.test(e)).every((e) => /mode: '/.test(e)));
+    ok('§5b …and every ok:FALSE answer carries `text` and NO mode — two of the three are about a DIFFERENT, earlier message',
+      emitters.filter((e) => /ok: false/.test(e)).length === 3
+      && emitters.filter((e) => /ok: false/.test(e)).every((e) => /(?:^|[\s,])text\b/.test(e) && !/mode: '/.test(e)),
+      JSON.stringify(emitters.filter((e) => /ok: false/.test(e))));
+    const L = mkLadder();
+    await L.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    ok('§5b a Stop dropping an EARLIER queued item settles nothing here (it is not about this frame)',
+      L.deliver.settleRpcDelivery('cid-1', { ok: false, reason: 'dropped by Stop before it was delivered', text: 'older', mode: null }) === 'not-ours'
+      && L.deliver._unsettledCount('cid-1') === 1);
+    ok('§5b …so OUR answer still arrives, and a queue-add is charged (PRE-FIX: this stayed at 0 — a billed turn made free)',
+      L.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'queued' }) === 'charged' && L.charged() === 1);
+  }
+  {   // …and the queue holds EVERY frame, so an earlier answer cannot take a later frame's entry
+    const L = mkLadder();
+    await L.deliver.deliverToConversation('cid-1', 'typed by a human', { kind: 'peer', spendReason: 'peer-message' });      // charged on the spot
+    await L.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });      // predicted free
+    ok('§5b both frames are tracked, not only the predicted-free one', L.deliver._unsettledCount('cid-1') === 2 && L.charged() === 1);
+    ok('§5b the FIRST answer belongs to the first frame, which was already charged (no second charge)',
+      L.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'queued' }) === 'already-charged' && L.charged() === 1);
+    ok('§5b …and the notification keeps its own answer: steered ⇒ still free',
+      L.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'steered' }) === 'free' && L.charged() === 1);
+  }
+  {   // a STRANDED frame is dropped, never left to absorb a later message's answer
+    const L = mkLadder();
+    await L.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    // the wrapper died between our write and its reply; the suite winds the
+    // clock forward rather than sleeping through the settle window
+    ok('§5b a frame stranded past the settle window is dropped, not charged to the next message',
+      L.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'queued', now: Date.now() + 121 * 1000 }) === null && L.charged() === 0);
+    const L2 = mkLadder();
+    await L2.deliver.deliverToConversation('cid-1', 'job', { kind: 'notification', spendReason: 'job-notification' });
+    ok('§5b …CONTROL: the same answer INSIDE the window charges it (the drop is the age, not the answer)',
+      L2.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'queued', now: Date.now() + 119 * 1000 }) === 'charged' && L2.charged() === 1);
+  }
+  // WIRING PIN: the settlement is reachable from the consumer that already
+  // reads this record — an unwired settle would make every fallback free.
+  {
+    const ce = read('src/server/stdout/codex-events.js');
+    ok('§5b WIRING: the codex stdout consumer settles on peer_message_result, by PROPERTY ACCESS on the lazy ref',
+      /peer_message_result[\s\S]{0,900}deliverRef\?\.settleRpcDelivery\?\.\(/.test(ce));
+    ok('§5b …and the ladder gates on the CAPS ROW, never on a backend id',
+      /notificationDelivery\(capsOf\(rpc\.s\.backend\)\) === 'steer'/.test(read('src/server/conversation-deliver.js')));
+  }
+}
+
 // ── §6 THE REAL STOP-NUDGE ROUTE ────────────────────────────────────────────
 console.log('\n§6 the Stop nudge: a persisted cooldown, an exit condition, and the ceiling');
 {
@@ -543,7 +876,9 @@ console.log('\n§7 paid overage: refused for unattended spend, visible where the
   const chip = require(path.join(REPO, 'src/lib/usage-source.js'));
   ok('§7 the chip says nothing when overage is off/unknown, and says the money when it is on',
     chip.overageChip(A.overageState({ overage: { inUse: false } })) === null
-    && /paid overage in use — \$4\.25 \/ \$20\.00/.test(chip.overageChip(A.overageState({ overage: { inUse: true }, spend: { used: 4.25, limit: 20 } })).label));
+    && /paid overage in use — \$4\.25 \/ \$20\.00/.test(chip.overageChip(A.overageState({ overage: { inUse: true, asOf: Date.now() }, spend: { used: 4.25, limit: 20 } })).label));
+  ok('§7 …and it says NOTHING about a record that stopped being refreshed (the chip tip promises a refusal that no longer happens)',
+    chip.overageChip(A.overageState({ overage: { inUse: true, asOf: Date.now() - A.OVERAGE_STALE_MS - 1 } })) === null);
 }
 
 // ── §8 THE EDF RESERVE FLOOR ────────────────────────────────────────────────
@@ -649,12 +984,37 @@ console.log('\n§9 fail closed: an authorizer that throws spends nothing (P8)');
   ok('§9 NEGATIVE CONTROL: master\'s shape (`catch { return true; }`) is gone from BOTH sites — read on the gate\'s own body, not a window',
     gateBody.length > 200 && !/catch \{ return true; \}/.test(code(gateBody)) && !/beforeAutoResumeFire\(id, s\); \} catch \{ return true; \}/.test(code(read('server.js'))));
 
-  // (d) the codex reset credit
-  const w = mkWorld({ settings: { 'codex.limitResetCredit': 'auto', 'spend.unattendedPerIdentityHour': 0 } });
-  const cs = { backend: 'codex', mode: 'chat', _webuiId: 'cx1', _accountId: w.P, pty: { write: () => { w.notices.push('WROTE'); } }, name: 'cx' };
-  w.sessions.set('cx1', cs);
-  w.eng.recordCodexQuotaSignal(cs, { method: 'task_failed', params: { error: { message: 'You have hit your usage limit.' } } });
-  ok('§9 the codex reset credit is under the same ceiling (0/hour ⇒ no credit is spent)', !w.notices.includes('WROTE'), JSON.stringify(w.notices).slice(0, 160));
+  // (d) the codex reset credit — THE PRODUCTION SHAPE, with a positive control.
+  // r2 found this leg vacuous TWICE OVER: it passed `{method:'task_failed',
+  // params:{error:{message:…}}}`, which matches no branch at all (the engine
+  // switches on `payload.type` and src/harnesses/codex-quota.js requires
+  // `payload.codexErrorInfo` matching EXHAUSTION_RE), so `!WROTE` was true for
+  // a reason unrelated to the ceiling — and mkWorld builds the engine exactly
+  // as server.js does, i.e. WITHOUT the authorizeSpend dep the gate then
+  // depended on. Both halves are now driven: the real exhaustion payload, and
+  // a positive control proving the path is REACHED when the budget allows it.
+  const resetPayload = () => ({ type: 'task_failed', codexErrorInfo: 'usage_limit_reached', resetsAt: Math.floor(Date.now() / 1000) + 7200 });
+  const creditWorld = (hour) => {
+    const w2 = mkWorld({ settings: { 'codex.limitResetCredit': 'auto', 'spend.unattendedPerIdentityHour': hour } });
+    const wrote = [];
+    const s2 = { backend: 'codex', mode: 'chat', _webuiId: 'cx1', _accountId: w2.P, pty: { write: (x) => wrote.push(String(x)) }, name: 'cx' };
+    w2.sessions.set('cx1', s2);
+    w2.eng.recordCodexQuotaSignal(s2, resetPayload());
+    return { w: w2, spent: wrote.some((x) => /codex-reset-credit/.test(x)) };
+  };
+  const allowed = creditWorld(100);
+  ok('§9 POSITIVE CONTROL: the reset-credit path is REACHED — with budget the credit IS spent (an unreached path proves nothing)',
+    allowed.spent === true);
+  const denied = creditWorld(0);
+  ok('§9 the codex reset credit is under the same ceiling (0/hour ⇒ no credit is spent), in the shape server.js builds',
+    denied.spent === false);
+  // and the LEDGER agrees with the pty in both directions (an assertion about
+  // the frame alone cannot tell "refused" from "charged but never written")
+  allowed.w.eng.spendGuard.flush(); denied.w.eng.spendGuard.flush();
+  const ledOf = (w2) => { try { return JSON.parse(fs.readFileSync(path.join(w2.dataDir, 'spend-budget.json'), 'utf8')); } catch { return { budget: { instance: [] } }; } };
+  ok('§9 …and the ledger CHARGED the credit that was spent and charged nothing for the one refused',
+    (ledOf(allowed.w).budget.instance || []).length === 1 && (ledOf(denied.w).budget.instance || []).length === 0,
+    JSON.stringify({ allowed: (ledOf(allowed.w).budget.instance || []).length, denied: (ledOf(denied.w).budget.instance || []).length }));
 }
 
 console.log(`\n${fail ? fail + ' FAILED' : 'ALL PASS'} (${pass})`);

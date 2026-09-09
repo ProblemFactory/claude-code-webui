@@ -60,10 +60,34 @@ const BUDGET_DEFAULTS = Object.freeze({
 });
 const HOUR_MS = 3600 * 1000;
 const DAY_MS = 24 * HOUR_MS;
-// Per identity, per day: keeping more timestamps than the biggest cap could
-// ever need only grows the file. 4× the instance/day cap is head-room for a
-// re-configured instance without an unbounded array.
-const MAX_STAMPS = 4 * 200;
+// THE OFFERED RANGE AND THE ENFORCEABLE RANGE ARE ONE SET (r2, reproduced).
+// These are the `max` of the three `spend.*` rows in src/lib/settings-schema.js,
+// and they are the clamp in budgetLimits — because a setting the UI accepts and
+// the ledger cannot count is a money bound that is not one. The round-1 shape
+// clamped at 100000/1000000 while retaining a flat 800 stamps, so every value
+// above 800 (the schema offers 2000 and 10000) silently never fired: 1500
+// charged spends against a 1000/day cap still counted 800 and authorized the
+// 1501st. test-spend-paths §1 re-derives these three numbers FROM the schema,
+// so widening one row without widening the clamp goes red.
+const CAP_MAX = Object.freeze({ perIdentityHour: 200, perIdentityDay: 2000, perInstanceDay: 10000 });
+// Retention is a FUNCTION OF THE LIMITS, never a constant: the list only has to
+// out-count the biggest cap that reads it, plus head-room so the cap itself is
+// reachable rather than exactly met. Bounded by construction — budgetLimits
+// clamps at CAP_MAX, so this is at most 10064 numbers (~140 KB of JSON).
+const STAMP_HEADROOM = 64;
+/** PURE. How many timestamps one list must keep for `limits` to be enforceable. */
+function stampCap(limits) {
+  const L = limits || BUDGET_DEFAULTS;
+  const n = Math.max(
+    Number(L.perIdentityDay) || 0, Number(L.perInstanceDay) || 0,
+    BUDGET_DEFAULTS.perIdentityDay, BUDGET_DEFAULTS.perInstanceDay,
+  );
+  return Math.min(CAP_MAX.perInstanceDay, n) + STAMP_HEADROOM;
+}
+// Kept as the DEFAULT retention (what a caller that passes no limits gets) and
+// as the number the suite names; it is no longer a ceiling on what can be
+// counted.
+const MAX_STAMPS = stampCap(null);
 
 /** PURE. Normalise the four numbers, whatever the settings store holds.
  *  0 is an EXPLICIT choice ("no unattended turns on this axis at all"), which
@@ -84,9 +108,11 @@ function budgetLimits(get = () => undefined) {
     return Math.min(hi, Math.round(n));
   };
   return {
-    perIdentityHour: num('spend.unattendedPerIdentityHour', BUDGET_DEFAULTS.perIdentityHour, 10000),
-    perIdentityDay: num('spend.unattendedPerIdentityDay', BUDGET_DEFAULTS.perIdentityDay, 100000),
-    perInstanceDay: num('spend.unattendedPerInstanceDay', BUDGET_DEFAULTS.perInstanceDay, 1000000),
+    // clamped at the schema's OWN max (CAP_MAX) — see its comment: a ceiling the
+    // settings UI offers and the ledger cannot count is not a ceiling
+    perIdentityHour: num('spend.unattendedPerIdentityHour', BUDGET_DEFAULTS.perIdentityHour, CAP_MAX.perIdentityHour),
+    perIdentityDay: num('spend.unattendedPerIdentityDay', BUDGET_DEFAULTS.perIdentityDay, CAP_MAX.perIdentityDay),
+    perInstanceDay: num('spend.unattendedPerInstanceDay', BUDGET_DEFAULTS.perInstanceDay, CAP_MAX.perInstanceDay),
     noticePct: (() => { const n = num('spend.budgetNoticePct', BUDGET_DEFAULTS.noticePct, 100); return n > 0 ? n : 0; })(),
   };
 }
@@ -97,10 +123,11 @@ function emptyBudget() { return { v: 1, identities: {}, instance: [], notices: {
 /** PURE. Drop everything older than a day; the hour window is a filter over the
  *  same list. Returns a NEW object (never mutates the caller's state) so a
  *  refused authorization cannot leave a half-pruned ledger behind. */
-function pruneBudget(state, now = Date.now()) {
+function pruneBudget(state, now = Date.now(), limits = null) {
   const s = state && typeof state === 'object' ? state : emptyBudget();
   const cut = now - DAY_MS;
-  const keep = (list) => (Array.isArray(list) ? list.filter((t) => Number(t) > cut).slice(-MAX_STAMPS) : []);
+  const cap = stampCap(limits);
+  const keep = (list) => (Array.isArray(list) ? list.filter((t) => Number(t) > cut).slice(-cap) : []);
   const identities = {};
   for (const [k, v] of Object.entries(s.identities || {})) {
     const l = keep(v);
@@ -129,6 +156,20 @@ function spendCounts(state, identityKey, now = Date.now()) {
   };
 }
 
+// HOW OLD AN OVERAGE RECORD MAY BE AND STILL REFUSE A TURN (r2, reproduced).
+// `cache.overage` rides only SOME `rate_limit_event`s — rate-limit-capture.js
+// merges it when at least one overage field is defined — so its `asOf` goes
+// stale for long stretches on an account that is being read constantly.
+// MEASURED on this instance's seven live records: ages 0h, 2h, 5h, 5h, 5h, 21h
+// and **33h**, the 33h one on a cache file refreshed 4 MINUTES ago; and 0 of 7
+// carry a `resetsAt` at all. So a window of hours would flip live accounts to
+// 'unknown' (which ALLOWS) and let real money through, while NO window at all
+// means a record that stops being refreshed refuses every unattended turn for
+// ever — including the auto-resume continue for a session that is BY
+// DEFINITION idle and therefore producing no events to refresh it with.
+// 7 days is >5× the longest refresh gap measured here.
+const OVERAGE_STALE_MS = 7 * 24 * 3600 * 1000;
+
 /** PURE. Does this account's usage cache say REAL MONEY is being spent right
  *  now? `cache.overage` is written by src/rate-limit-capture.js from the CLI's
  *  own `rate_limit_event` (isUsingOverage / overageStatus / overageResetsAt /
@@ -138,25 +179,57 @@ function spendCounts(state, identityKey, now = Date.now()) {
  *  while every token is billed pay-per-use, so `accountRemaining()` sees an
  *  account with the MOST headroom exactly when it is the most expensive one.
  *  Returns a three-state verdict, never a boolean: 'yes' | 'no' | 'unknown'
- *  (no overage record at all — P6, ignorance is not a claim). */
-function overageState(cache) {
+ *  (no overage record at all — P6, ignorance is not a claim).
+ *
+ *  THE CLAIM THAT BLOCKS IS THE ONE THAT NEEDS A DATE (r2). `inUse:'yes'` is
+ *  what refuses spend AND what paints the panel chip whose tip says "Automatic
+ *  turns are refused on this account", so it expires two ways:
+ *    · the record's own `resetsAt` is in the PAST — it describes a billing
+ *      period that has ENDED, so it is not a statement about now (and it was
+ *      also what produced a `retryAfter` printing an instant in the past);
+ *    · its `asOf` is older than OVERAGE_STALE_MS.
+ *  An expired claim answers 'unknown', which neither blocks nor claims (P6) —
+ *  and `stated` keeps what the record literally says, with `evidence` naming
+ *  which rung decided, so a refusal is never mistaken for a stale file and a
+ *  diagnostic can tell the two apart. `inUse:'no'` is NOT bounded: it blocks
+ *  nothing, and downgrading it to 'unknown' would change no decision anywhere.
+ *  An UNDATED record (`asOf` absent — a hand edit or a foreign writer; our own
+ *  producer stamps it on the same line it merges) cannot claim the present. */
+function overageState(cache, { now = Date.now(), staleMs = OVERAGE_STALE_MS } = {}) {
   const o = cache && typeof cache === 'object' ? cache.overage : null;
-  if (!o || typeof o !== 'object') return { inUse: 'unknown', status: null, resetsAt: null, disabledReason: null, asOf: 0, spend: null };
+  if (!o || typeof o !== 'object') {
+    return { inUse: 'unknown', stated: 'unknown', evidence: 'none', ageMs: null, status: null, resetsAt: null, disabledReason: null, asOf: 0, spend: null };
+  }
   const raw = o.inUse;
-  const inUse = raw === true ? 'yes' : raw === false ? 'no' : 'unknown';
+  const stated = raw === true ? 'yes' : raw === false ? 'no' : 'unknown';
   const spend = cache.spend && typeof cache.spend === 'object' && Number.isFinite(Number(cache.spend.used))
     ? { used: Number(cache.spend.used), limit: Number(cache.spend.limit) || null, pct: Number(cache.spend.pct) || null }
     : null;
+  const asOf = Number(o.asOf) || 0;
+  const resetsAt = Number(o.resetsAt) || null;
+  const ageMs = asOf > 0 ? Math.max(0, now - asOf) : null;
+  let evidence = 'fresh';
+  if (stated === 'yes') {
+    if (!asOf) evidence = 'undated';
+    else if (resetsAt && resetsAt * 1000 <= now) evidence = 'period-ended';
+    else if (ageMs > staleMs) evidence = 'stale';
+  } else evidence = stated === 'no' ? 'stated-off' : 'none';
+  const inUse = stated === 'yes' && evidence !== 'fresh' ? 'unknown' : stated;
   return {
-    inUse, status: o.status ?? null, resetsAt: Number(o.resetsAt) || null,
-    disabledReason: o.disabledReason ?? null, asOf: Number(o.asOf) || 0, spend,
+    inUse, stated, evidence, ageMs,
+    status: o.status ?? null, resetsAt,
+    disabledReason: o.disabledReason ?? null, asOf, spend,
   };
 }
 
 /** PURE. The one sentence every surface says about an overage-billing account
- *  (usage popup, Manage Agents, the refusal notice). null = nothing to say. */
-function overageText(cache) {
-  const o = overageState(cache);
+ *  (usage popup, Manage Agents, the refusal notice). null = nothing to say.
+ *  Takes the SAME evidence options as `overageState` and hands them straight
+ *  through: a sentence built on a different clock than the gate is exactly the
+ *  "two faces of one record disagree" shape ⑤ exists to close — it would say
+ *  "paid overage in use" about a record the authorizer has already expired. */
+function overageText(cache, opts = undefined) {
+  const o = overageState(cache, opts);
   if (o.inUse !== 'yes') return null;
   const money = o.spend
     ? ` — $${o.spend.used.toFixed(2)}${o.spend.limit ? ` of $${o.spend.limit.toFixed(2)}` : ''} this period`
@@ -201,7 +274,12 @@ function authorizeUnattendedSpend({
   // REAL MONEY (D3b). While overage is in use the account is billing
   // pay-per-use, so an unattended turn is a dollar decision, not a quota one.
   if (overage && overage.inUse === 'yes' && overagePolicy !== 'allow') {
-    return no('overage-in-use', `${name} is billing paid overage — unattended turns are refused while real money is being spent`, overage.resetsAt ? overage.resetsAt * 1000 : 0);
+    // SAY HOW OLD THE EVIDENCE IS (r2): a refusal that never expires and never
+    // dates itself is indistinguishable from a stale file, and `retryAfter`
+    // used to print an instant in the PAST (a resetsAt that has already come
+    // round — now an expiry rung inside overageState, so it cannot reach here).
+    const seen = Number(overage.ageMs) > 0 ? ` (last reported ${Math.round(overage.ageMs / 60000)} min ago)` : '';
+    return no('overage-in-use', `${name} is billing paid overage${seen} — unattended turns are refused while real money is being spent`, overage.resetsAt ? overage.resetsAt * 1000 : 0);
   }
   if (L.perIdentityHour === 0) return no('hour-cap', `unattended turns per identity per hour are set to 0`);
   if (counts.hour >= L.perIdentityHour) return no('hour-cap', `${name} has spent ${counts.hour} unattended turns this hour (cap ${L.perIdentityHour})`, counts.hourOldest + HOUR_MS);
@@ -220,10 +298,11 @@ function authorizeUnattendedSpend({
 function noteUnattendedSpend(state, { identity, at = Date.now(), limits = BUDGET_DEFAULTS } = {}) {
   const L = { ...BUDGET_DEFAULTS, ...(limits || {}) };
   const key = identity && identity.key ? String(identity.key) : null;
-  const s = pruneBudget(state, at);
+  const s = pruneBudget(state, at, L);
   if (!key) return { state: s, warn: null };
-  s.identities[key] = [...(s.identities[key] || []), at].slice(-MAX_STAMPS);
-  s.instance = [...(s.instance || []), at].slice(-MAX_STAMPS);
+  const cap = stampCap(L);
+  s.identities[key] = [...(s.identities[key] || []), at].slice(-cap);
+  s.instance = [...(s.instance || []), at].slice(-cap);
   const c = spendCounts(s, key, at);
   let warn = null;
   if (L.noticePct > 0) {
@@ -269,7 +348,7 @@ function noticeText(warn) {
 }
 
 module.exports = {
-  SPEND_REASONS, BUDGET_DEFAULTS, HOUR_MS, DAY_MS, MAX_STAMPS,
+  SPEND_REASONS, BUDGET_DEFAULTS, HOUR_MS, DAY_MS, MAX_STAMPS, CAP_MAX, stampCap, OVERAGE_STALE_MS,
   budgetLimits, emptyBudget, pruneBudget, spendCounts,
   overageState, overageText,
   authorizeUnattendedSpend, noteUnattendedSpend, refusalText, noticeText,

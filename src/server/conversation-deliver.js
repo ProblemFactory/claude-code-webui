@@ -17,10 +17,19 @@
 // connectors later feed the same ladder with their own source tags.
 const fs = require('fs');
 const path = require('path');
-const { capsOf } = require('../backend-caps.js');
+const { capsOf, notificationDelivery } = require('../backend-caps.js');
 const { wrapperCaps } = require('./wrapper-files.js');
 
 const STASH_CAP = 30; // per-conversation; oldest fall off
+// How long a written frame waits for the wrapper's own verdict before it stops
+// being settleable (see `steersIntoRunningTurn`). The wrapper answers on the
+// same stdin round-trip, and its own slowest rung is a 30 s `thread/queue/add`
+// budget, so 120 s is >4× the longest legitimate wait: past it the frame is
+// STRANDED (a wrapper that died between our write and its reply), and a
+// stranded frame must be dropped rather than left to absorb the next message's
+// answer — mis-settling a later delivery is how a free steer gets charged and
+// a billed queue-add does not.
+const SETTLE_TTL_MS = 120 * 1000;
 
 // THE SPEND CEILING ON THIS LADDER (design-account-hardening §4.4c / P9).
 // Rungs 0-2 all put a message into a LIVE agent session: when that session is
@@ -97,6 +106,70 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
     } catch { return null; }
   }
 
+  // ── EVERY frame we wrote on the rpc rung, awaiting the wrapper's verdict ───
+  // Keyed by conversation id. An entry carries `withheld` = the charge this
+  // ladder did NOT make because it predicted the frame would be steered into a
+  // turn already running (null when the frame was charged on the spot).
+  //
+  // EVERY frame is tracked, not only the predicted-free ones (r2 round 2): the
+  // wrapper answers in the order we wrote, so a queue holding only SOME of the
+  // frames puts an earlier message's answer against a later message's entry —
+  // a charged peer message written first would consume the notification's
+  // entry and charge it, and the notification's own answer would then find an
+  // empty queue.
+  const unsettled = new Map();   // cid -> [{withheld, at}]
+  function noteFrameWritten(cid, withheld) {
+    if (!cid) return;
+    const now = Date.now();
+    const q = (unsettled.get(cid) || []).filter((e) => now - e.at < SETTLE_TTL_MS);
+    q.push({ withheld: withheld || null, at: now });
+    unsettled.set(cid, q);
+    if (unsettled.size > 200) {           // bounded: a wrapper that never answers must not grow this
+      for (const [k, v] of unsettled) if (!v.some((e) => now - e.at < SETTLE_TTL_MS)) unsettled.delete(k);
+    }
+  }
+  /** THE WRAPPER'S OWN VERDICT settles one written frame.
+   *  `mode` is what data/bin/codex-chat-wrapper.js reports on
+   *  `peer_message_result`: 'steered' (folded into the running turn — free, so
+   *  the withheld charge is dropped) vs 'queued'/'turn' (its own billed turn,
+   *  so a withheld charge is made NOW).
+   *
+   *  A MODE-LESS ANSWER IS NOT AN ANSWER ABOUT OUR FRAME (r2 round 2,
+   *  reproduced). The wrapper has six `peer_message_result` emitters and the
+   *  split is exact: the three `ok:true` ones carry `mode`, and all three
+   *  `ok:false` ones carry `text` and no mode — and TWO of those three are
+   *  about a DIFFERENT, earlier message (a queued peer item dropped by Stop or
+   *  removed from the queue, handed back to the ladder to re-stash). Consuming
+   *  on them shifted the wrong entry: a Stop landing between our write and the
+   *  wrapper's reply made a real `thread/queue/add` — a billed turn — free.
+   *  So a mode-less result settles nothing ('not-ours'); the third one (the
+   *  wrapper's own delivery failure) then strands its frame, which is charged
+   *  nothing and expires at SETTLE_TTL_MS. The census of those six emitters is
+   *  an assert in scripts/test-spend-paths.mjs — the rule is the producer's,
+   *  not an assumption about it.
+   *
+   *  Called from src/server/stdout/codex-events.js, which already consumes this
+   *  record — PROPERTY ACCESS on the lazy ref, never a call (the mk() Proxy
+   *  lesson). Unknown cid = no-op. */
+  function settleRpcDelivery(cid, { ok = true, mode = null, now = Date.now() } = {}) {
+    if (!mode) return 'not-ours';
+    const q = unsettled.get(cid);
+    if (!q || !q.length) return null;
+    // a STRANDED frame (older than one wrapper round-trip by a wide margin) may
+    // not absorb this answer — drop it and keep looking
+    let e = null;
+    while (q.length) { const c = q.shift(); if (now - c.at < SETTLE_TTL_MS) { e = c; break; } }
+    if (!q.length) unsettled.delete(cid);
+    if (!e) return null;
+    if (!e.withheld) return 'already-charged';
+    if (ok !== false && mode !== 'steered' && noteSpend) {
+      // it did NOT steer: the notification became its own turn after all
+      try { noteSpend(e.withheld); } catch (err) { log('[deliver] spend accounting failed:', err.message); }
+      return 'charged';
+    }
+    return ok === false ? 'undelivered' : 'free';
+  }
+
   /** The LIVE LOCAL session carrying this conversation, if any — the only
    *  thing on this machine that can name the credential slot a turn would
    *  bill. (findRpcPeer answers a narrower question: a codex session whose
@@ -152,8 +225,20 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
     // for the rpc-queue rung the wrapper may still answer `ok:false` and the
     // caller re-stashes, so that one over-charges by one turn in the failure
     // case. Deliberate: the conservative direction for money is to assume the
-    // turn happened, and the alternative (charging on the wrapper's reply)
-    // would need a correlation this lane does not carry.
+    // turn happened.
+    //
+    // THE ONE EXCEPTION IS A DELIVERY THAT OPENS NO TURN (r2, reproduced).
+    // `notificationDelivery(caps) === 'steer'` + a turn already running means
+    // the wrapper folds this notification INTO that turn — it carries only
+    // itself, the queue is untouched, and no second turn is billed. Charging it
+    // spends the ceiling on nothing: 12 mid-turn Background Work notifications
+    // exhaust one subscription's hour and the NEXT auto-resume continue — which
+    // does cost money — is refused with 'hour-cap'. Everything else still
+    // charges: claude's cli-inbox QUEUES a mid-turn delivery and then runs it as
+    // its own billed turn (deferred, not free — src/peer-messaging.js states the
+    // CLI's semantics), and a codex `peer` frame is `thread/queue/add`, which is
+    // likewise its own turn afterwards. The exception is a fact about the LANE,
+    // read off the caps row, never a backend id.
     const spent = () => { if (charged && noteSpend) { try { noteSpend(charged); } catch (e) { log('[deliver] spend accounting failed:', e.message); } } };
     const cardOk = () => { try { emitPeerCard?.(cid, { fromName: opts.fromName || null, text: opts.cardText || text }); } catch (e) { log('[deliver] card emit failed:', e.message); } };
     // rung 0: VibeSpace channel socket (experimental, per-session opt-in)
@@ -194,10 +279,22 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
     // and re-renders at drain, so a card emitted now would be a phantom.
     const rpc = findRpcPeer(cid);
     if (rpc) {
+      // The PREDICTION (see `spent`): this frame joins the turn already running
+      // and opens none. It is only a prediction — the turn can end between this
+      // check and the wrapper's RPC, and a review/compact turn is not steerable
+      // — so the wrapper's own `peer_message_result{mode}` SETTLES it: a steer
+      // that fell back to 'queued'/'turn' is charged then (settleRpcDelivery).
+      const steersIntoRunningTurn = kind === 'notification'
+        && notificationDelivery(capsOf(rpc.s.backend)) === 'steer'
+        && !!rpc.s._isStreaming;
       try {
         rpc.s.pty.write(JSON.stringify({ type: 'peer-message', text, fromName: opts.fromName || null, cardText: opts.cardText || null, kind }) + '\n');
-        spent();
-        return { ok: true, lane: 'rpc-queue', kind, peerName: rpc.s.name || null };
+        // EVERY frame joins the settle queue, charged or not — the wrapper
+        // answers in write order, so a queue holding only the predicted-free
+        // ones would hand this frame's answer to the next frame's entry.
+        if (steersIntoRunningTurn) noteFrameWritten(cid, charged);
+        else { spent(); noteFrameWritten(cid, null); }
+        return { ok: true, lane: 'rpc-queue', kind, steered: steersIntoRunningTurn, peerName: rpc.s.name || null };
       } catch (e) { log('[deliver] rpc-queue write failed (falling through): ' + e.message); }
     }
     // rung 2: the owning machine's daemon posts to ITS local registry
@@ -228,6 +325,8 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
 
   return {
     deliverToConversation, peerReachable, stashFor, drainStash, stashCount, flush,
+    settleRpcDelivery,   // the wrapper's own peer_message_result settles a predicted-free steer
+    _unsettledCount: (cid) => (unsettled.get(cid) || []).length,
     // exposed for the stash-drain sites: a drained message enters the agent's
     // context invisibly — the drain site emits the same card the live lanes do
     emitPeerCard: (cid, card) => { try { emitPeerCard?.(cid, card); } catch { } },

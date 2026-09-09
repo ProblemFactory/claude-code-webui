@@ -53,7 +53,9 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
   try {
     const raw = JSON.parse(fs.readFileSync(file, 'utf-8'));
     if (raw && typeof raw === 'object') {
-      state = A.pruneBudget(raw.budget || raw, Date.now());
+      // sized from the LIVE limits (r2): retention is a function of the caps,
+      // never a constant below them
+      state = A.pruneBudget(raw.budget || raw, Date.now(), A.budgetLimits(serverSetting));
       if (raw.nudge && typeof raw.nudge === 'object') nudge = raw.nudge;
     }
   } catch { }
@@ -193,7 +195,7 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
   return {
     authorize, note, overageFor, nudgeRec, noteNudge, flush,
     limits, overagePolicy,
-    snapshot: () => ({ budget: A.pruneBudget(state, Date.now()), nudge: { ...nudge } }),
+    snapshot: () => ({ budget: A.pruneBudget(state, Date.now(), limits()), nudge: { ...nudge } }),
     _file: file,
   };
 }
