@@ -206,7 +206,7 @@ function execFileAsync(cmd, args, { input, timeout = 20000, maxBuffer = 8 * 1024
 // destructure below, this list, and server.js's call site to each other.
 const WS_CTX_CONTRACT = [
   'activeSessions', 'WS_OPEN', 'broadcastActiveSessions', 'broadcastToSession', 'resizeSessionToMin',
-  'setupSessionPty', 'refreshWebuiPids', 'deleteSessionMeta', 'writeSessionMeta', 'readSessionMeta', 'autoResume',
+  'setupSessionPty', 'reattachLocalPty', 'ptyQuietSince', 'refreshWebuiPids', 'deleteSessionMeta', 'writeSessionMeta', 'readSessionMeta', 'autoResume',
   'readLayouts', 'writeLayouts', 'getSyncStore', 'serverSetting', 'integrationEnabled', 'agentdRemote', 'dialBridge',
   'sessionCounterRef', 'createSessionMessages', 'poolChooser', 'sbNoteServerOp',
   'SOCKETS_DIR', 'BUFFERS_DIR', 'PTY_WRAPPER', 'CHAT_WRAPPER',
@@ -221,7 +221,7 @@ function registerWsHandler(wss, ctx) {
   if (missing.length) throw new Error('[ws-handler] ctx contract violated — missing: ' + missing.join(', '));
   const {
     activeSessions, WS_OPEN, broadcastActiveSessions, broadcastToSession, resizeSessionToMin,
-    setupSessionPty, refreshWebuiPids, deleteSessionMeta, writeSessionMeta, readSessionMeta, autoResume,
+    setupSessionPty, reattachLocalPty, ptyQuietSince, refreshWebuiPids, deleteSessionMeta, writeSessionMeta, readSessionMeta, autoResume,
     readLayouts, writeLayouts, getSyncStore, serverSetting, integrationEnabled, agentdRemote, dialBridge,
     sessionCounterRef, createSessionMessages, poolChooser, sbNoteServerOp,
     SOCKETS_DIR, BUFFERS_DIR, PTY_WRAPPER, CHAT_WRAPPER,
@@ -557,26 +557,25 @@ function registerWsHandler(wss, ctx) {
             }
             // Detect broken pty stdin: the wrapper writes _stdin_ack on
             // stdout immediately when it receives stdin input. If no ack
-            // AND no buffer growth within 5s, the stdin pipe is dead.
-            // Both signals checked for compat with old wrappers that don't
-            // send _stdin_ack (wrapper only updates on server restart).
+            // AND no byte at all came back from the pty within 5s, the pipe
+            // is dead. Both signals checked for compat with old wrappers that
+            // don't send _stdin_ack (wrapper only updates on server restart).
+            // 2026-09-09: the "did anything come back" half asks the LIVENESS
+            // STAMP (`ptyQuietSince`) instead of `session.buffer.length` — the
+            // same fact read at the source, and a superset (a chat consumer
+            // need not append every byte to session.buffer, and the terminal
+            // branch swallows dtach's attach preamble outright). The HEAL is
+            // the shared `reattachLocalPty`, which the restore-path attach
+            // probe also uses: two triggers, one implementation.
             if (session.socketPath) {
               const inputPayload = payloadLine;
-              const bufLenBefore = (session.buffer || '').length;
+              const sentAt = Date.now();
               session._stdinAckReceived = false;
               setTimeout(() => {
                 if (!activeSessions.has(data.sessionId)) return;
                 if (session._stdinAckReceived) return;
-                // Fallback: if buffer grew, pty is working (old wrapper without ack)
-                if ((session.buffer || '').length > bufLenBefore) return;
-                console.log(`[${data.sessionId}] Broken pty stdin detected — re-attaching dtach`);
-                if (session.pty) { try { session.pty.kill(); } catch {} }
-                const newPty = pty.spawn(DTACH_CMD, ['-a', session.socketPath, '-E', '-r', 'winch'], {
-                  name: 'xterm-256color', cols: 120, rows: 30,
-                  env: { ...agentEnv(), TERM: 'xterm-256color', COLORTERM: 'truecolor' },
-                });
-                setupSessionPty(session, data.sessionId, newPty);
-                setTimeout(() => { newPty.write(inputPayload + '\n'); }, 500);
+                if (!ptyQuietSince(session, sentAt)) return; // bytes came back — the pty is working (old wrapper without ack)
+                reattachLocalPty(data.sessionId, session, 'Broken pty stdin detected', { resend: inputPayload });
               }, 5000);
             }
           }

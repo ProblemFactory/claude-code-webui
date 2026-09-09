@@ -111,15 +111,22 @@ async function ensureAgentdOnHost(hostId) {
   await hosts.installAgentd(hostId, bundlePath, version, agentdHostToken(hostId));
   _agentdInstalled.set(hostId, version);
 }
+// The node-pty DUCK over a device session handle. `onData`/`onExit` hold a SET
+// of listeners, not one slot, because that is what node-pty's own onData does
+// and setupSessionPty now registers TWO of them (the liveness stamp + the
+// protocol consumer). A single-slot shim silently REPLACED the first
+// registration — with the stamp registered first, the whole stdout consumer
+// would have gone dead on every daemon-attached session. `dispose()` removes
+// only its own callback.
 function daemonPtyShim(handle) {
-  let dataCb = null, exitCb = null;
-  handle.onData = (buf) => { if (dataCb) dataCb(buf.toString('utf-8')); };
-  handle.onExit = (code) => { if (exitCb) exitCb({ exitCode: code }); };
+  const dataCbs = new Set(), exitCbs = new Set();
+  handle.onData = (buf) => { const s = buf.toString('utf-8'); for (const cb of [...dataCbs]) { try { cb(s); } catch {} } };
+  handle.onExit = (code) => { for (const cb of [...exitCbs]) { try { cb({ exitCode: code }); } catch {} } };
   return {
     _daemon: true,
     get pid() { return handle.pid; },
-    onData(cb) { dataCb = cb; return { dispose() { dataCb = null; } }; },
-    onExit(cb) { exitCb = cb; return { dispose() { exitCb = null; } }; },
+    onData(cb) { dataCbs.add(cb); return { dispose() { dataCbs.delete(cb); } }; },
+    onExit(cb) { exitCbs.add(cb); return { dispose() { exitCbs.delete(cb); } }; },
     write(s) { try { handle.write(s); } catch {} },
     resize(cols, rows) { try { handle.resize(cols, rows); } catch {} },
     kill() { try { handle.kill(); } catch {} },

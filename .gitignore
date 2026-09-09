@@ -70,3 +70,8 @@ src/server/vs-aredge-mut-*.js
 # start, but a SIGKILL can strand one — and a dirty tree is what the release
 # gate REFUSES on.
 src/server/vs-spend-mut-*.js
+# throwaway patched copies of src/server/session-stdout.js written BESIDE the
+# real module by scripts/test-restore-liveness.mjs (they must be SIBLINGS or
+# their relative requires do not resolve). Unlinked on exit, but a SIGKILL can
+# strand one — and a dirty tree is what the release gate REFUSES on.
+src/server/session-stdout.__*_control.js

@@ -59,6 +59,8 @@ const SESSION_FIELDS = {
   _wrapperFrameFile:   { owner: 'ws',     persisted: null,      note: 'wrapper understands _frame_file pointers (meta.caps at wrapper boot, chat-wrapper AND codex-chat-wrapper; 2.361.1 skew gate — old wrappers silently DROP pointer lines; positive verdict only)' },
   _msgReachability:    { owner: 'agent',  persisted: 'meta',    note: 'per-session external reach override for agent messaging (2.362.0 Channels v1: inherit|visible|messageable, widening only; set via Session Properties)' },
   _stdinAckReceived:   { owner: 'stdout', persisted: null,      note: 'wrapper _stdin_ack seen — broken-pty detector input' },
+  _lastPtyDataAt:      { owner: 'stdout', persisted: null,      note: 'THE liveness stamp: the instant ANY byte last arrived from this session\'s pty bridge (stamped in setupSessionPty, the one place every pty is wired). Read by `ptyQuietSince` for BOTH liveness triggers — the attach probe (no dtach redraw preamble within 4.6s of attach ⇒ the device channel never opened) and ws-handler\'s broken-stdin detector (which used to read session.buffer.length, a strict subset: the terminal branch swallows the preamble and a chat consumer need not append every byte)' },
+  _attachProbeHeals:   { owner: 'stdout', persisted: null,      note: 'how many CONSECUTIVE times the attach liveness probe re-attached THIS session locally — bounded at 2 so a systemically silent bridge cannot become a heal loop; reset to 0 by any attach that produces a byte (a lifetime cap would spend a long-lived session\'s heals on unrelated hiccups and leave the next one dark)' },
   _pendingEditor:      { owner: 'ws',     persisted: null,      note: 'Ctrl+G editor open in flight' },
 
   // goal
