@@ -58,7 +58,7 @@ process.on('exit', () => { for (const d of cleanup) { try { fs.rmSync(d, { recur
  *  the engine a wrapper that drops `noteRecovered`'s third argument is exactly
  *  the pre-round-4 call (`noteRecovered(id, why)` — no classification) with
  *  everything else, including both real producers, unchanged. */
-function mkWorld({ dir = null, healthy = true, ignoreWorkedFlag = false } = {}) {
+function mkWorld({ dir = null, healthy = true, ignoreWorkedFlag = false, arModule = null } = {}) {
   const root = dir || fs.mkdtempSync(path.join(os.tmpdir(), 'vs-arloop-'));
   if (!dir) cleanup.push(root);
   const dataDir = path.join(root, 'data');
@@ -83,7 +83,11 @@ function mkWorld({ dir = null, healthy = true, ignoreWorkedFlag = false } = {}) 
   const sessions = new Map();
   const notices = [], notes = [], events = [], fired = [];
   const obs = new Map();
-  const ar = create({
+  // `arModule` swaps in a PATCHED COPY of the product module (§4g's control):
+  // everything else in the world — the engine, the pool, both producers, the
+  // scripted CLI — is the shipped code, so the control differs in one named
+  // dimension and in nothing else.
+  const ar = (arModule || arMod).create({
     dataDir, activeSessions: sessions, serverSetting: () => true, log: (...a) => console.log(...a), // one journal: the capture below reads both modules' lines
     notify: (id, s2, text) => notes.push(text),
     sendToSession: (id, s2, text) => { fired.push({ id, text }); return true; },
@@ -996,6 +1000,74 @@ if (!probe) {
   ok('…while the shipped module keeps it (same call, same inputs)', shipped.kept === true && shipped.quarantined.length === 1, JSON.stringify(shipped));
 }
 
+// ── §4g THE NEW FIRE PATH, DRIVEN HERE (2026-09-08 r2) ─────────────────────
+// The fresh-window edge is a SECOND producer of billed continues, and this is
+// the suite that owns the billed rate. Round 1 shipped it with only source
+// greps here (§5's three mentions), so nothing in either tier ever drove it:
+// its own suite counted the WALL VERDICT (true whether or not a turn was
+// spent), and a sustained loop went green — 3 continues per rolling hour, for
+// the life of a watch that can stand for days.
+// Driven through the REAL producer (`recordRateLimitEvent`, the record this
+// instance sees ~20× per rejection), the REAL engine's shared reading edge and
+// the REAL pool, with the scripted CLI answering every continue with another
+// rejection. The measure is the only thing that costs money: `w.fired.length`.
+{
+  /** N passive readings that say the ARMED bucket is open, with the CLI
+   *  rejecting whatever they buy. Returns the billed continues.
+   *  THE CLOCK IS OURS between readings, and it has to be: the breaker's own
+   *  backoff (0 / 60 s / 5 min) and its 10-min same-identity quarantine are
+   *  wall-clock rules, so 40 readings inside one real second are bounded by
+   *  the BACKOFF whatever the edge does — the control would read 1 against 1
+   *  and prove nothing. Advancing 11 min after each rejection clears both and
+   *  leaves the HOURLY CAP as the breaker's last word, which is exactly the
+   *  measurement: with the edge un-guarded the readings keep buying turns up
+   *  to that cap, with the guard they buy ONE. The jump stays inside the hour
+   *  (3 fires = 33 min) so the fixture's own resets (R5 = +2 h) never pass. */
+  async function driveFreshWindow(w, readings = 40) {
+    const realNow = Date.now;
+    let skew = 0;
+    Date.now = () => realNow() + skew;
+    try {
+      w.reject();                                      // the user's own turn hit the 5h wall ⇒ armed on it
+      for (let i = 0; i < readings; i++) {
+        const before = w.fired.length;
+        w.eng.recordRateLimitEvent(w.session, {        // …and the window reads OPEN on that very bucket
+          type: 'rate_limit_event',
+          rate_limit_info: { status: 'allowed', rateLimitType: 'five_hour', utilization: 0.1, resetsAt: w.R5 },
+        });
+        await new Promise((r) => setTimeout(r, 5));    // the pre-fire gate is async
+        if (w.fired.length > before) {
+          w.reject();                                  // the CLI answers the continue with another rejection
+          skew += 11 * 60e3;                           // …and time passes (see above)
+        }
+      }
+      return w.fired.length;
+    } finally { Date.now = realNow; }
+  }
+  const good = mkWorld();
+  const nGood = await driveFreshWindow(good);
+  ok('THE FRESH-WINDOW EDGE IS BOUNDED WHERE IT IS WIRED: 40 real readings that all say the armed window is open buy at most one continue per wall, not one per reading',
+    nGood <= FIRE_MAX_IMMEDIATE, 'billed continues=' + nGood);
+  ok('…and the wait is still standing afterwards (bounding the spend must not silently drop the promise)',
+    good.ar.statusFor(good.SID).armed === true || good.ar._fires.has(good.SID), JSON.stringify(good.ar.statusFor(good.SID)));
+  // NEGATIVE CONTROL: the same world, the same 40 readings, against a copy of
+  // the product module with ONLY the edge's single-shot guard removed — round
+  // 1's code, reproduced from source, in the wiring it actually ships in.
+  const src = read('src/server/auto-resume.js');
+  const NEEDLE = "    const r0 = fires.get(id);\n    if (r0 && r0.edgeSpent && r0.edgeSpent === wallKeyOf(a)) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };";
+  const mutated = src.replace(NEEDLE, '    // PRE-FIX: no single-shot guard')
+    .replace(/require\('\.\.\//g, `require('${path.join(REPO, 'src')}/`);
+  ok('control setup: the guard is one identifiable block and the copy resolves its own requires', mutated !== src && !/require\('\.\.\//.test(mutated));
+  const mdir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-aredge-')); cleanup.push(mdir);
+  const mpath = path.join(mdir, 'auto-resume-preedge.cjs');
+  fs.writeFileSync(mpath, mutated);
+  const preMod = require(mpath);
+  const bad = mkWorld({ arModule: preMod });
+  const nBad = await driveFreshWindow(bad);
+  ok('NEGATIVE CONTROL (round 1): without it the same readings keep buying turns until the hourly cap, and the cap is the ONLY thing left — every hour, for the life of the wait',
+    nBad > nGood && nBad >= FIRE_MAX_IMMEDIATE, JSON.stringify({ preFix: nBad, shipped: nGood }));
+}
+
 // ── §5 WIRING PINS (2.355.0 law: a fix nobody calls is not a fix) ──────────
 {
   const eng = read('src/server/usage-pool-engine.js');
@@ -1039,10 +1111,19 @@ if (!probe) {
   const ar2src = read('src/server/auto-resume.js');
   ok('WIRING: the refusal notice is chosen by the REASON (the call site passes the check through; round 1 computed `chk` and dropped it)', /breakerNotice\(id, session, label \|\| key, kind, chk\)/.test(ar2src) && /function breakerNotice\(id, session, label, kind, chk\) \{[\s\S]{0,700}refusalNoticeFor\(\{[\s\S]{0,200}reason: chk && chk\.reason/.test(ar2src));
   ok('WIRING: a journal-only refusal spends no notice budget (the return is ABOVE the stamp)', /if \(!n\) return;[\s\S]{0,220}r\.notices\[n\.cls\] = now; save\(\);/.test(ar2src));
-  ok('WIRING: the identity is re-resolved INSIDE deliver (after the gate) and re-checked before spending', /const deliver = \(\) => \{[\s\S]{0,1400}const ident2 = identityFor\(id, session\) \|\| ident;[\s\S]{0,400}const chk2 = canFire\(id, key2, kind, now2\);[\s\S]{0,200}if \(!chk2\.ok\)/.test(ar2src) && /noteFired\(id, key2, kind, Date\.now\(\)\)/.test(ar2src) && /announce\(id, session, key2, kind, note\)/.test(ar2src));
+  ok('WIRING: the identity is re-resolved INSIDE deliver (after the gate) and re-checked before spending', /const deliver = \(\) => \{[\s\S]{0,1400}const ident2 = identityFor\(id, session\) \|\| ident;[\s\S]{0,400}const chk2 = canFire\(id, key2, kind, now2\);[\s\S]{0,200}if \(!chk2\.ok\)/.test(ar2src) && /noteFired\(id, key2, kind, Date\.now\(\), origin\)/.test(ar2src) && /announce\(id, session, key2, kind, note\)/.test(ar2src));
   // 2026-09-08: `cause` joined the inputs — the immediate path has a second
   // caller now (the new-member wake), and `kind:'now'` can no longer stand in
   // for "a pool switch". Pinned here so the card keeps naming what unblocked it.
+  // …and the ORIGIN of a reading-driven fire reaches the record it is spent on
+  // (2026-09-08 r2): the single-shot rule keys on the WALL, so if `origin` were
+  // dropped anywhere between noteQuotaReading and noteFired the guard would
+  // never arm and the loop would be back, silently.
+  ok('WIRING: a reading-driven fire carries its WALL to the record, and the shot is stamped AT THE DELIVERY (not at the rejection report — a caller that never reports one may not re-open the spend)',
+    /fireNow\(id, 'the usage window reopened', \{ via: 'reading', wall: wallKeyOf\(a\) \}\)/.test(ar2src)
+    && /function fireNow\(id, why, \{ cause = null, via = null, wall = null \} = \{\}\)[\s\S]{0,400}attemptFire\(id, session, a, 'now', why, cause, via \? \{ via, wall \} : null\)/.test(ar2src)
+    && /function noteFired\(id, key, kind, now, origin = null\) \{[\s\S]{0,1400}if \(origin && origin\.via === 'reading' && origin\.wall\) r\.edgeSpent = origin\.wall;/.test(ar2src)
+    && !/if \(r\.last\.via === 'reading'/.test(ar2src));
   ok('WIRING: the continue card is chosen from the ARM + whether the gate moved us + the caller\'s named CAUSE, in one place', /const moved = !!key && !!key2 && key2 !== key;[\s\S]{0,600}const note = continueNoticeFor\(\{ kind, armReason: a2\.reason, label: label2, moved, cause \}\);/.test(ar2src));
   // 'all-logins-expired' (2026-09-07) is the same class of fact — nowhere for
   // this conversation to go — so the breaker must hear it too, or it re-fires

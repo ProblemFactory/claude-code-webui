@@ -226,7 +226,15 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       for (const [k, r] of fires) {
         const live = (r.fails || []).some((f) => now - (f.at || 0) < FIRE_QUARANTINE_MS)
           || (r.last && now - (r.last.at || 0) < FIRE_PENDING_MS)
-          || now - (r.windowStart || 0) < FIRE_WINDOW_MS;
+          || now - (r.windowStart || 0) < FIRE_WINDOW_MS
+          // A REFUTED READING OUTLIVES THE HOUR (r2). `edgeSpent` is not a
+          // budget that rolls over — it is the memory that a reading-driven
+          // continue onto this wall was answered with another rejection, and
+          // the wait it belongs to can stand for DAYS. Pruning it with the
+          // window handed the loop a fresh reading-fire every hour, which is
+          // most of what round 1 measured. Bounded by the armed set: once the
+          // wait is gone (fired / disarmed / watch expired) so is the memory.
+          || (!!r.edgeSpent && armed.has(k));
         if (!live) fires.delete(k);
       }
       writeJsonAtomic(file, { armed: Object.fromEntries(armed), fires: Object.fromEntries(fires) });
@@ -416,6 +424,9 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       return r.key ? { key: String(r.key), name: String(r.name || r.key) } : null;
     } catch { return null; }
   }
+  /** WHICH WALL a wait is about, as one comparable key. Deliberately WITHOUT
+   *  the reset instant — the two measurements are in noteQuotaReading. */
+  const wallKeyOf = (a) => `${(a && a.lane) || ''}|${(a && a.bucket) || ''}|${(a && a.scopedName) || ''}`;
   const fireRec = (id, now) => {
     let r = fires.get(id);
     if (!r) { r = { n: 0, windowStart: now, fails: [], last: null, lastFireAt: 0, notified: {}, notices: {}, refuse: null, noTargetAt: 0 }; fires.set(id, r); }
@@ -440,8 +451,26 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     }
     return { ok: true, reason: null, key };
   }
-  function noteFired(id, key, kind, now) {
+  function noteFired(id, key, kind, now, origin = null) {
     const r = fireRec(id, now);
+    // THE READING'S ONE SHOT IS SPENT AT DELIVERY, NOT AT THE REJECTION (r2).
+    // A billed continue has already happened here; whether anyone ever tells
+    // us how it went is a fact about the CALLER. Stamping this in
+    // noteFireOutcome(id,false) — the draft of this fix — made the money bound
+    // depend on the engine classifying the answer as a wall AND re-arming
+    // through the one path that reports it first, and this feature's own
+    // history is a classifier that silently matched nothing for eight months
+    // (the incident's break (1)). Measured through the module's public seam
+    // (arm → reading → fire → NO outcome reported → re-arm): stamping at the
+    // rejection gives [3,3,3,3] = 12 billed continues over four hours — round
+    // 1's loop, intact — and stamping here gives 1.
+    //   Today's engine does report it (onWalledTurn calls noteFireOutcome
+    // FIRST, and it is the only arm site that carries a wall), so this changes
+    // no production count as wired on 2026-09-08. It is here so the bound is a
+    // property of THIS module, provable without reading five call sites — the
+    // arm seam is now generic and the next harness's arm site cannot know it
+    // owes us an outcome report.
+    if (origin && origin.via === 'reading' && origin.wall) r.edgeSpent = origin.wall;
     r.last = { key: key || null, at: now, kind };
     r.lastFireAt = now;
     if (kind === 'now') r.n = (r.n || 0) + 1;
@@ -461,6 +490,8 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     }
     if (!r.last) return false;         // the rejection did not answer a fire of ours
     const key = r.last.key || null;
+    // (the reading's one shot was already spent at DELIVERY — noteFired; the
+    // rejection adds the identity quarantine, which is a different memory)
     r.fails = (r.fails || []).filter((f) => f.key !== key);
     r.fails.push({ key, at: now });
     r.last = null;
@@ -550,8 +581,65 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
     if (!a || a.fired) return { open: false, why: 'not-armed', fired: false };
     const v = windowOpened({ snapshot, armedLane: a.lane || null, armedBucket: a.bucket || null, armedScopedName: a.scopedName || null });
     if (!v.open) return { ...v, fired: false };
-    log(`[auto-resume] ${id}: ${a.watch ? 'watched' : 'armed'} window reopened (${why}) — continuing now`);
-    return { ...v, fired: fireNow(id, 'the usage window reopened') };
+    // THE EDGE IS SINGLE-SHOT PER WALL (r2, and the reason is measured). A
+    // READING IS A CLAIM, AND THE CLI'S ANSWER OUTRANKS IT: the producer that
+    // made this one keeps making it — the incident thread is pushed
+    // `rate_limits_updated` every few seconds — so round 1 re-entered fireNow
+    // on every one of them and the only ceilings left were the breaker's,
+    // which are per-HOUR and reset every hour. Measured against the real
+    // modules through this module's own seam: [3,3,3,3] = 12 billed continues
+    // over four simulated hours, ~72/day, for the LIFE of a watch (six days in
+    // the incident), against 1 with this rule. The engine's own comment even
+    // claimed this bound already ("fires once, the CLI rejects, and the loop
+    // breaker quarantines the identity") — the quarantine is 10 MINUTES, so
+    // the claim was false; this is what makes it true, and that comment is
+    // corrected. Only PROOF OF WORK re-opens the edge (noteFireOutcome(id,true)
+    // drops the whole breaker record), because a turn that produced something
+    // is the only evidence that our continue mattered.
+    //   The key is the WALL (lane|bucket|scopedName) and deliberately NOT its
+    // reset instant. Two reasons, both checked today:
+    //   · A RESET INSTANT IS NOT A STABLE NAME for a window. On this instance's
+    //     codex anchor stream (data/usage-anchors/anchors-codex___global__.
+    //     ndjson, 1799 readings / 30 days) the sevenDay reset carries 316
+    //     distinct values and CHANGES between consecutive readings 414 times —
+    //     one identity key written by two interleaved lanes — and even a single
+    //     wall is spelled two ways: the incident's own 1789356983 appears 417
+    //     times beside 1789356984 (×3), exactly the ±wobble that made
+    //     reading-lag.js compare weekly PHASE instead of the absolute value.
+    //   · It would not cover this finding's own premise anyway. The reachable
+    //     false-open here is a MIS-ATTRIBUTED lane (the exhaustion record
+    //     carries `rateLimits:null`, so the engine synthesises `limitId:'codex'`
+    //     while the true wall is the model lane): the sibling reading then
+    //     carries a DIFFERENT reset by construction, so "the reset rolled"
+    //     is satisfied and the turn is spent regardless.
+    // A DIFFERENT wall is a different question and is armed fresh (the belt
+    // there is the hourly cap, driven in test-auto-resume 12(d″)). The TIMED
+    // path is untouched: it is paced by real reset times, and it is what still
+    // delivers when the window genuinely rolls.
+    const r0 = fires.get(id);
+    if (r0 && r0.edgeSpent && r0.edgeSpent === wallKeyOf(a)) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };
+    const fired = fireNow(id, 'the usage window reopened', { via: 'reading', wall: wallKeyOf(a) });
+    // SAID AFTER THE FACT, and only when it happened (r2). Round 1 logged
+    // "continuing now" BEFORE attempting, once per READING — measured 492
+    // lines for 12 actual continues (41:1) — burying the very channel the
+    // incident was diagnosed from ("ZERO [auto-resume] lines for that
+    // session"). A refused attempt is journalled by logRefusal, which has its
+    // own per-(reason,identity) throttle; a refusal by THIS rung is reported
+    // to the caller as `already-refuted` and throttled per verdict there.
+    const head = `[auto-resume] ${id}: ${a.watch ? 'watched' : 'armed'} window reopened (${why})`;
+    if (fired) log(`${head} — continued now`);
+    else {
+      // NOT a continue. Say so, and say it at most once per REFUSE_LOG_MS —
+      // the breaker's own logRefusal has already named the reason (with its
+      // per-(reason, identity) throttle) whenever the refusal came from there.
+      const r = fireRec(id, Date.now());
+      const now2 = Date.now();
+      if (!r.edgeSaidAt || now2 - r.edgeSaidAt > REFUSE_LOG_MS) {
+        r.edgeSaidAt = now2;
+        log(`${head} but no continue was delivered — the breaker or the pre-fire gate refused`);
+      }
+    }
+    return { ...v, fired };
   }
 
   /** ONE fire path for BOTH callers — the timed tick and the immediate
@@ -561,7 +649,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
    *  same identity had just been rejected.
    *    breaker → the SAME beforeFire gate → deliver → remember what we fired at
    *  Returns true when a continue was delivered or a gate is in flight. */
-  function attemptFire(id, session, a, kind, why, cause = null) {
+  function attemptFire(id, session, a, kind, why, cause = null, origin = null) {
     const now = Date.now();
     if (session._arFiring) return false;   // a gate is already running for this session (also breaks fireNow ⇄ beforeFire re-entry)
     const ident = identityFor(id, session);
@@ -621,7 +709,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       catch (e) { log(`[auto-resume] ${id}: the '${verb.form}' resume verb threw: ${e.message}`); ok = false; }
       if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); return false; }
       armed.delete(id);
-      noteFired(id, key2, kind, Date.now());
+      noteFired(id, key2, kind, Date.now(), origin);
       save();
       _cancelArmNotify(id);
       log(kind === 'now'
@@ -702,13 +790,13 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
    *  Since 2026-09-07 this runs the breaker AND the same pre-fire gate as the
    *  tick: the incident's 130 continues all came down this path, each one
    *  bypassing the gate that would have re-verdicted the target. */
-  function fireNow(id, why, { cause = null } = {}) {
+  function fireNow(id, why, { cause = null, via = null, wall = null } = {}) {
     try {
       const a = armed.get(id);
       if (!a || a.fired) return false;
       const session = activeSessions.get(id);
       if (!session || !enabledFor(session) || session._isStreaming) return false;
-      return attemptFire(id, session, a, 'now', why, cause);
+      return attemptFire(id, session, a, 'now', why, cause, via ? { via, wall } : null);
     } catch (e) { log('[auto-resume] fireNow failed: ' + e.message); return false; }
   }
 

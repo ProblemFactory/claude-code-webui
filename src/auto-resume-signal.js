@@ -127,10 +127,31 @@ function isArmedBucket(b, armedBucket, armedScopedName) {
  *  waiting on is not evidence that it lifted.
  *  WHETHER the session is armed is the CALLER's fact and deliberately not an
  *  input: this answers about the WALL, not about the wait, so it cannot
- *  quietly disagree with the module that owns the armed record. */
+ *  quietly disagree with the module that owns the armed record.
+ *
+ *  A MONTHLY SPEND CAP IS NOT A WINDOW, and the buckets cannot see it (r2).
+ *  `spend_control_reached` is the codex twin of 2.361.2's
+ *  `seven_day_overage_included`: the account refuses every turn while its
+ *  weekly bucket reads perfectly healthy, so a bucket-only rule reads "the
+ *  wall is gone" and fires into a wall that has no reset at all. It is
+ *  checked BEFORE the lane, deliberately: a spend control is a fact about the
+ *  ACCOUNT, not about one of its windows, so a sibling lane stating it is
+ *  still stating it about us — and refusing to spend is the safe direction.
+ *  UNVERIFIED ON THE WIRE, and it says so: `spendControlReached:true` has
+ *  ZERO occurrences in this instance's stores, so this rung can only ever
+ *  REFUSE; it never authorises anything, which is why it may ship unmeasured.
+ *
+ *  `credits.hasCredits === false` IS DELIBERATELY NOT USED — measured, and the
+ *  measurement refutes it. The machine's own codex login (the incident's very
+ *  account) carries `credits:{hasCredits:false,unlimited:false,balance:"0"}`
+ *  in data/usage-cache/__global_codex__.json while serving turns normally off
+ *  plan quota: a plan account simply has no credit balance. Reading that as
+ *  "spent" would make this edge permanently inert on this instance — the
+ *  original incident, re-introduced as a guard. */
 function windowOpened({ snapshot = null, armedLane = null, armedBucket = null, armedScopedName = null, nowSec = Math.floor(Date.now() / 1000) } = {}) {
   const buckets = statedBuckets(snapshot);
   if (!buckets.length) return { open: false, why: 'no-reading' };
+  if (snapshot && snapshot.spendControlReached === true) return { open: false, why: 'spend-capped' };
   if (!sameLane(laneOf(snapshot), armedLane)) return { open: false, why: 'other-lane' };
   if (!armedBucket) return { open: false, why: 'unknown-bucket' };
   const mine = buckets.filter((b) => isArmedBucket(b, armedBucket, armedScopedName));

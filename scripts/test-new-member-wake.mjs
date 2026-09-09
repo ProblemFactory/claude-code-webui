@@ -504,8 +504,14 @@ console.log('\n§5 the wake never spends by itself');
   }
   ok(`HOURLY CAP HOLDS: repeated wakes cannot exceed the ${FIRE_MAX_IMMEDIATE}/hour immediate budget (delivered ${w2.fired.length})`,
     w2.fired.length > 0 && w2.fired.length <= FIRE_MAX_IMMEDIATE, `delivered=${w2.fired.length}`);
+  // The pin is about the ROUTE, not the argument list: a release must go through
+  // attemptFire (breaker + pre-fire gate) rather than around it. 2026-09-08 gave
+  // fireNow a 7th argument — the reading edge's ORIGIN, which is how the
+  // single-shot rule knows which WALL a fire was spent on — so the pin names the
+  // call and lets its trailing arguments grow, while still failing if the route
+  // changes (a second delivery path, or `attemptFire` dropped from fireNow).
   ok('…and every release went through attemptFire, not around it (wiring pin)',
-    /return attemptFire\(id, session, a, 'now', why, cause\);/.test(read('src/server/auto-resume.js')));
+    /return attemptFire\(id, session, a, 'now', why, cause[^;]*\);/.test(read('src/server/auto-resume.js')));
 }
 
 // ── §6 THE PRODUCERS ───────────────────────────────────────────────────────

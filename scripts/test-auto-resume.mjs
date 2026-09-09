@@ -549,6 +549,134 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
     ['noteTurnEnd', 'noteWallSignal', 'beforeAutoResumeFire', 'quotaVerdictFor', 'noteSessionProduced'].every((k) => typeof eng[k] === 'function'));
 }
 
+// ── 12a. THE EDGE'S OWN CEILING (r2) — scaffolding ─────────────────────────
+// A world small enough to run FOUR SIMULATED HOURS of readings: the real
+// src/server/auto-resume.js, a stub of the harness's resume verb, and a clock
+// we own. The engine is deliberately NOT in this world — the finding is about
+// auto-resume's own ceiling on the fresh-window edge, and driving the real
+// producer at 30 s intervals for four hours is not something a suite can do in
+// wall-clock time. The producer-driven leg is (a) above; this one measures the
+// RATE the producer's readings can authorise.
+//
+// PATCHED COPIES live beside the real module (a sibling, or its relative
+// requires do not resolve), are unlinked on exit, and are swept at start —
+// only for PIDs that are GONE, because this suite can legitimately run twice
+// in one worktree, and a dirty tree is what the release gate REFUSES on.
+const AR_PATH = path.join(REPO, 'src/server/auto-resume.js');
+const AR_SRC0 = read('src/server/auto-resume.js');
+const { FIRE_MAX_IMMEDIATE } = require(AR_PATH);
+const arMutants = [];
+process.on('exit', () => { for (const f of arMutants) { try { fs.unlinkSync(f); } catch { } } });
+try {
+  for (const f of fs.readdirSync(path.join(REPO, 'src/server'))) {
+    const m = /^vs-aredge-mut-(\d+)[-.]/.exec(f);
+    if (!m || Number(m[1]) === process.pid) continue;
+    try { process.kill(Number(m[1]), 0); continue; } catch (e) { if (e.code === 'EPERM') continue; }
+    try { fs.unlinkSync(path.join(REPO, 'src/server', f)); } catch { }
+  }
+} catch { }
+let arMutN = 0;
+// THE TWO ROUND-1 SHAPES, named once and used by the controls below.
+// EDIT_NO_EDGE_GUARD is the money half (every healthy reading re-enters
+// fireNow); EDIT_OPTIMISTIC_LOG is the journal half (the line is written
+// before the attempt, so it describes a continue that mostly never happened).
+const EDIT_NO_EDGE_GUARD = [
+  "    const r0 = fires.get(id);\n    if (r0 && r0.edgeSpent && r0.edgeSpent === wallKeyOf(a)) return { ...v, open: false, why: 'already-refuted', wallOpen: true, fired: false };",
+  '    // PRE-FIX: no edge-spent guard — every healthy reading re-enters fireNow'];
+const EDIT_OPTIMISTIC_LOG = [
+  '    if (fired) log(`${head} — continued now`);',
+  '    log(`${head} — continuing now`); if (fired) { /* PRE-FIX: said before the attempt, once per reading */ }'];
+// …and the THIRD shape: this fix's own DRAFT, which stamped the reading's one
+// shot when the CLI's rejection was REPORTED instead of when the continue was
+// DELIVERED. It is indistinguishable from the shipped rule while the caller
+// reports every outcome — and it is the whole loop again when one does not.
+const EDIT_SPEND_ON_REJECTION = [
+  ["    if (origin && origin.via === 'reading' && origin.wall) r.edgeSpent = origin.wall;\n    r.last = { key: key || null, at: now, kind };",
+    "    r.last = { key: key || null, at: now, kind, via: (origin && origin.via) || null, wall: (origin && origin.wall) || null };"],
+  ['    if (!r.last) return false;         // the rejection did not answer a fire of ours\n    const key = r.last.key || null;',
+    "    if (!r.last) return false;\n    const key = r.last.key || null;\n    if (r.last.via === 'reading' && r.last.wall) r.edgeSpent = r.last.wall; // DRAFT: stamped on the report, not the spend"]];
+/** A patched copy of auto-resume.js. Every replacement is counted and the count
+ *  is asserted by the caller — an unpatched "control" is not a control. */
+function mutantAr(edits) {
+  let src = AR_SRC0, hits = 0;
+  for (const [from, to] of edits) {
+    if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 90), hits };
+    src = src.split(from).join(to); hits++;
+  }
+  const f = path.join(REPO, 'src/server/vs-aredge-mut-' + process.pid + '-' + (++arMutN) + '.js');
+  fs.writeFileSync(f, src); arMutants.push(f);
+  return { mod: require(f), hits };
+}
+/** The incident's shape, on a clock we advance: a WATCH whose reset is six days
+ *  out, a lane that keeps reading HEALTHY, and a CLI that answers every
+ *  continue with another limit rejection (`noteFireOutcome(id,false)`) after
+ *  which the engine's walled-turn path re-arms — verbatim what
+ *  usage-pool-engine does around `noteWallSignal`.
+ *  `rotateWall` re-arms onto a DIFFERENT wall each time (model-scoped weekly
+ *  caps: one identity, several windows), which is the shape the per-wall guard
+ *  deliberately says nothing about — there the loop breaker is the belt. */
+function mkEdgeWorld({ arModule = null, rotateWall = false, streaming = false, reportOutcome = true } = {}) {
+  const mod = arModule || require(AR_PATH);
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-aredge-'));
+  const sessions = new Map(), sent = [], journal = [];
+  const realNow = Date.now;
+  let NOW = realNow();
+  const SID = 'sess-13-1788764799305';
+  const ar = mod.create({
+    dataDir: dir, activeSessions: sessions, serverSetting: () => true,
+    sendToSession: () => true, notify: () => { }, broadcast: () => { },
+    notifyDelayMs: 1e12,                                   // the delayed announcement must never fire on a fake clock
+    resumeVerb: () => ({ form: 'turn-start', deliver: () => { sent.push(NOW); return true; } }),
+    fireIdentity: () => ({ key: 'codex:__global__', name: 'codex login' }),
+    log: (l) => journal.push(l),
+  });
+  sessions.set(SID, { backend: 'codex', mode: 'chat', _webuiId: SID, _autoResume: true, pty: {}, _isStreaming: !!streaming });
+  const FAR = NOW + 6 * 24 * 3600e3;                       // the incident's own six-days-out reset
+  let wallN = 0;
+  const wallOpts = () => (rotateWall
+    ? { lane: 'codex', bucket: 'scoped', scopedName: 'cap-' + wallN }
+    : { lane: 'codex', bucket: 'sevenDay' });
+  const arm = () => ar.armIfEnabled(SID, sessions.get(SID), FAR, 'usage limit', wallOpts());
+  const healthy = () => (rotateWall
+    ? { limitId: 'codex', scopedWeekly: [{ name: 'cap-' + wallN, utilization: 0, resetsAt: Math.floor(NOW / 1000) + 700000 }] }
+    : { limitId: 'codex', sevenDay: { utilization: 0, resetsAt: Math.floor(NOW / 1000) + 700000 } });
+  return {
+    ar, sent, journal,
+    run({ hours = 4, stepMs = 30e3 } = {}) {
+      Date.now = () => NOW;
+      try {
+        arm();
+        const perHour = []; let base = 0, readings = 0, lastWhy = null, lastWallOpen = false;
+        for (let h = 0; h < hours; h++) {
+          for (let i = 0; i < 3600e3 / stepMs; i++) {
+            NOW += stepMs; readings++;
+            const before = sent.length;
+            const v = ar.noteQuotaReading(SID, healthy(), 'fresh non-limited codex reading');
+            lastWhy = v.why; lastWallOpen = !!v.wallOpen;
+            if (sent.length > before) {
+              // the CLI rejected it again. `reportOutcome:false` is the SAME
+              // world with the one thing this module cannot enforce removed:
+              // a caller that re-arms the wall without telling us how the last
+              // continue went (an unclassified error enum — this feature's own
+              // break (1) for eight months — or simply a future arm site).
+              if (reportOutcome) ar.noteFireOutcome(SID, false, 'usage limit');
+              if (rotateWall) wallN++;                        // …and the next wall is a different window
+              arm();                                          // …and the engine re-arms (noteWallSignal)
+            }
+          }
+          perHour.push(sent.length - base); base = sent.length;
+        }
+        return {
+          perHour, total: sent.length, readings, lastWhy, lastWallOpen,
+          armedAtEnd: ar.statusFor(SID).armed === true,
+          reopenLines: journal.filter((l) => /window reopened/.test(l)).length,
+        };
+      } finally { Date.now = realNow; }
+    },
+    cleanup() { try { fs.rmSync(dir, { recursive: true, force: true }); } catch { } },
+  };
+}
+
 // ── 12. GENERIC AUTO-RESUME: THE CODEX 32-HOUR STALL (2026-09-08) ───────────
 // The incident, from this instance's own stores (read-only): codex thread
 // 01a0733f… (webui sess-13-1788764799305, accountId null = the machine's codex
@@ -720,18 +848,135 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
     try { fs.rmSync(w.root, { recursive: true, force: true }); } catch { }
   }
 
-  // (d) THE LOOP BREAKER IS NOT WEAKENED BY THE NEW EDGE: a reading-driven fire
-  // is a fire, so it spends the same hourly budget and the same quarantine.
+  // (d) THE EDGE IS SINGLE-SHOT PER WALL — r2, and the number is the point.
+  // Round 1's leg here drove 8 readings and asserted `opened >= 1` plus "the
+  // breaker recorded something". `opened` counts the WALL verdict, which is
+  // true whether or not a turn was spent, and `r.n > 0` is true for n = 1 and
+  // for n = 999 — so nothing in either tier bounded the BILLED RATE of the new
+  // fire path, and a sustained loop shipped green.
+  // What is actually true, measured against these modules: round 1 put no
+  // per-arm limit on the edge, so every reading whose armed bucket read healthy
+  // re-entered fireNow and the only ceilings left were the breaker's —
+  // FIRE_MAX_IMMEDIATE per ROLLING hour, every hour, for the LIFE OF A WATCH
+  // (which stands until its far reset passes: SIX DAYS in the incident).
+  // The premise is reachable on this instance today and is invisible to
+  // windowOpened: the exhaustion record carries `rateLimits: null` so the
+  // engine SYNTHESISES `limitId:'codex'`, and if the true wall is the model
+  // lane (`codex_bengalfox`, measured interleaving minute by minute) the plan
+  // lane's very next push reads healthy.
+  // The world below is that: a WATCH on (codex, sevenDay), the plan lane
+  // reading healthy every 30 s, and the CLI answering every continue with
+  // ANOTHER limit rejection — which is exactly what the engine's walled-turn
+  // path reports through `noteFireOutcome(id, false)` before re-arming.
   {
-    const w = mkCodex();
-    w.ar.armIfEnabled(w.SID, w.session, Date.now() + 60000, 'usage limit', { lane: 'codex', bucket: 'sevenDay' });
-    w.lastLimits = fresh().rateLimits;
-    let opened = 0;
-    for (let i = 0; i < 8; i++) { const v = w.ar.noteQuotaReading(w.SID, fresh().rateLimits && { limitId: 'codex', sevenDay: { utilization: 0, resetsAt: nowSec() + 700000 } }, 'reading'); if (v.open) opened++; await settle(20); }
-    ok('every reading-driven continue goes through the SAME fire path — the hourly cap is what stops it, not the edge', opened >= 1, 'opened=' + opened);
-    const r = w.ar._fires.get(w.SID);
-    ok('…and the breaker recorded them (a reading cannot mint free continues)', !!r && (r.n > 0 || !!r.last), JSON.stringify(r));
-    try { fs.rmSync(w.root, { recursive: true, force: true }); } catch { }
+    const W = mkEdgeWorld();
+    const r = W.run({ hours: 4 });
+    ok('the edge is SINGLE-SHOT per wall: four simulated hours of healthy readings against a wall the CLI keeps rejecting spend exactly ONE billed continue',
+      r.total === 1, JSON.stringify(r.perHour));
+    ok('…and the wait is still standing (bounding the spend must not silently drop the promise — the timed path still owns the reset)',
+      r.armedAtEnd === true);
+    ok('…and every later reading is REFUSED BY NAME, not mistaken for "the wall is still up"',
+      r.lastWhy === 'already-refuted' && r.lastWallOpen === true, JSON.stringify({ why: r.lastWhy, wallOpen: r.lastWallOpen }));
+    // FINDING 3, measured on the same run: round 1 logged "continuing now" once
+    // per READING, before attempting — 492 lines for 12 continues (41:1) — in
+    // the exact channel this incident was diagnosed from ("ZERO [auto-resume]
+    // lines for that session").
+    ok('…and the journal says what HAPPENED, not what was about to be attempted (one line per real continue, never one per reading)',
+      r.reopenLines <= 2 * r.total, JSON.stringify({ reopenLines: r.reopenLines, continues: r.total, readings: r.readings }));
+    W.cleanup();
+  }
+  // (d′) NEGATIVE CONTROL — the SAME world against a patched copy of
+  // src/server/auto-resume.js with ONLY the edge-spent guard removed. One
+  // mechanism, one control: if this does not reproduce the loop, the assert
+  // above is decoration.
+  {
+    const mut = mutantAr([EDIT_NO_EDGE_GUARD]);
+    ok('control setup: the PRE-FIX auto-resume copy applied its one replacement', mut.hits === 1, JSON.stringify({ hits: mut.hits, err: mut.err }));
+    if (mut.mod) {
+      const W = mkEdgeWorld({ arModule: mut.mod });
+      const r = W.run({ hours: 4 });
+      ok('NEGATIVE CONTROL (pre-fix): the identical world burns FIRE_MAX_IMMEDIATE billed continues every hour, forever — the loop this branch shipped',
+        r.total >= 4 * FIRE_MAX_IMMEDIATE && r.perHour.every((n) => n === FIRE_MAX_IMMEDIATE) && r.armedAtEnd === true,
+        JSON.stringify({ perHour: r.perHour, total: r.total }));
+      W.cleanup();
+    }
+  }
+  // (d‴) NEGATIVE CONTROL for finding 3 — ROUND 1's code, both halves. The
+  // 41:1 journal is a JOINT consequence: the line was written once per READING
+  // *and* the edge stayed re-enterable, so it is reproduced by reverting both
+  // and by nothing less. (The guard-only control above deliberately does NOT
+  // claim it: with the post-fire logging in place it prints ~6 lines per
+  // continue, which is a different, much smaller fact.)
+  {
+    const mut = mutantAr([EDIT_NO_EDGE_GUARD, EDIT_OPTIMISTIC_LOG]);
+    ok('control setup: the ROUND-1 auto-resume copy applied both replacements', mut.hits === 2, JSON.stringify({ hits: mut.hits, err: mut.err }));
+    if (mut.mod) {
+      const W = mkEdgeWorld({ arModule: mut.mod });
+      const r = W.run({ hours: 4 });
+      ok('NEGATIVE CONTROL (round 1): "continuing now" is printed once per READING — 40:1 against the continues that actually happened',
+        r.reopenLines >= 30 * r.total && r.reopenLines >= r.readings,
+        JSON.stringify({ reopenLines: r.reopenLines, continues: r.total, readings: r.readings }));
+      W.cleanup();
+    }
+  }
+  // (d⁗) THE SHOT IS SPENT AT THE DELIVERY, NOT AT THE REJECTION REPORT.
+  // Same world, one thing removed: nobody tells auto-resume how the continue
+  // went. That is not a hypothetical seam — the answer only becomes an outcome
+  // report if the harness's error record is CLASSIFIED as a wall, and this
+  // feature's own incident is that the codex classifier matched nothing for
+  // eight months; the arm seam is now generic, so the next harness's arm site
+  // cannot know it owes us a report either. The bound has to be a property of
+  // THIS module.
+  {
+    const W = mkEdgeWorld({ reportOutcome: false });
+    const r = W.run({ hours: 4 });
+    ok('a caller that re-arms the same wall WITHOUT ever reporting the outcome still gets exactly ONE billed continue',
+      r.total === 1 && r.armedAtEnd === true, JSON.stringify({ perHour: r.perHour, why: r.lastWhy }));
+    W.cleanup();
+  }
+  // …and its control is THIS FIX'S OWN DRAFT (the reviewer's proposal, taken
+  // literally): stamp the shot when the rejection is reported. Identical to
+  // the shipped rule in (d) — which is why it needs its own control at all —
+  // and round 1's loop, unchanged, the moment a caller stays silent.
+  {
+    const mut = mutantAr(EDIT_SPEND_ON_REJECTION);
+    ok('control setup: the DRAFT auto-resume copy (spend stamped on the rejection report) applied both replacements',
+      mut.hits === 2, JSON.stringify({ hits: mut.hits, err: mut.err }));
+    if (mut.mod) {
+      const A = mkEdgeWorld({ arModule: mut.mod, reportOutcome: true });
+      const ra = A.run({ hours: 4 });
+      ok('…and it is INDISTINGUISHABLE while every outcome is reported (so the difference is the seam, not the arithmetic)',
+        ra.total === 1, JSON.stringify(ra.perHour));
+      A.cleanup();
+      const B = mkEdgeWorld({ arModule: mut.mod, reportOutcome: false });
+      const rb = B.run({ hours: 4 });
+      ok('NEGATIVE CONTROL (draft): with the report missing it is round 1 again — FIRE_MAX_IMMEDIATE billed continues every hour, forever',
+        rb.total >= 4 * FIRE_MAX_IMMEDIATE && rb.perHour.every((n) => n === FIRE_MAX_IMMEDIATE),
+        JSON.stringify({ perHour: rb.perHour, total: rb.total }));
+      B.cleanup();
+    }
+  }
+  // (d″) THE LOOP BREAKER IS STILL IN FRONT OF THE EDGE. The guard above is a
+  // per-WALL rule, so it says nothing about a session whose wall keeps
+  // CHANGING — a real shape (model-scoped weekly caps: one identity, several
+  // windows, the c1206711 rule). There the second belt is what has to hold,
+  // and it is the one round 1 claimed and never measured.
+  {
+    // The ceiling is asserted BOTH ways on purpose. Reading the constant back
+    // out of the module makes the bound move with the code — the verifier's own
+    // mutation (FIRE_MAX_IMMEDIATE = 999) would have satisfied a purely
+    // relative assert — so the constant is ALSO pinned against a literal: it is
+    // a promise about unattended spending, and a suite that lets it drift is
+    // measuring nothing.
+    ok('the immediate-continue budget is a SPEND PROMISE, pinned to a number a human agreed to',
+      FIRE_MAX_IMMEDIATE >= 1 && FIRE_MAX_IMMEDIATE <= 5, 'FIRE_MAX_IMMEDIATE=' + FIRE_MAX_IMMEDIATE);
+    const W = mkEdgeWorld({ rotateWall: true });
+    const r = W.run({ hours: 3 });
+    ok('a session re-armed onto a DIFFERENT wall each time is bounded by the hourly cap, not by the edge',
+      r.perHour.every((n) => n <= FIRE_MAX_IMMEDIATE) && r.total <= 3 * FIRE_MAX_IMMEDIATE, JSON.stringify(r.perHour));
+    ok('…and the cap is really the thing doing it (the budget is spent, every hour)',
+      r.perHour.filter((n) => n === FIRE_MAX_IMMEDIATE).length >= 2, JSON.stringify(r.perHour));
+    W.cleanup();
   }
 }
 
@@ -775,6 +1020,29 @@ const T0 = Date.now();   // the module refuses waits >26h out, so the clock must
     ok('…while the reading about the RIGHT bucket continues it, exactly once', v5.open === true && v5.fired === true && a.sent.length === 1 && a.sent[0].text === CONTINUE_PROMPT, JSON.stringify({ v5, sent: a.sent }));
     ok('…and the wait is spent (never twice on one wall)', a.ar.statusFor('s1').armed === false && a.ar.noteQuotaReading('s1', { fiveHour: { utilization: 0.1, resetsAt: Math.floor(Date.now() / 1000) + 900 } }, 'reading').why === 'not-armed' && a.sent.length === 1);
   }
+  // A MONTHLY SPEND CAP IS NOT A WINDOW (r2). `spend_control_reached` is the
+  // codex twin of 2.361.2's `seven_day_overage_included`: the account refuses
+  // every turn while its weekly bucket reads perfectly healthy, so a
+  // bucket-only rule reads "the wall is gone" and fires into a wall that has
+  // no reset at all. Checked BEFORE the lane, deliberately — it is a fact
+  // about the ACCOUNT, not one of its windows.
+  ok('a snapshot that states a monthly spend control opens NOTHING, even with a perfectly healthy armed bucket',
+    windowOpened({ snapshot: S({ spendControlReached: true }), ...A }).why === 'spend-capped');
+  ok('…on the SIBLING lane too (a spend control is about the account, so it is asked before the lane)',
+    windowOpened({ snapshot: S({ limitId: 'codex_bengalfox', spendControlReached: true }), ...A }).why === 'spend-capped');
+  ok('…while the normal `false` the harness always sends changes nothing (the guard only ever REFUSES)',
+    windowOpened({ snapshot: S({ spendControlReached: false }), ...A }).open === true
+    && windowOpened({ snapshot: S({ spendControlReached: null }), ...A }).open === true);
+  // NEGATIVE CONTROL FOR THE RULE WE REFUSED TO WRITE. The reviewer also
+  // proposed treating `credits.hasCredits === false` as spent. MEASURED on this
+  // instance and rejected: data/usage-cache/__global_codex__.json — the
+  // machine's own codex login, the INCIDENT'S VERY ACCOUNT — carries
+  // `{"hasCredits":false,"unlimited":false,"balance":"0"}` while serving turns
+  // normally off plan quota, because a plan account simply has no credit
+  // balance. Reading that as "spent" would make this edge permanently inert
+  // here: the original incident, re-introduced as a guard.
+  ok('a plan account with no credit balance is NOT read as spent (measured: the incident\'s own login reports hasCredits:false while serving turns)',
+    windowOpened({ snapshot: S({ credits: { hasCredits: false, unlimited: false, balance: '0' } }), ...A }).open === true);
   // the LANE reader, on the two shapes the codex harness really produces
   ok('the lane comes from the harness\'s own limitId, never invented', laneOf(cq.normalize({ limitId: 'codex_bengalfox', primary: { usedPercent: 0, windowDurationMins: 300, resetsAt: 1 } })) === 'codex_bengalfox' && laneOf({ fiveHour: {} }) === null);
 }

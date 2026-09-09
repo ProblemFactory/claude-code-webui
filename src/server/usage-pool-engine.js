@@ -1282,7 +1282,14 @@ function noteQuotaReadingForResume(session, snapshot, why) {
     const now = Date.now();
     if (prev && prev.why === v.why && now - prev.at < READING_EDGE_LOG_MS) return;
     _readingEdgeSaid.set(id, { why: v.why, at: now });
-    console.log(`[auto-resume] ${id}: reading did not reopen the wait (${v.why})`);
+    // `already-refuted` is NOT "the wall is still up" — the window really does
+    // read open, and we are declining to spend on it again because the CLI
+    // answered our last reading-driven continue with another limit rejection.
+    // Saying it the other way would print a false fact into the one channel
+    // this incident was diagnosed from.
+    console.log(v.why === 'already-refuted'
+      ? `[auto-resume] ${id}: the window reads open but a continue onto this wall was already refused — waiting for the reset`
+      : `[auto-resume] ${id}: reading did not reopen the wait (${v.why})`);
   } catch (e) { console.warn('[auto-resume] reading edge failed:', e.message); }
 }
 
@@ -1808,10 +1815,19 @@ function recordCodexQuotaSignal(session, payload) {
         // write into this account's cache as its state, and the fresh-window
         // edge is armed on it. If the true wall were a MODEL lane
         // (`codex_bengalfox`) the consequence is bounded and self-correcting —
-        // a healthy `codex` reading fires once, the CLI rejects, and the loop
-        // breaker quarantines the identity for the hour; the timed path still
-        // delivers at the stated reset. Inventing a lane we cannot read would
-        // be worse in the other direction (a wait no reading can ever open).
+        // a healthy `codex` reading fires ONCE and the edge is spent for this
+        // wall AT THE DELIVERY (auto-resume `edgeSpent`, cleared only by proof
+        // of work — deliberately not by our rejection report, which this
+        // module would have to be trusted to send); the timed path still
+        // delivers at the stated reset.
+        // THAT BOUND IS THE `edgeSpent` RULE AND NOTHING ELSE (r2): this
+        // comment used to credit the loop breaker's quarantine, which is TEN
+        // MINUTES, so the real ceiling was the hourly cap — 3 billed continues
+        // per rolling hour, every hour, for the life of the watch (measured:
+        // [3,3,3,3] over 4 simulated hours against the real modules). Do not
+        // restore that claim without re-measuring it.
+        // Inventing a lane we cannot read would be worse in the other
+        // direction (a wait no reading can ever open).
         const snap = sig.snapshot || {
           limitId: 'codex', sevenDay: { utilization: 1, usedPercent: 100, windowMinutes: 10080, resetsAt: resets > nowSec ? resets : nowSec + 24 * 3600, status: 'limited' },
           fiveHour: null, rateLimitReachedType: 'unknown', fetchedAt: Date.now(),
