@@ -58,3 +58,10 @@ src/lib/build-version.js
 src/server/vs-wake-mut-*.js
 src/server/vs-wake-master-ar-*.js
 src/vs-wake-mut-*.js
+
+# §5c of scripts/test-spend-paths.mjs writes PATCHED COPIES of
+# src/server/conversation-deliver.js beside the real one (SIBLINGS, or their
+# relative requires do not resolve). Unlinked on exit and swept by PID at
+# start, but a SIGKILL can strand one — and a dirty tree is what the release
+# gate REFUSES on.
+src/server/vs-spend-mut-*.js

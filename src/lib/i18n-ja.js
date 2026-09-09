@@ -3241,6 +3241,8 @@ export default {
   "While an account is using paid overage its utilization stays under 100% even though every token costs money, so the pool’s “most remaining” ranking actively prefers it. With this on, such a member is not a voluntary switch target (an escape from a dead account still uses it, and it keeps serving its own conversations). Off by default: watch the quota panels for a week first — they now say “paid overage in use”.": "有料の超過利用中でも利用率は100%未満のままで、しかも各トークンに課金されます。そのためプールの「残量が最も多い」順位付けはむしろそのアカウントを選びがちです。オンにすると、そのメンバーは自発的な切り替え先から外れます(死んだアカウントからの避難先としては使え、自分の会話も処理し続けます)。既定はオフ: まず1週間クォータパネルを見てください——「有料の超過利用中」と表示されます。",
   "Stop nudge: give up after this many unanswered nudges": "Stop ナッジ: この回数だけ応答がなければ以後行わない",
   "A session that has never reported a board status is being asked for bookkeeping it does not do — and every nudge costs a real mini-turn. After this many nudges with no status report at all, that session is not nudged again (any status report resets the count). 0 = never give up.": "ボードのステータスを一度も報告していないセッションは、やっていない記帳を求められているだけで、ナッジのたびに実際のミニターンが課金されます。ステータス報告がまったくないナッジがこの回数続いたら、そのセッションには以後ナッジしません(報告が1件でもあればカウントはリセット)。0 = 打ち切らない。",
+  "spend control reached": "支出上限に到達",
+  "This account has reached its spend control, so its requests are rejected — automatic turns on it are refused.": "このアカウントは支出上限に達しており、リクエストが拒否されます——自動ターンは実行されません。",
   "paid overage in use": "有料の超過利用中",
   "Automatic turns are refused on this account while it bills paid overage (Settings → Spending).": "このアカウントが従量課金中の間、自動ターンは拒否されます(設定 → 支出)。",
 };

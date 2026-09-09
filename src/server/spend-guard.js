@@ -60,6 +60,8 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
     }
   } catch { }
   const spoke = new Map();   // journal dedup: `${reason}|${key}|${why}` -> ts
+  let chargesUnhinted = 0;   // charges that made this module resolve the identity itself (see identityFor)
+  let lastUnhintedLog = 0;
   let timer = null;
   const writeNow = () => {
     try { writeJsonAtomic(file, { v: 1, budget: state, nudge }); }
@@ -82,6 +84,18 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
     return A.overageState(cache);
   }
 
+  /** THE ONE READER of `cache.spendControlReached` — the third field the §1.4
+   *  row names. It rides the same cache read and the same PURE module as
+   *  `overageFor`, so the row's CLOSED verdict is true of all three fields
+   *  rather than of two (r4: `grep -rn spendControlReached src/` used to
+   *  return only its writer). */
+  function spendControlFor(key) {
+    if (!key || !readCacheFor) return null;
+    let cache = null;
+    try { cache = readCacheFor(key); } catch { cache = null; }
+    return A.spendControlState(cache);
+  }
+
   function credentialFor(key) {
     if (!key || !credentialStateOf) return null;
     try {
@@ -93,7 +107,18 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
 
   /** Resolve WHO pays. `identityHint` lets a caller that already resolved the
    *  slot (auto-resume re-resolves it after its pre-fire gate) hand the same
-   *  object in instead of asking twice and getting two answers. */
+   *  object in instead of asking twice and getting two answers.
+   *
+   *  AUTHORIZE MAY RESOLVE; CHARGE MAY NOT (r4, reproduced). This is the ONE
+   *  resolution — `authorize()` is entitled to make it, and the verdict then
+   *  CARRIES it (`v.identity`) precisely so the charge can name the same slot.
+   *  A `note()` that arrives with no hint asks the question a second time,
+   *  against state our own handlers are free to have moved in between: the
+   *  delivery ladder deferred its charge by up to 120 s and debited an account
+   *  that was never asked, while the authorized one — debited nothing — never
+   *  reached its ceiling. `chargesUnhinted` counts that shape in PRODUCTION;
+   *  scripts/test-spend-paths.mjs §5c drives all four producers and asserts it
+   *  stays 0, which is the census a grep over five call sites cannot be. */
   function identityFor(session, identityHint) {
     if (identityHint && identityHint.key) return { key: String(identityHint.key), name: String(identityHint.name || identityHint.key) };
     if (!identityOf || !session) return null;
@@ -122,7 +147,7 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
     const v = A.authorizeUnattendedSpend({
       reason, identity, state, limits: limits(),
       overage: overageFor(key), overagePolicy: overagePolicy(),
-      credential: credentialFor(key), now,
+      credential: credentialFor(key), spendControl: spendControlFor(key), now,
     });
     if (v.ok) return v;
     const sig = `${reason}|${key || '?'}|${v.why}`;
@@ -153,8 +178,21 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
     return v;
   }
 
-  /** Charge a spend that actually happened. */
+  /** Charge a spend that actually happened. The identity is the one
+   *  `authorize()` resolved and put on its verdict — see identityFor. */
   function note({ reason = null, identity: identityHint = null, session = null, now = Date.now() } = {}) {
+    if (!(identityHint && identityHint.key) && session) {
+      // The charge is re-deriving the slot. Not fatal (the answer is usually
+      // the same one), so it charges — a dropped charge is the money-unsafe
+      // direction — but it is NEVER silent: this is the exact shape that
+      // debited an account nobody asked.
+      chargesUnhinted++;
+      if (now - lastUnhintedLog > REFUSE_LOG_MS) {
+        lastUnhintedLog = now;
+        log(`[spend] charge for ${reason || 'an unattended turn'} arrived with no identity — resolving it a second time (${chargesUnhinted} so far)`);
+      }
+      try { global.__vsEvent?.('spend-charge-unhinted', String(reason || 'unknown')); } catch { }
+    }
     const identity = identityFor(session, identityHint);
     const r = A.noteUnattendedSpend(state, { identity, at: now, limits: limits() });
     state = r.state;
@@ -193,9 +231,9 @@ function create({ dataDir, serverSetting = () => undefined, identityOf = null, r
   }
 
   return {
-    authorize, note, overageFor, nudgeRec, noteNudge, flush,
+    authorize, note, overageFor, spendControlFor, nudgeRec, noteNudge, flush,
     limits, overagePolicy,
-    snapshot: () => ({ budget: A.pruneBudget(state, Date.now(), limits()), nudge: { ...nudge } }),
+    snapshot: () => ({ budget: A.pruneBudget(state, Date.now(), limits()), nudge: { ...nudge }, chargesUnhinted }),
     _file: file,
   };
 }

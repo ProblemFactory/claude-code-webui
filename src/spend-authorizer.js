@@ -237,6 +237,45 @@ function overageText(cache, opts = undefined) {
   return `paid overage in use${money}`;
 }
 
+/** PURE. THE ONE READER of `cache.spendControlReached` — the THIRD field the
+ *  design's §1.4 row named and the one r3 marked CLOSED without wiring
+ *  (measured 2026-09-09: `grep -rn spendControlReached src/` returned exactly
+ *  two hits, both the WRITER in src/harnesses/codex-quota.js).
+ *
+ *  WHAT IT MEANS, and what it is NOT. Codex reports it beside the rate-limit
+ *  windows; it says this account has reached its configured SPEND CONTROL, so
+ *  further requests are REJECTED. That is not the overage class — no dollars
+ *  are being spent — it is the `identity-cannot-serve` class: an unattended
+ *  turn on it buys a failed request and a junk card, and the account can rank
+ *  as the member with the most headroom while it does (`accountRemaining()`
+ *  reads `utilization`, and only a `rate_limit_reached_type` marks a window
+ *  spent — nothing marks THIS).
+ *
+ *  THREE-STATE, and DATED like its sibling (P6 + r2's "only the claim that
+ *  BLOCKS needs a date"): the snapshot is rebuilt wholesale by every codex
+ *  reading producer and stamps its own `fetchedAt`, so that is the date, and a
+ *  record older than OVERAGE_STALE_MS — the SAME constant, imported not
+ *  re-declared, because a second window for one physical fact is how twins are
+ *  born — answers 'unknown', which neither blocks nor claims. `reached:'no'`
+ *  is deliberately NOT bounded: it blocks nothing. */
+function spendControlState(cache, { now = Date.now(), staleMs = OVERAGE_STALE_MS } = {}) {
+  const raw = cache && typeof cache === 'object' ? cache.spendControlReached : undefined;
+  const stated = raw === true ? 'yes' : raw === false ? 'no' : 'unknown';
+  const asOf = Number(cache && cache.fetchedAt) || 0;
+  const ageMs = asOf > 0 ? Math.max(0, now - asOf) : null;
+  let evidence = 'none';
+  if (stated === 'yes') evidence = !asOf ? 'undated' : ageMs > staleMs ? 'stale' : 'fresh';
+  else if (stated === 'no') evidence = 'stated-off';
+  const reached = stated === 'yes' && evidence !== 'fresh' ? 'unknown' : stated;
+  return { reached, stated, evidence, ageMs, asOf };
+}
+
+/** PURE. The one sentence every surface says about it. null = nothing to say. */
+function spendControlText(cache, opts = undefined) {
+  const s = spendControlState(cache, opts);
+  return s.reached === 'yes' ? 'spend control reached' : null;
+}
+
 /** PURE. THE DECISION. Everything it needs is an argument; nothing is read.
  *  @param reason      one of SPEND_REASONS
  *  @param identity    {key, name} — the credential slot this turn will BILL
@@ -245,11 +284,13 @@ function overageText(cache, opts = undefined) {
  *  @param overage     overageState(cache) for that identity, or null (unknown)
  *  @param overagePolicy 'refuse' (default, D3b) | 'allow'
  *  @param credential  {serves: 'yes'|'no'|'unknown'} — login/credential state
+ *  @param spendControl spendControlState(cache), or null (unknown)
  *  @returns {ok, why, detail, retryAfter, counts, limits, reason, identity}
  */
 function authorizeUnattendedSpend({
   reason, identity = null, state = null, limits = BUDGET_DEFAULTS,
-  overage = null, overagePolicy = 'refuse', credential = null, now = Date.now(),
+  overage = null, overagePolicy = 'refuse', credential = null,
+  spendControl = null, now = Date.now(),
 } = {}) {
   const L = { ...BUDGET_DEFAULTS, ...(limits || {}) };
   const key = identity && identity.key ? String(identity.key) : null;
@@ -270,6 +311,16 @@ function authorizeUnattendedSpend({
   // spends nothing but a failed turn and a junk card. 'unknown' passes: P6.
   if (credential && credential.serves === 'no') {
     return no('identity-cannot-serve', `${name} cannot authorize a request right now (${credential.state || 'signed out'})`);
+  }
+  // THE SAME CLASS, stated by the harness instead of by the credential file
+  // (design §1.4's third named field): codex says this account has reached its
+  // spend control, so its requests are REJECTED. No dollars are at stake — the
+  // turn simply buys a failed request and a junk card — and it is NOT gated by
+  // `spend.allowOverageTurns`, which is an opt-in to SPENDING money, not an
+  // opt-in to being refused by the vendor. Only a FRESH, dated claim blocks
+  // (spendControlState); 'unknown'/'no' never do.
+  if (spendControl && spendControl.reached === 'yes') {
+    return no('spend-control-reached', `${name} has reached its spend control — its requests are rejected, so an unattended turn on it buys nothing`);
   }
   // REAL MONEY (D3b). While overage is in use the account is billing
   // pay-per-use, so an unattended turn is a dollar decision, not a quota one.
@@ -350,6 +401,6 @@ function noticeText(warn) {
 module.exports = {
   SPEND_REASONS, BUDGET_DEFAULTS, HOUR_MS, DAY_MS, MAX_STAMPS, CAP_MAX, stampCap, OVERAGE_STALE_MS,
   budgetLimits, emptyBudget, pruneBudget, spendCounts,
-  overageState, overageText,
+  overageState, overageText, spendControlState, spendControlText,
   authorizeUnattendedSpend, noteUnattendedSpend, refusalText, noticeText,
 };

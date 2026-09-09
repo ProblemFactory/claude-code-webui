@@ -3242,6 +3242,8 @@ export default {
   "While an account is using paid overage its utilization stays under 100% even though every token costs money, so the pool’s “most remaining” ranking actively prefers it. With this on, such a member is not a voluntary switch target (an escape from a dead account still uses it, and it keeps serving its own conversations). Off by default: watch the quota panels for a week first — they now say “paid overage in use”.": "账号在用付费溢出额度时, 利用率仍然低于 100%, 而每个 token 都在花钱——于是池按“剩得最多”排序时反而偏爱它。打开后这样的成员不再是自愿切换目标(从死账号逃生仍然可以落到它上面, 它也照常服务自己的对话)。默认关: 先看一周配额面板——现在那里会写“正在使用付费溢出额度”。",
   "Stop nudge: give up after this many unanswered nudges": "Stop 提醒: 连续这么多次没人回应就不再提醒",
   "A session that has never reported a board status is being asked for bookkeeping it does not do — and every nudge costs a real mini-turn. After this many nudges with no status report at all, that session is not nudged again (any status report resets the count). 0 = never give up.": "从没上报过看板状态的会话, 是在被要求做它根本不做的记账——而每一次提醒都要花掉一个真实的小 turn。连续这么多次提醒都完全没有状态上报之后, 这个会话不再被提醒(任何一次状态上报都会把计数清零)。0 = 永不放弃。",
+  "spend control reached": "已达到支出上限",
+  "This account has reached its spend control, so its requests are rejected — automatic turns on it are refused.": "该账号已达到自己的支出上限, 请求会被拒绝——因此不会在它上面发起自动回合。",
   "paid overage in use": "正在使用付费溢出额度",
   "Automatic turns are refused on this account while it bills paid overage (Settings → Spending).": "该账号正在按量付费期间, 自动 turn 一律被拒绝(设置 → 花费)。",
 };

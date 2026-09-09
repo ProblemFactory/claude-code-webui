@@ -474,10 +474,16 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
    *  once per session, is how the round-2 "it also refused me" cards happened.
    *  The arm is NOT dropped: the promise still stands, it is the money that is
    *  out — a later hour, or a raised budget, continues the session. */
-  function spendOk(id, session, ident, kind) {
+  function spendOk(id, session, ident, kind, out = null) {
     if (!authorizeSpend) return true;
     let v = null;
     try { v = authorizeSpend(id, session, ident || null); } catch (e) { log('[auto-resume] spend authorizer threw: ' + e.message); return false; } // FAIL CLOSED (P8)
+    // CHARGE WHAT YOU AUTHORIZED (r4): hand the caller the slot this verdict
+    // RESOLVED, so the charge below names it instead of asking a second time.
+    // It matters only when `ident` is null — the gate could not name a fire
+    // target, the guard resolved one from the session, and without this the
+    // charge would resolve it AGAIN, off state the send is free to have moved.
+    if (out && v && v.identity && v.identity.key) out.identity = v.identity;
     if (!v || v.ok !== false) return true;
     log(`[auto-resume] ${id}: refused ${kind === 'now' ? 'an immediate' : 'a timed'} continue onto ${(ident && ident.name) || 'this account'} (spend budget: ${v.why})`);
     return false;
@@ -553,7 +559,8 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       // It sits BELOW the (pure, side-effect-free) card computation and ABOVE
       // the send: nothing between them spends, and test-auto-resume-loop's
       // round-2 pin measures the distance from `moved` to `continueNoticeFor`.
-      if (!spendOk(id, session, ident2, kind)) return false;
+      const charge = {};
+      if (!spendOk(id, session, ident2, kind, charge)) return false;
       const ok = sendToSession(id, session, CONTINUE_PROMPT);
       if (!ok) { log(`[auto-resume] ${id}: could not deliver the continue prompt (will retry)`); return false; }
       armed.delete(id);
@@ -561,7 +568,7 @@ function create({ dataDir, activeSessions, sendToSession, serverSetting, broadca
       // CHARGED ONLY WHEN THE TURN HAPPENED (two-phase): everything above can
       // refuse, and an authorization that never became a turn must not eat an
       // identity's hourly budget.
-      if (noteSpend) { try { noteSpend(id, session, ident2 || null); } catch (e) { log('[auto-resume] spend accounting failed: ' + e.message); } }
+      if (noteSpend) { try { noteSpend(id, session, charge.identity || ident2 || null); } catch (e) { log('[auto-resume] spend accounting failed: ' + e.message); } }
       save();
       _cancelArmNotify(id);
       log(kind === 'now'

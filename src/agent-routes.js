@@ -682,15 +682,23 @@ app.get('/api/agent/stop-check', (req, res) => {
     // Refusing is silent to the AGENT on purpose (the hook contract has no way
     // to say "later"), but never silent to the USER: the guard journals it and
     // files one "For you" item per identity per reason.
+    // `auth` is declared OUT here (r4) because the charge below is charged to
+    // the slot THIS verdict resolved — see the comment there.
+    let auth = null;
     if (spendGuard) {
-      let auth = null;
       try { auth = spendGuard.authorize({ reason: 'stop-nudge', session: s, sessionId: id, sessionName: s.name || null }); }
       catch (e) { console.warn('[stop-nudge] spend authorizer threw — not nudging (fail closed):', e.message); return res.json({ block: false }); }
       if (auth && auth.ok === false) return res.json({ block: false });
     }
     s._lastStopNudge = now;
     try { spendGuard?.noteNudge?.(key, { at: now, sawStatus }); } catch { }
-    try { spendGuard?.note?.({ reason: 'stop-nudge', session: s }); } catch { }
+    // CHARGE WHAT YOU AUTHORIZED (r4): the charge hands back the slot the
+    // verdict resolved, never a session for the guard to resolve a SECOND time.
+    // Nothing awaits between the two lines here, so this is not today's defect
+    // — it is the same RULE, stated at every pair, because "no await in
+    // between" is a property of this arrangement of the code and not of the
+    // question being asked once.
+    try { spendGuard?.note?.({ reason: 'stop-nudge', session: s, identity: auth && auth.identity }); } catch { }
     // Per-hook custom text (2.88.0): user extra rides at the top of the nudge.
     const extra = customExtra('agents.stopNudgeExtra', 500);
     // Steps list only ENABLED tools (2.211.0) — status is guaranteed on here.

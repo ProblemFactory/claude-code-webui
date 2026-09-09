@@ -1778,8 +1778,8 @@ function recordCodexQuotaSignal(session, payload) {
         // nothing that can arrive null. The dep version of this gate shipped
         // DEAD — server.js never passed it — and the suite leg that "proved"
         // it passed a payload that reached no branch at all.
+        let av = null;
         {
-          let av = null;
           try { av = spendGuard.authorize({ reason: 'codex-reset-credit', session, sessionId: session._webuiId, sessionName: session.name || null }); }
           catch (e) { console.warn('[codex] spend authorizer threw — not spending a reset credit:', e.message); return false; }
           if (av && av.ok === false) { console.log(`[codex] reset credit refused for ${session._webuiId} (spend budget: ${av.why})`); return false; }
@@ -1787,7 +1787,9 @@ function recordCodexQuotaSignal(session, payload) {
         session._codexResetTriedAt = now;
         session._codexLastResetsAt = Number(resetsAtSec) || 0;
         session.pty.write(JSON.stringify({ type: 'codex-reset-credit' }) + '\n');
-        try { spendGuard.note({ reason: 'codex-reset-credit', session }); } catch (e) { console.warn('[codex] spend accounting failed:', e.message); }
+        // CHARGE WHAT YOU AUTHORIZED (r4): the slot the verdict resolved, handed
+        // back — never a session for the guard to resolve a second time.
+        try { spendGuard.note({ reason: 'codex-reset-credit', session, identity: av && av.identity }); } catch (e) { console.warn('[codex] spend accounting failed:', e.message); }
         serverNotice(`codex-reset-${session._webuiId}-${now}`, `Codex hit a usage limit — trying a stored rate-limit reset credit before switching accounts.`);
         global.__vsEvent?.('codex-reset-credit-try', session._accountId || 'global');
         return true;

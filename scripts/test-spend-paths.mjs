@@ -763,6 +763,11 @@ if (!probe) {
   const led = JSON.parse(fs.readFileSync(path.join(w.dataDir, 'spend-budget.json'), 'utf8'));
   ok('§4 the ledger records exactly ONE spend, against the credential slot the continue landed on',
     (led.budget.identities[w.M1] || []).length === 1 && (led.budget.instance || []).length === 1, JSON.stringify(led.budget.identities));
+  // §5c's rule, measured on THIS producer: auto-resume charges the slot its own
+  // authorization resolved (`spendOk`'s out-param), so the guard is never asked
+  // the identity question a second time at charge time.
+  ok('§4 …and the guard never re-resolved the identity at CHARGE time (§5c\'s rule, on the real auto-resume)',
+    w.eng.spendGuard.snapshot().chargesUnhinted === 0, String(w.eng.spendGuard.snapshot().chargesUnhinted));
 
   // OWNER-TYPED TURNS ARE NEVER COUNTED
   const before = (led.budget.instance || []).length;
@@ -952,6 +957,243 @@ console.log('\n§5b a steered notification opens no turn, so it spends no budget
   }
 }
 
+
+// ── §5c THE CHARGE NAMES THE SLOT THE AUTHORIZATION MEASURED (r4) ───────────
+// REPRODUCED before it was fixed. The ladder authorized against one credential
+// slot and DEBITED a different one, because it threw the verdict's resolved
+// identity away and handed `note()` a bare session to resolve a SECOND time:
+//
+//   const identity = session ? null : {...};                 // null on the local-session branch
+//   charged = { reason: spendReason, session, identity };    // ⇒ note() re-resolves
+//
+// The rpc rung makes the window wide ON PURPOSE — the charge is DEFERRED to
+// `settleRpcDelivery`, up to SETTLE_TTL_MS (120 s) later — and a codex
+// session's slot follows the pool DEFAULT (the engine's per-session pass skips
+// codex outright), which `maybePoolAutoSwitchForPool` re-decides on its own
+// 30 s timer. So the answer to "who pays" is free to move between our frame and
+// the wrapper's verdict, and it moved every time the pool did.
+//
+// The damage runs BOTH ways, which is why one ledger assertion is not enough:
+// the AUTHORIZED account is debited nothing, so its ceiling never binds and it
+// can be spent past indefinitely; and an account nobody asked is debited, so it
+// starts refusing its own legitimate unattended turns.
+console.log('\n§5c the charge is debited to the identity the authorization resolved');
+{
+  // A patched copy of the REAL ladder, as a SIBLING of the original (its
+  // relative requires — ../backend-caps.js, ./wrapper-files.js — resolve only
+  // from src/server/). Unlinked on exit, swept by PID at start, gitignored.
+  const delPath = 'src/server/conversation-deliver.js';
+  const delSrc0 = read(delPath);
+  const mutants = [];
+  process.on('exit', () => { for (const f of mutants) { try { fs.unlinkSync(f); } catch { } } });
+  try {
+    for (const f of fs.readdirSync(path.join(REPO, 'src/server'))) {
+      const m = /^vs-spend-mut-(\d+)-/.exec(f);
+      if (!m || Number(m[1]) === process.pid) continue;
+      try { process.kill(Number(m[1]), 0); continue; } catch (e) { if (e.code === 'EPERM') continue; }
+      try { fs.unlinkSync(path.join(REPO, 'src/server', f)); } catch { }
+    }
+  } catch { }
+  let mutN = 0;
+  const mutantLadder = (edits) => {
+    let src = delSrc0, hits = 0;
+    for (const [from, to] of edits) { if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 60) }; src = src.split(from).join(to); hits++; }
+    const f = path.join(REPO, 'src/server/vs-spend-mut-' + process.pid + '-' + (++mutN) + '.js');
+    fs.writeFileSync(f, src); mutants.push(f);
+    return { mod: require(f), hits };
+  };
+
+  /** The world: a real guard whose `identityOf` ANSWER MOVES, a real ladder and
+   *  a mid-turn codex session (so the rpc rung withholds and the charge
+   *  defers). `hourCap` 1 makes the ceiling observable in one delivery.
+   *
+   *  `livePeer` swaps the transport for rung 1 (the CLI inbox), the shipped
+   *  rung that AWAITS and then charges immediately — see the leg below for why
+   *  that option exists rather than a dead `postToPeer` nobody reaches. */
+  const mkWorld = (ladderMod = deliverMod, hourCap = 1, { livePeer = false, backend = 'codex' } = {}) => {
+    const dataDir = tmpdir('vs-spend-slot-');
+    fs.mkdirSync(path.join(dataDir, 'session-buffers'), { recursive: true });
+    fs.writeFileSync(path.join(dataDir, 'session-buffers', 'w1.json'), JSON.stringify({ caps: { peerMessage: true } }));
+    const settings = { 'spend.unattendedPerIdentityHour': hourCap };
+    let live = { key: 'sub-AAA', name: 'AAA' };
+    const guard = guardMod.create({
+      dataDir, serverSetting: (k) => settings[k],
+      identityOf: () => live, getUserTodos: () => null, log: () => { },
+    });
+    const S = {
+      backend, mode: 'chat', _webuiId: 'w1', backendSessionId: 'cid-1',
+      _isStreaming: true, pty: { write: () => { } }, name: 'busy',
+    };
+    const peerPosts = [];
+    const deliver = ladderMod.create({
+      dataDir, activeSessions: new Map([['w1', S]]),
+      peerMsg: {
+        // DEFAULT: no CLI-inbox peer, so the ladder falls to the rpc rung and
+        // the charge is the DEFERRED one (settleRpcDelivery). With `livePeer`
+        // the delivery instead rides rung 1, which AWAITS its transport and
+        // then charges — the same rule on the other side of the ladder.
+        findPeer: () => (livePeer ? { socketPath: '/tmp/x', name: 'peer' } : null),
+        postChannelEvent: async () => ({ ok: false }),
+        postToPeer: async (_p, t) => { await tick(5); peerPosts.push(t); return { ok: true }; },
+      },
+      getHosts: () => null, getConvIndex: () => null, serverSetting: () => undefined,
+      emitPeerCard: () => { },
+      authorizeSpend: (req) => guard.authorize(req), noteSpend: (rec) => guard.note(rec), log: () => { },
+    });
+    const led = () => { const b = guard.snapshot().budget.identities; return Object.fromEntries(Object.entries(b).map(([k, v]) => [k, v.length])); };
+    return { deliver, guard, S, led, peerPosts, repoint: (k) => { live = { key: k, name: k.slice(-3) }; } };
+  };
+
+  /** Three notifications; the pool re-points between each frame and the
+   *  wrapper's own `peer_message_result`. Returns the ledger + each verdict. */
+  const run = async (W) => {
+    const verdicts = [];
+    for (let i = 0; i < 3; i++) {
+      W.repoint('sub-AAA');
+      const r = await W.deliver.deliverToConversation('cid-1', 'job ' + i, { kind: 'notification', spendReason: 'job-notification' });
+      W.repoint('sub-BBB');                                     // the 30 s pool timer, inside the 120 s settle window
+      const settled = W.deliver.settleRpcDelivery('cid-1', { ok: true, mode: 'queued' });
+      verdicts.push({ ok: r.ok === true, why: r.why || null, settled });
+    }
+    return { verdicts, led: W.led() };
+  };
+
+  {   // CONTROL FIRST: the flip is REAL — the guard's own answer moves.
+    const W = mkWorld();
+    const a = W.guard.authorize({ reason: 'job-notification', session: W.S }).identity.key;
+    W.repoint('sub-BBB');
+    const b = W.guard.authorize({ reason: 'job-notification', session: W.S }).identity.key;
+    ok('§5c CONTROL: the identity really moves between two questions (an unmoved fixture proves nothing)',
+      a === 'sub-AAA' && b === 'sub-BBB', `${a} → ${b}`);
+  }
+
+  {   // THE FIX: the charge follows the authorization, so the ceiling binds.
+    const W = mkWorld();
+    const r = await run(W);
+    ok('§5c the FIRST delivery is charged to the slot it was AUTHORIZED on, not the one the pool moved to',
+      r.led['sub-AAA'] === 1 && r.led['sub-BBB'] === undefined, JSON.stringify(r.led));
+    ok('§5c …so the 1/hour ceiling binds on the account that was asked: #2 and #3 are refused, by NAME',
+      r.verdicts[0].ok === true && r.verdicts[1].ok === false && r.verdicts[2].ok === false
+      && r.verdicts[1].why === 'hour-cap', JSON.stringify(r.verdicts));
+    ok('§5c …and an account nobody asked is debited NOTHING (it keeps its own unattended turns)',
+      (W.guard.snapshot().budget.identities['sub-BBB'] || []).length === 0);
+    ok('§5c the guard never had to resolve an identity at CHARGE time (the production counter for this shape)',
+      W.guard.snapshot().chargesUnhinted === 0, String(W.guard.snapshot().chargesUnhinted));
+  }
+
+  {   // The same rule on a rung that CHARGES IMMEDIATELY but still awaits: the
+      // window is the transport's, not the settle queue's.
+      //
+      // THE AWAIT HAS TO BE REACHED. This leg's first draft put the awaiting
+      // `postToPeer` behind a `findPeer` that answered null, so the ladder ran
+      // from the gate to the rpc rung's charge SYNCHRONOUSLY and the re-point
+      // below landed after the money had already moved. MEASURED both ways:
+      // an order probe on the real ladder printed `authorize → CHARGE → (the
+      // driver re-points)` with `postToPeer` never called at all, and the leg
+      // stayed GREEN with the product fix reverted while the four legs around
+      // it went red. An assert that cannot fail is not an assert — so the rung
+      // is now reached, and a CONTROL says so before the money is read.
+    const W = mkWorld(deliverMod, 12, { livePeer: true, backend: 'claude' });
+    W.repoint('sub-AAA');
+    const p = W.deliver.deliverToConversation('cid-1', 'peer text', { kind: 'peer', spendReason: 'peer-message' });
+    W.repoint('sub-BBB');                                       // moves DURING the transport await, BEFORE the charge
+    const r = await p;
+    ok('§5c CONTROL: the delivery really rode the AWAITING rung (a transport nobody called proves nothing)',
+      r.ok === true && r.lane === 'message' && W.peerPosts.length === 1, JSON.stringify({ r, posts: W.peerPosts.length }));
+    ok('§5c a peer message charged on delivery is charged to the authorized slot too (the transport await is the window)',
+      W.led()['sub-AAA'] === 1 && W.led()['sub-BBB'] === undefined, JSON.stringify(W.led()));
+    ok('§5c …and that rung never asked the guard to resolve an identity either',
+      W.guard.snapshot().chargesUnhinted === 0, String(W.guard.snapshot().chargesUnhinted));
+  }
+
+  {   // NEGATIVE CONTROL: a patched copy of the REAL ladder with r3's shipped
+      // line restored — the defect, reproduced end to end.
+    const PRE = 'charged = { reason: spendReason, session, identity };';
+    const FIX = 'charged = { reason: spendReason, session, identity: (v && v.identity) || identity };';
+    const m = mutantLadder([[FIX, PRE]]);
+    ok('§5c NEGATIVE CONTROL: the pre-fix line was re-applied to the copy (an unapplied patch is a green control)',
+      !m.err && m.hits === 1, m.err || '');
+    if (!m.err) {
+      const W = mkWorld(m.mod);
+      const r = await run(W);
+      ok('§5c NEGATIVE CONTROL: r3 authorizes THREE unattended turns against a cap of 1 — the authorized account is debited 0',
+        r.verdicts.every((v) => v.ok) && r.led['sub-AAA'] === undefined, JSON.stringify({ v: r.verdicts.map((x) => x.ok), led: r.led }));
+      ok('§5c NEGATIVE CONTROL: …and the account that was NEVER ASKED is debited all three (it now refuses its own turns)',
+        r.led['sub-BBB'] === 3, JSON.stringify(r.led));
+      ok('§5c NEGATIVE CONTROL: …and the guard SAYS it had to resolve the identity itself, three times',
+        W.guard.snapshot().chargesUnhinted === 3, String(W.guard.snapshot().chargesUnhinted));
+    }
+    // …and that line is r3's, byte for byte — not a shape this suite invented.
+    {
+      let shipped = '';
+      try { shipped = execFileSync('git', ['-C', REPO, 'show', '4ceba626:' + delPath], { env: GIT_ENV, maxBuffer: 64 * 1024 * 1024 }).toString(); } catch { }
+      if (!shipped) console.log('  · SKIP: git could not read 4ceba626:' + delPath + ' (the pre-fix bytes)');
+      else ok('§5c NEGATIVE CONTROL: the restored line is byte-identical to the SHIPPED one (the control reproduces r3, not an invention)',
+        shipped.includes(PRE) && !shipped.includes(FIX));
+    }
+  }
+
+  {   // THE COUNTER IS NOT VACUOUS: a charge that really does arrive with no
+      // identity must move it, or every "=== 0" above says nothing.
+    const W = mkWorld();
+    W.guard.note({ reason: 'peer-message', session: W.S });
+    ok('§5c CONTROL: the unhinted counter is reachable — a charge carrying only a session moves it',
+      W.guard.snapshot().chargesUnhinted === 1, String(W.guard.snapshot().chargesUnhinted));
+  }
+
+
+  // THE FOURTH PRODUCER, in the one shape where its own answer is not enough.
+  // auto-resume normally hands the guard the identity IT re-resolved after the
+  // pre-fire gate (`ident2`), so the guard's resolution never runs. But
+  // `identityFor` is allowed to answer NOTHING — `fireIdentity` is an optional
+  // dep and the engine's `fireIdentityFor` returns null for a session it cannot
+  // place — and then BOTH calls fell through to the guard, which re-resolved
+  // between them across `sendToSession`. The send is exactly where a stdout
+  // consumer can kick the pool (every `noteLive` producer calls `kickPoolEval`
+  // on the next line), so the window is real. `spendOk` now hands back the slot
+  // its verdict measured.
+  {
+    const mkAr = (out) => {
+      const dataDir = tmpdir('vs-spend-ar-slot-');
+      let live = { key: 'sub-AAA', name: 'AAA' };
+      const guard = guardMod.create({
+        dataDir, serverSetting: (k) => ({ 'spend.unattendedPerIdentityHour': 12 }[k]),
+        identityOf: () => live, getUserTodos: () => null, log: () => { },
+      });
+      const sessions = new Map();
+      const fired = [];
+      const ar = arMod.create({
+        dataDir, activeSessions: sessions, serverSetting: () => true, log: () => { },
+        // THE POOL MOVES DURING THE SEND — the frame is written, and the
+        // consumer that reads its first record re-decides the pool.
+        sendToSession: (id) => { fired.push(id); live = { key: 'sub-BBB', name: 'BBB' }; return true; },
+        fireIdentity: () => null,                     // the dep answers nothing: the guard resolves
+        authorizeSpend: (id, s, identity) => guard.authorize({ reason: 'auto-resume', session: s, sessionId: id, identity }),
+        noteSpend: (id, s, identity) => guard.note({ reason: 'auto-resume', session: s, identity }),
+      });
+      const s = { backend: 'claude', mode: 'chat', _webuiId: 'a1', _autoResume: true, name: 'c' };
+      sessions.set('a1', s);
+      ar.armIfEnabled('a1', s, Date.now() + 60_000, 'usage limit');
+      ar.tick(Date.now() + 120_000);
+      return { guard, fired, led: () => { const b = guard.snapshot().budget.identities; return Object.fromEntries(Object.entries(b).map(([k, v]) => [k, v.length])); } };
+    };
+    const W = mkAr();
+    await tick(40);
+    ok('§5c CONTROL: the continue is DELIVERED (an unfired producer proves nothing) and the pool moved during the send',
+      W.fired.length === 1);
+    ok('§5c auto-resume charges the slot ITS authorization resolved, even when its own dep could not name one',
+      W.led()['sub-AAA'] === 1 && W.led()['sub-BBB'] === undefined, JSON.stringify(W.led()));
+    ok('§5c …and the guard was never asked the identity question a second time',
+      W.guard.snapshot().chargesUnhinted === 0, String(W.guard.snapshot().chargesUnhinted));
+  }
+  // THE RULE IS THE SAME AT EVERY PAIR, and the other three producers are
+  // driven for it in their own sections (§4 auto-resume, §6 the Stop nudge,
+  // §9 the codex reset credit) — each asserts `chargesUnhinted === 0` on its
+  // own guard, which is the census a grep over five call sites cannot be:
+  // "no await in between" is a property of an arrangement of code, not of the
+  // question being asked once.
+}
+
 // ── §6 THE REAL STOP-NUDGE ROUTE ────────────────────────────────────────────
 console.log('\n§6 the Stop nudge: a persisted cooldown, an exit condition, and the ceiling');
 {
@@ -1020,6 +1262,21 @@ console.log('\n§6 the Stop nudge: a persisted cooldown, an exit condition, and 
   ok('§6 control: this identity has already spent its (now 1/hour) budget on the nudges above', budgetState.length >= 1);
   ok('§6 the ceiling refuses the nudge — silently to the AGENT (the hook has no "later"), never to the user',
     stopCheck().block === false);
+
+  // §5c's RULE, measured on THIS producer. The route now hands the charge the
+  // slot its own verdict resolved (`auth.identity`) instead of a bare session
+  // for the guard to resolve a SECOND time. Nothing awaits between those two
+  // lines TODAY — which is a property of this arrangement of the code, not of
+  // the question being asked once, so it is measured rather than reasoned.
+  // A FRESH GUARD WOULD MAKE THIS VACUOUS (its counter starts at 0), so the
+  // leg first drives a nudge that IS charged and asserts the charge landed.
+  settings['spend.unattendedPerIdentityHour'] = 12;
+  guard.flush(); guard = mkGuard();
+  const spentBefore = (guard.snapshot().budget.identities['sub-a'] || []).length;
+  ok('§6 control: with budget again the nudge is delivered and CHARGED (an unreached charge proves nothing)',
+    stopCheck().block === true && (guard.snapshot().budget.identities['sub-a'] || []).length === spentBefore + 1);
+  ok('§6 …and the guard never re-resolved the identity at CHARGE time (§5c\'s rule, on the real Stop-nudge route)',
+    guard.snapshot().chargesUnhinted === 0, String(guard.snapshot().chargesUnhinted));
 }
 
 // ── §7 OVERAGE ──────────────────────────────────────────────────────────────
@@ -1047,7 +1304,10 @@ console.log('\n§7 paid overage: refused for unattended spend, visible where the
     w.eng.overageState(w.eng.readRawUsageCache(w.M1)).inUse === 'yes' && w.eng.overageState(w.eng.readRawUsageCache(w.M2)).inUse === 'unknown');
   const um = read('src/lib/usage-meter.js'), ma = read('src/lib/manage-agents.js');
   ok('§7 PANEL: the usage popup renders the overage chip from that same PURE rule',
-    /import \{ overageState \} from '\.\.\/spend-authorizer\.js'/.test(um) && /overageChip\(overageState\(snap\)/.test(um));
+    // the NAMES, not the exact import line: r4 widened this import to bring in
+    // `spendControlState` beside it, and a pin on the whole line makes adding
+    // the next PURE verdict look like a regression
+    /import \{[^}]*\boverageState\b[^}]*\} from '\.\.\/spend-authorizer\.js'/.test(um) && /overageChip\(overageState\(snap\)/.test(um));
   ok('§7 PANEL: Manage Agents — where the owner picks a switch target — renders it too (design §1.4: provenance reached one panel of four)',
     /overageChip\(overageState\(u\)/.test(ma) && /acct-usage-overage/.test(ma));
   const chip = require(path.join(REPO, 'src/lib/usage-source.js'));
@@ -1056,6 +1316,132 @@ console.log('\n§7 paid overage: refused for unattended spend, visible where the
     && /paid overage in use — \$4\.25 \/ \$20\.00/.test(chip.overageChip(A.overageState({ overage: { inUse: true, asOf: Date.now() }, spend: { used: 4.25, limit: 20 } })).label));
   ok('§7 …and it says NOTHING about a record that stopped being refreshed (the chip tip promises a refusal that no longer happens)',
     chip.overageChip(A.overageState({ overage: { inUse: true, asOf: Date.now() - A.OVERAGE_STALE_MS - 1 } })) === null);
+}
+
+
+// ── §7b THE §1.4 ROW'S THIRD FIELD, AND A CENSUS THAT CAN SEE IT (r4) ───────
+// r3 marked the design's §1.4 overage row **CLOSED** while naming THREE
+// captured-and-unread fields — `cache.overage`, claude's `spend {used,limit,
+// pct}` and codex's `spendControlReached`. Two of them got the one reader; the
+// third kept exactly the two hits it shipped with, both in its WRITER
+// (src/harnesses/codex-quota.js:57 and :75). That is not a money leak — a codex
+// account past its spend control has its requests REJECTED rather than billed —
+// but the leak the row itself describes is real for it: nothing marks a window
+// spent, so `accountRemaining()` reads a friendly `utilization` and the panels
+// draw friendly donuts for an account that cannot serve a single request.
+//
+// The record was the defect. So the fix is both halves: the field gets the SAME
+// one reader (`spendControlState`, PURE, beside `overageState`), and the ROW
+// becomes ENFORCEABLE — this census walks the fields the row claims and fails
+// on any of them that no PURE reader in src/spend-authorizer.js reads.
+console.log('\n§7b the three fields the §1.4 CLOSED row names each have ONE reader');
+{
+  const auth = read('src/spend-authorizer.js');
+  // The three payload fields the row names, spelled as they appear on a cache
+  // snapshot. Each must be READ by the PURE module — that is what "one reader"
+  // means, and it is the claim the row makes.
+  const CLAIMED = [
+    { field: 'overage', re: /cache\.overage\b/, reader: 'overageState' },
+    { field: 'spend', re: /cache\.spend\b/, reader: 'overageState' },
+    { field: 'spendControlReached', re: /cache\.spendControlReached\b/, reader: 'spendControlState' },
+  ];
+  console.log('    §1.4 fields walked: ' + CLAIMED.map((c) => `${c.field}→${c.reader}`).join(', '));
+  const unread = CLAIMED.filter((c) => !c.re.test(auth) || !new RegExp('function ' + c.reader + '\\s*\\(').test(auth));
+  ok('§7b every field the CLOSED row names is read by a PURE reader in the authorizer',
+    unread.length === 0, unread.map((c) => c.field).join(', '));
+  // NEGATIVE CONTROL: the census must be able to SEE an unread field, or the
+  // assert above is the r3 verdict again in a new spelling.
+  {
+    const preFix = auth.replace(/function spendControlState\s*\(/, 'function vsRetiredSpendControlState(');
+    const wouldFail = CLAIMED.filter((c) => !c.re.test(preFix) || !new RegExp('function ' + c.reader + '\\s*\\(').test(preFix));
+    ok('§7b NEGATIVE CONTROL: with the reader retired the census names exactly that field (r3\'s real state)',
+      wouldFail.length === 1 && wouldFail[0].field === 'spendControlReached', wouldFail.map((c) => c.field).join(','));
+  }
+  // …and the ROW itself must name the readers, so the record cannot claim more
+  // than the code does. A doc pin, deliberately: the row is what the next round
+  // reads to decide what is left to build.
+  {
+    const doc = read('docs/design-account-hardening.md');
+    const row = doc.split('\n').find((l) => /Overage is captured and discarded/.test(l)) || '';
+    ok('§7b the §1.4 row exists and is a single table row (the census has something to check)', row.length > 200);
+    ok('§7b …and its verdict names the reader of EVERY field it claims',
+      CLAIMED.every((c) => row.includes(c.reader)),
+      CLAIMED.filter((c) => !row.includes(c.reader)).map((c) => c.reader).join(', '));
+    ok('§7b NEGATIVE CONTROL: r3\'s verdict text (one reader named) fails that check',
+      !CLAIMED.every((c) => '**CLOSED 2026-09-08**: one reader (`overageState`, PURE) asked by the authorizer'.includes(c.reader)));
+  }
+
+  // THE DECISION, driven on the PURE rule.
+  const ID = { key: 'k', name: 'A' };
+  const scAuth = (cache, now = Date.now()) => A.authorizeUnattendedSpend({
+    reason: 'auto-resume', identity: ID, state: A.emptyBudget(),
+    spendControl: A.spendControlState(cache, { now }), now,
+  });
+  const now = Date.now();
+  ok('§7b a codex account that has REACHED its spend control refuses unattended spend, by NAME',
+    scAuth({ spendControlReached: true, fetchedAt: now }).why === 'spend-control-reached');
+  ok('§7b …and the refusal says WHY a turn there is worthless (rejected, not billed)',
+    /requests are rejected/.test(scAuth({ spendControlReached: true, fetchedAt: now }).detail));
+  ok('§7b P6: `false` and a missing field are not claims and never block',
+    scAuth({ spendControlReached: false, fetchedAt: now }).ok === true
+    && scAuth({ fetchedAt: now }).ok === true && scAuth(null).ok === true);
+  ok('§7b the state is THREE-state and keeps what the record STATED',
+    A.spendControlState({ spendControlReached: true, fetchedAt: now }).reached === 'yes'
+    && A.spendControlState({ spendControlReached: false, fetchedAt: now }).reached === 'no'
+    && A.spendControlState({}).reached === 'unknown');
+  // ONLY THE CLAIM THAT BLOCKS NEEDS A DATE — r2's rule, applied to the twin,
+  // on the SAME constant (a second window for one physical fact is a twin).
+  {
+    const stale = { spendControlReached: true, fetchedAt: now - A.OVERAGE_STALE_MS - 1 };
+    const undated = { spendControlReached: true };
+    ok('§7b a STALE claim neither blocks nor claims, and says which rung expired it',
+      scAuth(stale, now).ok === true && A.spendControlState(stale, { now }).reached === 'unknown'
+      && A.spendControlState(stale, { now }).evidence === 'stale'
+      && A.spendControlState(stale, { now }).stated === 'yes');
+    ok('§7b …and an UNDATED one cannot claim the present either',
+      scAuth(undated, now).ok === true && A.spendControlState(undated, { now }).evidence === 'undated');
+    ok('§7b it uses the SAME staleness constant as its sibling (one physical fact, one window)',
+      /staleMs = OVERAGE_STALE_MS/.test(auth.slice(auth.indexOf('function spendControlState'), auth.indexOf('function spendControlState') + 400)));
+    ok('§7b `reached:no` is deliberately NOT date-bounded (it blocks nothing, so no decision changes)',
+      A.spendControlState({ spendControlReached: false, fetchedAt: now - A.OVERAGE_STALE_MS * 4 }, { now }).reached === 'no');
+  }
+  // IT IS NOT THE OVERAGE CLASS: the money opt-in must not unlock it.
+  ok('§7b the overage OPT-IN does not unlock it — that setting consents to SPENDING, not to being refused by the vendor',
+    A.authorizeUnattendedSpend({
+      reason: 'auto-resume', identity: ID, state: A.emptyBudget(), overagePolicy: 'allow',
+      spendControl: A.spendControlState({ spendControlReached: true, fetchedAt: now }, { now }), now,
+    }).why === 'spend-control-reached');
+
+  // THE ORCH HALF: one cache read, one reader, reaching the real gate.
+  {
+    const dataDir = tmpdir('vs-spend-sc-');
+    const caches = { 'cx-a': { spendControlReached: true, fetchedAt: Date.now() }, 'cx-b': { spendControlReached: false, fetchedAt: Date.now() } };
+    const mk = (key) => guardMod.create({
+      dataDir, serverSetting: () => undefined, identityOf: () => ({ key, name: key }),
+      readCacheFor: (k) => caches[k] || null, getUserTodos: () => null, log: () => { },
+    });
+    const gA = mk('cx-a'), gB = mk('cx-b');
+    ok('§7b the guard exposes the ONE reader and it agrees with the raw cache',
+      gA.spendControlFor('cx-a').reached === 'yes' && gA.spendControlFor('cx-b').reached === 'no');
+    ok('§7b …and a REAL authorize on that account is refused, while its sibling is allowed (the reader is REACHED)',
+      gA.authorize({ reason: 'auto-resume', session: {} }).why === 'spend-control-reached'
+      && gB.authorize({ reason: 'auto-resume', session: {} }).ok === true);
+  }
+
+  // BOTH PANELS say it — the same PURE verdict, so a chip can never disagree
+  // with the gate (the §1.4 "provenance reached one panel of four" rule).
+  {
+    const um = read('src/lib/usage-meter.js'), ma = read('src/lib/manage-agents.js');
+    const chip = require(path.join(REPO, 'src/lib/usage-source.js'));
+    ok('§7b PANEL: the usage popup renders the spend-control chip from that same PURE rule',
+      /spendControlChip\(spendControlState\(snap\)/.test(um) && /\bspendControlState\b/.test(um));
+    ok('§7b PANEL: Manage Agents — where the owner picks a switch target — renders it too',
+      /spendControlChip\(spendControlState\(u\)/.test(ma));
+    ok('§7b the chip says nothing when the control is off or unknown, and names it when it is on',
+      chip.spendControlChip({ reached: 'no' }) === null && chip.spendControlChip({ reached: 'unknown' }) === null
+      && chip.spendControlChip(null) === null
+      && /spend control reached/.test(chip.spendControlChip({ reached: 'yes' }).label));
+  }
 }
 
 // ── §8 THE EDF RESERVE FLOOR ────────────────────────────────────────────────
@@ -1277,6 +1663,11 @@ console.log('\n§9 fail closed: an authorizer that throws spends nothing (P8)');
   ok('§9 …and the ledger CHARGED the credit that was spent and charged nothing for the one refused',
     (ledOf(allowed.w).budget.instance || []).length === 1 && (ledOf(denied.w).budget.instance || []).length === 0,
     JSON.stringify({ allowed: (ledOf(allowed.w).budget.instance || []).length, denied: (ledOf(denied.w).budget.instance || []).length }));
+  // §5c's rule on the FOURTH producer: the engine hands the charge the slot its
+  // own verdict resolved (`av.identity`). The positive control above is what
+  // makes this non-vacuous — a charge really happened on that guard.
+  ok('§9 …and the guard never re-resolved the identity at CHARGE time (§5c\'s rule, on the real reset-credit path)',
+    allowed.w.eng.spendGuard.snapshot().chargesUnhinted === 0, String(allowed.w.eng.spendGuard.snapshot().chargesUnhinted));
 }
 
 console.log(`\n${fail ? fail + ' FAILED' : 'ALL PASS'} (${pass})`);

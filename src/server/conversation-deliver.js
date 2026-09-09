@@ -219,7 +219,21 @@ function create({ dataDir, peerMsg, getHosts, getConvIndex, serverSetting, activ
       try { v = authorizeSpend({ reason: spendReason, session, identity, cid }); }
       catch (e) { log('[deliver] spend authorizer threw (refusing, the stash keeps the message):', e.message); return { ok: false, reason: 'spend authorizer failed: ' + e.message, refused: 'spend' }; } // FAIL CLOSED (P8)
       if (v && v.ok === false) return { ok: false, reason: `spend budget: ${v.detail || v.why}`, refused: 'spend', why: v.why, retryAfter: v.retryAfter || 0 };
-      charged = { reason: spendReason, session, identity };
+      // CHARGE WHAT YOU AUTHORIZED (r4, reproduced). `identity` is null on the
+      // local-session branch, and handing that null to the charge made
+      // `spend-guard.note()` run `identityOf(session)` A SECOND TIME, at charge
+      // time — the one question this design exists to have exactly one answer
+      // to, asked twice, with a re-point allowed in between. The rpc rung makes
+      // the gap wide on purpose: the charge is DEFERRED to settleRpcDelivery,
+      // up to SETTLE_TTL_MS (120 s) later, and a codex session's slot follows
+      // the pool DEFAULT (the per-session pass skips codex), which the engine
+      // re-decides on its 30 s timer. MEASURED with the real guard + real
+      // ladder, cap 1/hour, identityOf flipping A→B across that window: three
+      // deliveries authorized on A (which was debited 0, so its ceiling never
+      // bound) and debited to B, which was never asked and now refuses its own
+      // legitimate unattended turns. The PURE verdict already carries the slot
+      // it measured — throwing it away was the whole defect.
+      charged = { reason: spendReason, session, identity: (v && v.identity) || identity };
     }
     // CHARGED WHERE THE FRAME LEAVES US. For rungs 0/1/2 that is the delivery;
     // for the rpc-queue rung the wrapper may still answer `ok:false` and the

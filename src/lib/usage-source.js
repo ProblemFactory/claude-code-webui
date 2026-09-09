@@ -108,3 +108,19 @@ export function overageChip(state, { t = (s) => s } = {}) {
     tip: t('Automatic turns are refused on this account while it bills paid overage (Settings → Spending).'),
   };
 }
+
+// ── SPEND CONTROL (the §1.4 row's THIRD field, r4) ──────────────────────────
+// codex's `spend_control_reached` was captured and read by NOBODY, exactly as
+// `cache.overage` had been — and it is worse to miss on a panel, because the
+// donuts stay friendly: nothing marks a window spent, so the account ranks as
+// the one with the most headroom while every request it serves is REJECTED.
+// The verdict is the PURE `spendControlState`, the same one the authorizer
+// asks, so the chip and the gate cannot disagree. Returns null when there is
+// nothing to say ('no' AND 'unknown').
+export function spendControlChip(state, { t = (s) => s } = {}) {
+  if (!state || state.reached !== 'yes') return null;
+  return {
+    label: t('spend control reached'),
+    tip: t('This account has reached its spend control, so its requests are rejected — automatic turns on it are refused.'),
+  };
+}

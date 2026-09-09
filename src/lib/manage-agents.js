@@ -11,8 +11,8 @@ import { permissionRulesCaps } from './agent-meta.js';
 // like search-card.js): the menu can only offer what the server will run, and
 // a rejected candidate is NAMED here rather than silently missing.
 import { oraclesFor, rejectedFor, blockingRejectionsFor } from '../local-oracles.js';
-import { overageChip } from './usage-source.js';
-import { overageState } from '../spend-authorizer.js'; // the ONE overage verdict (PURE)
+import { overageChip, spendControlChip } from './usage-source.js';
+import { overageState, spendControlState } from '../spend-authorizer.js'; // the ONE overage / spend-control verdict (PURE)
 
 // Roster order = TYPE, never add-order (2.268.5): pool → subscription → API
 // key, name-sorted within a type. ONE comparator for both rosters (2.369.18 —
@@ -702,7 +702,11 @@ export function installManageAgents(App, ctx = {}) {
     // switch target, and an overage member's donuts are the friendliest ones on
     // the row while every token it serves is billed pay-per-use.
     const ovc = overageChip(overageState(u), { t });
-    const ovHtml = ovc ? `<span class="acct-usage-overage" title="${escHtml(ovc.tip)}">${escHtml(ovc.label)}</span>` : '';
+    // …and the harness's own refusal fact (§1.4's third field): nothing marks a
+    // window spent for it, so this row's donuts stay the friendliest ones here.
+    const scc = spendControlChip(spendControlState(u), { t });
+    const ovHtml = (ovc ? `<span class="acct-usage-overage" title="${escHtml(ovc.tip)}">${escHtml(ovc.label)}</span>` : '')
+      + (scc ? `<span class="acct-usage-overage" title="${escHtml(scc.tip)}">${escHtml(scc.label)}</span>` : '');
     return `<span class="acct-usage">${parts.join('')}<span class="acct-usage-age" title="${escHtml(ageTitle)}"><span>${ageLabel}</span>${eta}</span></span>${ovHtml}${mini}`;
   },
 
