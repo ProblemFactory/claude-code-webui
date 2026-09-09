@@ -141,7 +141,14 @@ const meta = {
   // never have the method. It DOES report the session's live permission MODE
   // (session/set_mode + current_mode_update), which is the one permission fact
   // the protocol does carry.
-  caps: { frameFile: true, peerMessage: false, inputQueue: true, queueVerbs: ACP_QUEUE_VERBS, permissionRules: true },
+  // queueResync: this wrapper serves `queue-resync` — "state your queue again,
+  // out loud". `queue_changed` on stdout is the queue's ONLY channel to the
+  // orchestrator and stdout is a RING here (MAX_BUFFER, head-dropped), so a
+  // server that restarts rebuilds a normalizer that has never seen one and
+  // reports an EMPTY queue it merely guessed. The per-PROCESS skew law again:
+  // an older wrapper answers an unknown verb with a VISIBLE error notice
+  // (`unknown-verb` below), so the server must not ask one.
+  caps: { frameFile: true, peerMessage: false, inputQueue: true, queueVerbs: ACP_QUEUE_VERBS, permissionRules: true, queueResync: true },
   queue: [],
 };
 
@@ -694,6 +701,11 @@ async function handleInput(msg) {
       return;
     }
     case 'queue-op': handleQueueOp(msg); return;
+    // RE-STATE THE QUEUE (2026-09-09). `publishQueue` here has no fingerprint
+    // dedup, so it is already a re-statement; an EMPTY answer is the point (a
+    // rebuilt server's `queue: []` is a guess, and the client shows no rows
+    // until this lands). No RPC: promptQueue IS the queue.
+    case 'queue-resync': publishQueue(); return;
     case 'permission-response': resolvePermission(msg); return;
     case 'set-model': await applyModel(msg.model); return;
     case 'set-effort': await applyEffort(msg.effort); return;
@@ -728,7 +740,7 @@ async function handleInput(msg) {
       return;
     }
     default:
-      notice('error', `Unknown stdin verb "${msg.type}" — ignored (ACP wrapper serves chat-input/interrupt/queue-op/permission-response/set-model/set-effort/set-mode/set-permission-mode/peer-message/read-permission-rules/_frame_file).`, 'unknown-verb');
+      notice('error', `Unknown stdin verb "${msg.type}" — ignored (ACP wrapper serves chat-input/interrupt/queue-op/queue-resync/permission-response/set-model/set-effort/set-mode/set-permission-mode/peer-message/read-permission-rules/_frame_file).`, 'unknown-verb');
   }
 }
 

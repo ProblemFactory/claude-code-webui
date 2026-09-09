@@ -223,21 +223,44 @@ console.log('— ③ the ws case gates on the caps row AND the running wrapper')
   ok('client: an attach failure still takes the view-only rescue path', /if \(!this\._tryViewOnlyRescue\(\)\)/.test(cv));
   // the queue rides EVERY window-birth payload (the 2.368.4 rule)
   ok("attach carries the queue from the normalizer", /queue: session\._normalizer\?\.queueState\?\.\(\) \|\| \[\]/.test(read('src/ws-handler.js')));
-  ok("…and the wrapper's queue advert — SUPPORTED **and the verb list** — rides the SAME payload (the client cannot read a sidecar), and it is computed from the ONE sidecar read the attach handler already made (2.369.16: no second /proc walk here)", /const wcapsAttach = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);[\s\S]{0,3000}const wc = wcapsAttach;[\s\S]{0,700}return \{ queueSupported: !!served, queueVerbs: served \|\| null \};/.test(read('src/ws-handler.js')));
+  ok("…and the wrapper's queue advert — SUPPORTED **and the verb list** — rides the SAME payload (the client cannot read a sidecar), and it is computed from the ONE sidecar read the attach handler already made (2.369.16: no second /proc walk here)", /const wcapsAttach = wrapperCaps\(BUFFERS_DIR, data\.sessionId, session\.socketPath\);[\s\S]{0,600}const queueAdvert = \(\(\) => \{\s*\n\s*const wc = wcapsAttach;[\s\S]{0,2000}return \{ queueSupported: !!served, queueVerbs: served \|\| null, queueKnown: !served \|\| published \};/.test(read('src/ws-handler.js')));
   { const wsc = read('src/ws-create.js');
     ok("…'created' carries all three, and says the fresh wrapper has reported NOTHING yet", /queue: \[\],/.test(wsc) && /queueSupported: false,[\s\S]{0,400}queueVerbs: null,/.test(wsc)); }
-  ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST', /if \('queueSupported' in meta\) this\._setQueueSupported\(meta\.queueSupported, \('queueVerbs' in meta\) \? meta\.queueVerbs : undefined\);\s*\n\s*if \('queue' in meta\) this\._setQueue\(meta\.queue\);/.test(cv));
+  // …and `queueKnown` carries its OWN `in meta` test even though it is a
+  // modifier read inside `queue`'s guard: test-auto-resume's drift guard reads
+  // every `meta.<key>` in this body and requires one (a partial meta must never
+  // reset a fact), and spelling the absent case out is also how "an older
+  // server's payload is KNOWN" stops being an implicit truth of `!== false`.
+  // Stated as ORDER + SHAPE rather than "these two lines within N characters":
+  // the claim is that the advert is applied FIRST, and a byte budget between
+  // them turns every added comment into a red suite (it did, twice).
+  {
+    const advert = cv.indexOf("if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined, { at: rxAt });");
+    const queue = cv.indexOf("if ('queue' in meta) this._setQueue(meta.queue, {");
+    ok('the client applies both through the carries-the-key guard, advert (and its verb list) FIRST',
+      advert > 0 && queue > advert && /if \('queue' in meta\) this\._setQueue\(meta\.queue, \{\s*\n\s*known: \('queueKnown' in meta\) \? meta\.queueKnown !== false : true,/.test(cv),
+      JSON.stringify({ advert, queue }));
+    // …and BOTH are judged by the SAME arrival stamp (r3). The advert is not a
+    // lesser fact: a stale `queueSupported:false` collapses `_queueCaps()` to
+    // NO_QUEUE_CAPS and the composer then renders zero rows — the identical
+    // user-visible outcome r2's row guard exists to prevent. So `rxAt` is
+    // computed ONCE, above the advert, and handed to both.
+    const stamp = cv.indexOf("const rxAt = Number.isFinite(rxTick) ? rxTick : performance.now();");
+    ok('…and the arrival stamp is computed ONCE, ABOVE the advert, and passed to BOTH queue writers (an advert judged by "whatever ran last" empties the strip just as thoroughly as stale rows)',
+      stamp > 0 && stamp < advert && /at: rxAt,\n/.test(cv), JSON.stringify({ stamp, advert, queue }));
+  }
   // ONE WRITER for the capability, because a FLIP has a consequence (the
   // rendered chips must be re-applied — round-2's MAJOR). A bare assignment
   // anywhere else silently skips it.
   ok('`_queueSupported` has exactly ONE writer besides its initialiser (_setQueueSupported), so every flip is observable',
-    (cv.match(/this\._queueSupported = /g) || []).length === 2 && /_setQueueSupported\(next, verbs\) \{[\s\S]{0,700}this\._queueSupported = val;\s*\n\s*this\._queueVerbsServed = list;\s*\n\s*this\._refreshQueueChips\(\);/.test(cv),
+    (cv.match(/this\._queueSupported = /g) || []).length === 2 && /_setQueueSupported\(next, verbs, \{ at = performance\.now\(\) \} = \{\}\) \{[\s\S]{0,900}this\._queueSupported = val;\s*\n\s*this\._queueVerbsServed = list;\s*\n\s*this\._refreshQueueChips\(\);/.test(cv),
     (cv.match(/this\._queueSupported = [^\n]*/g) || []));
   ok('…and the VERB LIST shares that one writer (a wrapper that gains verbs without changing `supported` must re-apply the chips too)',
     (cv.match(/this\._queueVerbsServed = /g) || []).length === 2 && /JSON\.stringify\(list\) === JSON\.stringify\(this\._queueVerbsServed\)/.test(cv),
     (cv.match(/this\._queueVerbsServed = [^\n]*/g) || []));
   ok("…and the live meta path uses it too (a wrapper's baseline queue_changed also arrives after the bubbles), carrying the verbs it published", /if \(op\.supported\) this\._setQueueSupported\(true, Array\.isArray\(op\.verbs\) \? op\.verbs : LEGACY_QUEUE_VERBS\.slice\(\)\);/.test(cv));
-  ok("a queue op's RESULT reaches the strip as its own meta op (a row that spins forever is the silent failure wearing a spinner)", /if \(op\.subtype === 'queue-result'\) \{ this\._chatInput\?\.setQueueOpResult\(op\.id, op\.ok !== false, op\.text \|\| ''\); return; \}/.test(cv));
+  ok("a queue op's RESULT reaches the strip as its own meta op (a row that spins forever is the silent failure wearing a spinner)", /if \(op\.subtype === 'queue-result'\) \{[\s\S]{0,700}this\._chatInput\?\.setQueueOpResult\(op\.id, op\.ok !== false, op\.text \|\| ''\);\s*\n\s*return;\s*\n\s*\}/.test(cv));
+  ok("…and a 'gone' verdict REMOVES the row first (the wrapper is authoritative about absence; a red ghost is the incident)", /if \(op\.ok === false && op\.reason === 'gone'\) this\._dropQueueRow\(op\.id\);/.test(cv));
   ok('wiring pin: the strip, the row keyboard and the chip send the SAME ws message through one method', /const frame = \{ type: 'queue-op', sessionId: this\.sessionId, op, id: id \|\| null \};/.test(cv) && (cv.match(/type: 'queue-op'/g) || []).length === 1);
   ok("…and the verb's own argument rides it: afterId only when the caller supplied one (null = the front), text only when it is a string", /if \(extra && 'afterId' in extra\) frame\.afterId = extra\.afterId === null \? null : String\(extra\.afterId\);/.test(cv) && /if \(extra && typeof extra\.text === 'string'\) frame\.text = extra\.text;/.test(cv));
   // NO DEAD CONTROLS: the chip is clickable only where the VIEW says steer
@@ -4592,5 +4615,1181 @@ console.log('— ⑨ steered messages: one bubble each, live and after a reload'
     try { fs.rmSync(patchDir, { recursive: true, force: true }); } catch {}
   }
 }
+// ── ⑬ THE QUEUE ACROSS A RESTART (2026-09-09, the ghost-row incident) ──────
+// A codex session's strip showed a message that had been steered away 58
+// minutes and one server restart earlier; clicking ✕ on it answered "no longer
+// queued — it already ran" and painted the row RED, where it stayed.
+//
+// Three separable defects, one per sub-leg:
+//   a. the server's post-restart `queue: []` is a GUESS — the queue's only
+//      channel is a stdout record and stdout is a RING, so the rebuilt
+//      normalizer has never seen a publication;
+//   b. the attach payload never said which it was — `[]` looked like a fact,
+//      and nothing asked the one process that knows;
+//   c. the same-epoch RECONNECT never applied the payload's live half at all,
+//      so a strip survived every reconnect no matter what the server said; and
+//      a 'gone' verdict MARKED the row instead of removing it.
+//
+// HONEST BOUNDARY: which of that window's reconnects it actually took at 05:20
+// is not recoverable from the artifacts, so (c) is asserted as a REACHABLE
+// CLASS, not as the chain — the delivery-stall watchdog calls `_reattach()`
+// with the epoch already current, and any reconnect without a server restart
+// is same-epoch by definition. What the artifacts DO say is measured in (a).
+console.log('— ⑬ the queue across a restart: a guess says so, and the wrapper is asked');
+{
+  const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+
+  // ⑬a THE RING. Both wrappers that own a queue keep stdout bounded by dropping
+  // the HEAD, so a `queue_changed` scrolls out of the file a restarted server
+  // rebuilds from. Pinned in both, because the property is what makes (b) true.
+  for (const f of ['data/bin/codex-chat-wrapper.js', 'data/bin/acp-wrapper.js']) {
+    const w = read(f);
+    ok(`${path.basename(f)}: stdout is a RING that drops the HEAD (${/const MAX_BUFFER = (\d+);/.exec(w)?.[1]} bytes) — a queue publication is a record like any other and scrolls out`,
+      /const MAX_BUFFER = \d+;/.test(w) && /if \(buffer\.length > MAX_BUFFER\) \{[\s\S]{0,240}buffer = buffer\.slice\(idx \+ 1\);/.test(w));
+  }
+  // …so the SAME records, minus the publication the ring dropped, rebuild into
+  // a normalizer whose `[]` is indistinguishable from a real empty queue.
+  {
+    const now = new Date().toISOString();
+    const rec = (payload) => ({ timestamp: now, type: 'event_msg', payload });
+    const bubble = { timestamp: now, type: 'response_item', payload: { type: 'message', role: 'user', webui_msg_id: 'mq', content: [{ type: 'input_text', text: 'queued words' }] } };
+    const publication = rec({ type: 'queue_changed', items: [{ id: 'qA', msgId: 'mq', preview: 'queued words', ts: 1, kind: 'user' }], turn_id: 't1', verbs: ['remove', 'steer'] });
+    const mmFull = new CodexMessageManager('restart-full');
+    await mmFull.convertHistoryAsync([bubble, publication]);
+    ok('BEFORE the ring drops it: a rebuild that still sees the publication knows the queue (1 row)',
+      mmFull.queuePublished() === true && mmFull.queueState().length === 1, JSON.stringify(mmFull.queueState()));
+    const mmRung = new CodexMessageManager('restart-rung');
+    await mmRung.convertHistoryAsync([bubble]);   // the publication scrolled out
+    ok('AFTER: the same conversation without it reports an EMPTY queue and knows it never heard one — `queuePublished()` is the ONLY thing separating a fact from a guess',
+      mmRung.queuePublished() === false && mmRung.queueState().length === 0,
+      JSON.stringify({ published: mmRung.queuePublished(), state: mmRung.queueState() }));
+    ok('…and that guess is BYTE-IDENTICAL to a genuinely empty queue (which is why the payload has to say which one it is)',
+      JSON.stringify(mmRung.queueState()) === JSON.stringify(new CodexMessageManager('empty').queueState()));
+  }
+
+  // ⑬b THE ATTACH DECISION, executed. The advert block is lifted out of the
+  // real ws-handler source and RUN (the suite's `queueVerbRefusal` idiom) —
+  // a regex alone cannot show that a rebuilt normalizer answers `queueKnown:false`.
+  {
+    const src = read('src/ws-handler.js');
+    const body = /const queueAdvert = \(\(\) => \{([\s\S]*?)\n              \}\)\(\);/.exec(src);
+    ok('the attach handler computes the queue advert in ONE named block (queueAdvert)', !!body);
+    const { LEGACY_QUEUE_VERBS } = require(path.join(REPO, 'src/backend-caps.js'));
+    const advert = new Function('wcapsAttach', 'session', 'LEGACY_QUEUE_VERBS', body[1]);
+    const SEVEN = ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'];
+    const sidecar = { inputQueue: true, queueVerbs: SEVEN, queueResync: true };
+    const nothing = { inputQueue: false, queueVerbs: [] };
+    const mmLive = new CodexMessageManager('adv-live');
+    mmLive.processLive({ timestamp: new Date().toISOString(), type: 'event_msg', payload: { type: 'queue_changed', items: [], turn_id: 't1', verbs: SEVEN } });
+    const mmCold = new CodexMessageManager('adv-cold');   // rebuilt: never saw one
+    const live = advert(sidecar, { _normalizer: mmLive }, LEGACY_QUEUE_VERBS);
+    const cold = advert(sidecar, { _normalizer: mmCold }, LEGACY_QUEUE_VERBS);
+    const bare = advert(nothing, { _normalizer: null }, LEGACY_QUEUE_VERBS);
+    ok('a wrapper this server HAS heard publish ⇒ the queue is a FACT (queueKnown true)',
+      live.queueSupported === true && live.queueKnown === true, JSON.stringify(live));
+    ok('THE RESTART SHAPE: the sidecar still adverts the controls, but the rebuilt normalizer heard nothing ⇒ queueKnown FALSE (the payload stops presenting a guess as a fact)',
+      cold.queueSupported === true && cold.queueKnown === false, JSON.stringify(cold));
+    ok('…and the CONTROLS are unaffected — "we do not know the rows" is not "you may not act" (the verbs come from the wrapper\'s own file)',
+      JSON.stringify(cold.queueVerbs) === JSON.stringify(SEVEN), JSON.stringify(cold));
+    ok('a harness with no queue surface at all answers KNOWN — there is nothing to be ignorant of, and an "unknown" there would suppress nothing',
+      bare.queueSupported === false && bare.queueKnown === true, JSON.stringify(bare));
+    // …and the ASK is gated on BOTH the harness row and the per-PROCESS advert.
+    ok('the attach ASKS the wrapper to re-state ONLY when it does not know, and only a wrapper that ADVERTS the verb (an ACP wrapper too old for it answers with a VISIBLE error card)',
+      /if \(!queueAdvert\.queueKnown && session\.pty && wcapsAttach\.queueResync\s*\n\s*&& \(capsOf\(session\.backend\)\.inputModes\?\.queueVerbs \|\| \[\]\)\.length\) \{/.test(src));
+    ok('…through the ADAPTER, like every other stdin verb (the wire spelling lives with formatQueueOp, never inline here)',
+      /const ad = adapterRegistry\.get\(session\.backend\);\s*\n\s*if \(ad\) session\.pty\.write\(ad\.formatQueueResync\(\) \+ '\\n'\);/.test(src));
+    ok("'created' says the same: a RESUMED thread hands the new wrapper a queue it never filled, so the `[]` there is a placeholder too",
+      /queueKnown: false,/.test(read('src/ws-create.js')));
+  }
+
+  // ⑬c THE CLIENT. Driven through the REAL `_reattach` with a fake ws, because
+  // the defect IS that branch: the same-epoch reconnect applied `chatStatus`
+  // and nothing else, so the strip kept rows the server no longer knew about.
+  {
+    const { ChatView } = await import(path.join(REPO, 'src/lib/chat-view.js'));
+    const ROW = { id: 'qGhost', msgId: 'mq', preview: 'the steered message', text: 'the steered message', kind: 'user' };
+    const SEVEN = ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'];
+    // The payload a server that has just RESTARTED sends on re-attach: the
+    // same epoch (nothing forces a full reset), the controls still advertised,
+    // and a queue it is honest about not knowing.
+    const attached = (over = {}) => ({
+      type: 'attached', sessionId: 'sess-ghost', normEpoch: 7,
+      chatStatus: {}, isStreaming: false,
+      queue: [], queueKnown: false, queueSupported: true, queueVerbs: SEVEN, ...over,
+    });
+    const drive = async (CV, payload) => {
+      const strip = { items: null, caps: null };
+      let handler = null;
+      const view = Object.assign(Object.create(CV.prototype), {
+        sessionId: 'sess-ghost', _normEpoch: 7, _readOnly: false, _disconnected: false, _disposed: false,
+        _queue: [ROW], _queueSupported: true, _queueVerbsServed: SEVEN.slice(), _messages: [], _elements: new Map(),
+        _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+        _chatInput: { setQueue: (items, caps) => { strip.items = items; strip.caps = caps; }, setDisconnected() {}, setQueueOpResult() {} },
+        _renderers: { appendSystem() {} },
+        ws: { send() {}, onGlobal: (h) => { handler = h; }, offGlobal() {} },
+        _statusBar: { setResponseStyleLive() {}, setTurnState() {}, setAutoResume() {}, setSpawnOrigin() {} },
+        applyStatus() {}, _onServerStreamLabel() {}, _hideTyping() {}, _reattachCatchUp() {},
+        _onToolsInProgress() {}, _drainPendingSteers() {}, _refreshQueueChips() {}, _applyQueueChipsNow() {},
+      });
+      CV.prototype._reattach.call(view, false);
+      ok('CONTROL: the re-attach armed its `attached` handler on the socket', typeof handler === 'function');
+      handler(payload);
+      await new Promise((r) => setTimeout(r, 60));
+      // DISARM the ladder this drive armed: `_reattach` leaves a 20s
+      // `checkOrRetry` timer behind, and its first line is a generation check —
+      // bump the generation and it stands down instead of declaring these
+      // half-built views dead 20 seconds later (which it did, inside ⑭'s
+      // minute, as `this._chatInput.setReadOnly is not a function`).
+      view._reattachGen = (view._reattachGen || 0) + 1;
+      return { view, strip };
+    };
+    {
+      const { view, strip } = await drive(ChatView, attached());
+      ok(`THE FIX: a re-attach whose queue the server does not know CLEARS the strip (${view._queue.length} rows) — a row nobody can act on is the one state that produces a wrong action`,
+        view._queue.length === 0 && Array.isArray(strip.items) && strip.items.length === 0,
+        JSON.stringify({ view: view._queue, strip: strip.items }));
+      ok('…and the CONTROLS stay on (the wrapper still serves them; the rows come back one round trip later)',
+        !!strip.caps && strip.caps.queueOps === true && strip.caps.steer === true, JSON.stringify(strip.caps));
+    }
+    {
+      // A payload that DOES know its queue re-states it — the "unknown" branch
+      // must not be a blanket clear, or the answer would never render.
+      const { view, strip } = await drive(ChatView, attached({ queue: [ROW], queueKnown: true }));
+      ok('NEGATIVE CONTROL: a KNOWN queue on the same path renders its rows (the branch is about ignorance, not about clearing)',
+        view._queue.length === 1 && strip.items.length === 1 && strip.items[0].id === 'qGhost', JSON.stringify(strip.items));
+    }
+    {
+      // …and an OLD server (no `queueKnown` on the wire) is read as KNOWN —
+      // the behaviour this branch always had.
+      const p = attached({ queue: [ROW] }); delete p.queueKnown;
+      const { view } = await drive(ChatView, p);
+      ok('a payload from before the field is read as KNOWN (a missing key never means "unknown")', view._queue.length === 1);
+    }
+    // PRE-FIX CONTROL: the product source with ONLY the same-epoch
+    // `_applyLiveMeta(msg)` removed. The row survives the re-attach — the
+    // incident, reproduced from the real module.
+    {
+      const cvSrc = read('src/lib/chat-view.js');
+      const LINE = '      this._applyLiveMeta(msg);\n';
+      const at = cvSrc.indexOf('      if (msg.chatStatus) this.applyStatus(msg.chatStatus);');
+      ok('the pre-fix control patches the REAL line (present in the same-epoch branch of _reattach)',
+        at > 0 && cvSrc.indexOf(LINE, at) > at);
+      const cut = cvSrc.slice(0, at) + cvSrc.slice(at).replace(LINE, '');
+      ok('CONTROL: exactly one line was removed', cut.length === cvSrc.length - LINE.length);
+      // the copy must sit BESIDE the original: every relative import resolves
+      // from its own directory (the suite's own patched-copy idiom).
+      const copy = path.join(REPO, 'src/lib', `.chat-view.prefix-${process.pid}.js`);
+      fs.writeFileSync(copy, cut);
+      try {
+        const { ChatView: Pre } = await import(copy);
+        const { view, strip } = await drive(Pre, attached());
+        ok(`PRE-FIX: the same re-attach leaves the ghost row on the strip (${view._queue.length} row, the composer was never even told) — the reported shape`,
+          view._queue.length === 1 && strip.items === null,
+          JSON.stringify({ view: view._queue.map((r) => r.id), strip: strip.items }));
+      } finally {
+        try { fs.unlinkSync(copy); } catch { }
+      }
+    }
+    // ⑬c′ 'gone' REMOVES the row. The wrapper is authoritative about absence,
+    // and its own follow-up `refreshQueue()` cannot correct us (publishQueue
+    // dedups on the wrapper's own fingerprint — by its lights nothing changed),
+    // so a marker here is permanent.
+    {
+      const mkView = (over = {}) => {
+        const strip = { items: null, results: [] };
+        const v = Object.assign(Object.create(ChatView.prototype), {
+          sessionId: 'sess-ghost', _queue: [ROW], _queueSupported: true, _queueVerbsServed: SEVEN.slice(),
+          _messages: [], _elements: new Map(), _disposed: false,
+          _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+          _chatInput: { setQueue: (items) => { strip.items = items; }, setQueueOpResult: (...a) => strip.results.push(a) },
+          _renderers: { appendSystem() {} }, _drainPendingSteers() {}, _refreshQueueChips() {},
+        }, over);
+        return { v, strip };
+      };
+      {
+        const { v, strip } = mkView();
+        ChatView.prototype._onMeta.call(v, { op: 'meta', subtype: 'queue-result', queueOp: 'remove', id: 'qGhost', ok: false, reason: 'gone', text: 'That message is no longer queued — it already ran.' });
+        ok("a 'gone' verdict REMOVES the row (the wrapper listed its queue and the item was not in it)",
+          v._queue.length === 0 && !!strip.items && strip.items.length === 0, JSON.stringify({ q: v._queue, strip: strip.items }));
+        ok('…and the result still reaches the strip, so the row it was about ends its pending state either way',
+          strip.results.length === 1 && strip.results[0][1] === false, JSON.stringify(strip.results));
+      }
+      {
+        const { v, strip } = mkView();
+        ChatView.prototype._onMeta.call(v, { op: 'meta', subtype: 'queue-result', queueOp: 'steer', id: 'qGhost', ok: false, reason: 'turn-ended', text: 'The turn ended before the message could be steered — it stays queued and will simply run next.' });
+        ok('NEGATIVE CONTROL: every OTHER refusal keeps the row — the message really is still queued, and deleting it would be the opposite lie',
+          v._queue.length === 1 && strip.items === null, JSON.stringify(v._queue));
+      }
+      {
+        // …and the COMPOSER's own half of the same rule, on the REAL ChatInput:
+        // a refusal may only MARK a row the strip still renders. `_dropQueueRow`
+        // runs first, so by the time the result lands the row is gone — and a
+        // `refused` marker for a row nobody renders is state that outlives its
+        // subject (it is what would paint red if that id ever came back).
+        const { ChatInput } = await import(path.join(REPO, 'src/lib/chat-input.js'));
+        const mkInput = (queue) => Object.assign(Object.create(ChatInput.prototype), {
+          _queue: queue, _queueRowState: new Map(), _editingQueueId: null, _pendingEdit: null,
+          _renderQueue() { }, _updateSendModes() { }, _resolvePendingEdit() { }, _abandonEditOfDroppedRow() { },
+        });
+        const dropped = mkInput([]);
+        ChatInput.prototype.setQueueOpResult.call(dropped, 'qGhost', false, 'That message is no longer queued — it already ran.');
+        ok('a refusal for a row the strip no longer holds marks NOTHING (the ✕ that answered `gone` left no red state behind)',
+          dropped._queueRowState.size === 0, JSON.stringify([...dropped._queueRowState]));
+        const still = mkInput([ROW]);
+        ChatInput.prototype.setQueueOpResult.call(still, 'qGhost', false, 'The turn ended before the message could be steered.');
+        ok('POSITIVE TWIN: the same refusal on a row that IS still there marks it refused, with its sentence (the marker is not being disabled — it is being scoped)',
+          still._queueRowState.get('qGhost')?.state === 'refused' && /turn ended/.test(still._queueRowState.get('qGhost')?.title || ''), JSON.stringify([...still._queueRowState]));
+      }
+      {
+        // The bubble chip is the same claim on another surface: a queue the
+        // server states authoritatively retires chips it does not list.
+        const { v } = mkView({ _messages: [{ id: 'm1', role: 'user', webuiMsgId: 'mq', queueState: 'queued' }, { id: 'm2', role: 'user', webuiMsgId: 'other', queueState: 'steered' }] });
+        ChatView.prototype._setQueue.call(v, []);
+        ok("an authoritative queue retires a 'Queued' chip it does not list (the chip is a claim about the queue too)", v._messages[0].queueState === null);
+        ok("…and leaves a 'steered'/'removed' chip alone — those describe what HAPPENED, not what is pending", v._messages[1].queueState === 'steered');
+      }
+      {
+        // THE REACHABLE SHAPE of the unknown branch — an empty list the server
+        // does NOT vouch for (its post-restart payload, byte for byte). The
+        // rows go (there are none), the INFERENCE does not: retiring the chip
+        // would assert this message left a queue nobody can see.
+        const { v, strip } = mkView({ _messages: [{ id: 'm1', role: 'user', webuiMsgId: 'mq', queueState: 'queued' }] });
+        ChatView.prototype._setQueue.call(v, [], { known: false });
+        ok('NEGATIVE CONTROL: an UNKNOWN queue retires no chip — we did not learn the item left, we learned we do not know',
+          v._messages[0].queueState === 'queued', JSON.stringify(v._messages[0]));
+        ok('…and the rows are applied all the same (the flag gates the INFERENCE, not the list — an unknown queue IS the empty list on the wire)',
+          Array.isArray(strip.items) && strip.items.length === 0, JSON.stringify(strip.items));
+      }
+      {
+        // …and the KNOWN twin of the very same call, so the gate is falsifiable
+        // in BOTH directions (one flag, one behaviour, two measurements).
+        const { v } = mkView({ _messages: [{ id: 'm1', role: 'user', webuiMsgId: 'mq', queueState: 'queued' }] });
+        ChatView.prototype._setQueue.call(v, [], { known: true });
+        ok('POSITIVE TWIN: the SAME empty list, stated as a FACT, does retire the chip', v._messages[0].queueState === null);
+      }
+    }
+  }
+}
+
+// ── ⑬d THE DEFERRED PAYLOAD IS A STALE ONE (2026-09-09 r2) ────────────────
+// The MIRROR HALF, found by round 1's verifier. A window that stayed OPEN
+// across the restart never reaches ⑬c's same-epoch branch: a restart always
+// changes `normEpoch` (boot-restore stamps `Date.now()`), so `_reattach`
+// DEFERS the whole payload by `Math.random() * 500` ms — 2.338.0's render
+// stagger, which exists so N windows do not re-render their tails in one tick.
+// The resync that the SAME attach asked for is answered by the wrapper in
+// ~10ms. So the payload's `queueKnown:false` placeholder lands LAST and wipes
+// the answer it provoked.
+//
+// PERMANENT for that window, which is what makes it the ghost's mirror rather
+// than a blink: the ask is self-limiting, so the server — which by then holds
+// the row and hands it to the NEXT attach as a FACT — never asks again. A
+// message that will really run sits on the wire, in the server, and nowhere on
+// screen: no row to steer, remove or edit.
+//
+// FIXED BY RECENCY, never by "known beats unknown": the rows the placeholder
+// has to clear are themselves a KNOWN list (the pre-restart client's), and
+// clearing them is the whole of ⑬c. Both directions are measured here, and the
+// same rule turns out to cover a second instance of the class — see the
+// known-vs-known twin at the end.
+console.log('— ⑬d the deferred restart payload cannot overwrite the answer it asked for');
+{
+  const { ChatView } = await import(path.join(REPO, 'src/lib/chat-view.js'));
+  const cvSrc = read('src/lib/chat-view.js');
+  const SEVEN = ['remove', 'steer', 'steer-all', 'reorder', 'edit', 'run-now', 'run-all'];
+  const REAL = { id: 'qReal', msgId: 'mq', preview: 'the real pending message', text: 'the real pending message', kind: 'user' };
+
+  // ── THE PATCHED COPIES' HYGIENE (r3) ────────────────────────────────────
+  // The pre-fix controls below are copies of src/lib/chat-view.js written
+  // BESIDE the real one (they must be SIBLINGS or their relative imports do
+  // not resolve). Same idiom, same two protections as test-new-member-wake §8
+  // and test-auto-resume §12a — gitignored (`src/lib/.chat-view.stale-prefix-*.js`)
+  // AND swept at start by PID liveness, because a SIGKILL during the window
+  // strands one and a DIRTY TREE is what the release gate refuses on
+  // (measured: `node scripts/ci.mjs --heavy` → "REFUSED — this tree is DIRTY").
+  // Only PIDs that are GONE: this suite can legitimately run twice in one
+  // worktree, and deleting a LIVE run's module mid-import is worse than litter.
+  const { spawnSync, spawn } = await import('node:child_process');
+  // The ONE sanitized git environment (scripts/git-env.mjs): this suite runs
+  // inside `npm run ci`, i.e. inside a pre-push HOOK, which exports GIT_DIR /
+  // GIT_INDEX_FILE — asking git anything without it asks about somebody else's
+  // repo (test-architecture §42's own lesson, round 6).
+  const { gitEnvFrom } = await import(path.join(REPO, 'scripts/git-env.mjs'));
+  const preCopies = [];
+  process.on('exit', () => { for (const f of preCopies) { try { fs.unlinkSync(f); } catch { } } });
+  /** Sweep stranded copies — and ONLY the ones whose PID is GONE. Returns what
+   *  it removed and what it SPARED, so the assert below reads the sweeper's own
+   *  verdict instead of inventing a second rule (test-stdout-registry r7 (b)). */
+  const sweepPreCopies = () => {
+    const removed = [], spared = [];
+    try {
+      for (const f of fs.readdirSync(path.join(REPO, 'src/lib'))) {
+        const m = /^\.chat-view\.(?:stale-)?prefix-(\d+)[-.]/.exec(f); // both copy names this suite writes (⑬d's `.chat-view.prefix-<pid>.js` and the r3 controls' `.chat-view.stale-prefix-<pid>-*.js`) — 2.369.83, the merge verifier
+        if (!m) continue;
+        if (Number(m[1]) === process.pid) { spared.push(f); continue; }
+        try { process.kill(Number(m[1]), 0); spared.push(f); continue; } catch (e) { if (e.code === 'EPERM') { spared.push(f); continue; } }
+        try { fs.unlinkSync(path.join(REPO, 'src/lib', f)); removed.push(f); } catch { }
+      }
+    } catch { }
+    return { removed, spared };
+  };
+  sweepPreCopies();
+  // …and the two protections are ASSERTED, because a stranded copy is a DIRTY
+  // TREE and a dirty tree is what the release gate REFUSES on (measured:
+  // `node scripts/ci.mjs --heavy` -> "REFUSED — this tree is DIRTY, so a marker
+  // for <sha> would not describe what ran", exit 2; the fast tier likewise
+  // writes no green marker). Both halves, because either alone is a hole:
+  // gitignore keeps a SIGKILL's litter out of the status output, the PID sweep
+  // keeps it from accumulating, and NEITHER may touch a concurrent run's copy.
+  {
+    const ignored = spawnSync('git', ['-C', REPO, 'check-ignore', '-q', 'src/lib/.chat-view.stale-prefix-99999.js'],
+      { env: gitEnvFrom(process.env) }).status === 0;
+    ok('the patched-copy name is GITIGNORED (a SIGKILL between write and unlink must never become tree state — the gate refuses a dirty tree)', ignored);
+    // A pid that cannot exist (above pid_max) is GONE; our own child is LIVE.
+    const deadPid = 4294967290;
+    const live = spawn(process.execPath, ['-e', 'setTimeout(()=>{},30000)'], { stdio: 'ignore' });
+    const dead = path.join(REPO, 'src/lib', `.chat-view.stale-prefix-${deadPid}-sweep.js`);
+    const alive = path.join(REPO, 'src/lib', `.chat-view.stale-prefix-${live.pid}-sweep.js`);
+    try {
+      fs.writeFileSync(dead, '// stranded by a SIGKILLed run\n');
+      fs.writeFileSync(alive, '// a CONCURRENT run is importing this\n');
+      const swept = sweepPreCopies();
+      ok('…and the sweep removes a copy whose PID is GONE', !fs.existsSync(dead) && swept.removed.includes(path.basename(dead)), JSON.stringify(swept));
+      ok('NEGATIVE CONTROL: it SPARES a LIVE run\'s copy — this suite can legitimately run twice in one worktree, and deleting a live import is worse than the litter',
+        fs.existsSync(alive) && swept.spared.includes(path.basename(alive)), JSON.stringify(swept));
+    } finally {
+      try { live.kill('SIGKILL'); } catch { }
+      for (const f of [dead, alive]) { try { fs.unlinkSync(f); } catch { } }
+    }
+  }
+  let preN = 0;
+  /** A patched copy of the view, as a SIBLING of the real one. Every
+   *  replacement is COUNTED and the count is asserted by the caller — an
+   *  unpatched "control" is not a control. */
+  const preModule = (edits) => {
+    let src = cvSrc, hits = 0;
+    for (const [from, to] of edits) {
+      if (!src.includes(from)) return { err: 'needle missing: ' + from.slice(0, 80) };
+      src = src.split(from).join(to); hits++;
+    }
+    const f = path.join(REPO, 'src/lib', `.chat-view.stale-prefix-${process.pid}-${++preN}.js`);
+    fs.writeFileSync(f, src); preCopies.push(f);
+    return { file: f, hits, src };
+  };
+  const GHOST = { id: 'qGhost', msgId: 'mg', preview: 'the steered message', text: 'the steered message', kind: 'user' };
+
+  // ── the chain, pinned where this leg stops executing it ──────────────────
+  // The drive below runs the REAL `_reattach` and the REAL `_fullViewReset`;
+  // only `loadHistory` is stubbed (it is a DOM renderer). These pins are the
+  // two links that stub replaces, so "the payload reaches _applyLiveMeta" is
+  // read off the product rather than assumed — and ⑭ then runs the whole thing.
+  ok('the deferred reset hands the WHOLE payload to loadHistory (never a key-by-key copy)',
+    /_fullViewReset\(msg\) \{[\s\S]*?this\.loadHistory\(msg\.messages \|\| \[\], msg\.totalCount \|\| 0, msg\.isStreaming, msg\);/.test(cvSrc));
+  ok('…and loadHistory hands that meta to `_applyLiveMeta` (the link the stub stands in for)',
+    /\n    this\._applyLiveMeta\(meta\);\n/.test(cvSrc));
+  ok('the re-attach STAMPS the payload with its arrival BEFORE the epoch branch defers it (a stamp taken inside the timer would be the bug)',
+    (() => {
+      const stamp = cvSrc.indexOf("if (typeof msg.__rxTick !== 'number') msg.__rxTick = performance.now();");
+      const defer = cvSrc.indexOf('setTimeout(() => { if (!this._disposed) this._fullViewReset(msg); }, Math.random() * 500);');
+      return stamp > 0 && defer > stamp;
+    })());
+  ok('…and `_applyLiveMeta` reads THAT stamp for the queue, with its own `in meta` test (absent ⇒ now, which is the truth for every synchronous caller — and what test-auto-resume\'s carries-the-key sweep demands of every key read there)',
+    /const rxTick = \('__rxTick' in meta\) \? Number\(meta\.__rxTick\) : NaN;/.test(cvSrc)
+    && /const rxAt = Number\.isFinite\(rxTick\) \? rxTick : performance\.now\(\);/.test(cvSrc)
+    && /at: rxAt,\n/.test(cvSrc));
+
+  const payload = (over = {}) => ({
+    type: 'attached', sessionId: 'sess-open', normEpoch: 99,
+    chatStatus: {}, isStreaming: false, messages: [], totalCount: 0,
+    queue: [], queueKnown: false, queueSupported: true, queueVerbs: SEVEN, ...over,
+  });
+
+  // ONE drive: a live window, a REAL `_reattach`, an epoch that CHANGED, and a
+  // stagger PINNED to a chosen point of the product's own 0-500ms range (the
+  // defect is an ordering race — sampling it would make the control flaky and
+  // the assertion meaningless). `answer` is the wrapper's publication arriving
+  // on the ordinary meta-op path, exactly as the resync's answer does.
+  const drive = async (CV, { seedKnown = null, over = {}, answer = null, answerAt = 10, stagger = 0.99 }) => {
+    const strip = { items: null, calls: [], ops: [] };
+    let handler = null;
+    const view = Object.assign(Object.create(CV.prototype), {
+      sessionId: 'sess-open', _normEpoch: 7, _readOnly: false, _disconnected: false, _disposed: false,
+      _queue: [], _queueSupported: true, _queueVerbsServed: SEVEN.slice(), _messages: [], _elements: new Map(),
+      _renderedMsgIds: new Set(), _total: 0, _canPaginate: false, _newMsgCount: 0,
+      _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+      // `caps` is recorded beside the row count because the ADVERT reaches the
+      // strip through it: ChatInput renders `queueOps ? this._queue : []`, so
+      // "rows survived" and "rows are rendered" are two different questions.
+      _chatInput: { setQueue: (items, caps) => { strip.items = items; strip.calls.push((items || []).length); strip.ops.push({ n: (items || []).length, ops: !!caps?.queueOps }); }, setDisconnected() { }, setQueueOpResult() { } },
+      _renderers: { appendSystem() { } },
+      ws: { send() { }, onGlobal: (h) => { handler = h; }, offGlobal() { } },
+      _statusBar: { setResponseStyleLive() { }, setTurnState() { }, setAutoResume() { }, setSpawnOrigin() { }, setOutputStyle() { }, setOutputStylePending() { } },
+      applyStatus() { }, _onServerStreamLabel() { }, _hideTyping() { }, _reattachCatchUp() { },
+      _onToolsInProgress() { }, _drainPendingSteers() { }, _refreshQueueChips() { }, _applyQueueChipsNow() { },
+      // the ONE stub: loadHistory is a DOM renderer. Its queue-relevant act is
+      // the `_applyLiveMeta(meta)` pinned above, and that is what it does here.
+      loadHistory(_m, _t, _s, meta) { this._applyLiveMeta(meta); },
+      _messageList: { querySelectorAll: () => [] }, _resetGapAfterJump() { },
+    });
+    // The pre-restart client's rows, applied through the REAL `_setQueue` as a
+    // KNOWN list — seeding `_queue` by hand would leave the guard's own state
+    // unset and the clearing direction untested.
+    if (seedKnown) CV.prototype._setQueue.call(view, seedKnown, { known: true });
+    const realRandom = Math.random;
+    Math.random = () => stagger;
+    try {
+      CV.prototype._reattach.call(view, false);
+      if (typeof handler !== 'function') throw new Error('the re-attach armed no `attached` handler');
+      handler(payload(over));
+    } finally { Math.random = realRandom; }
+    if (answer) setTimeout(() => { try { CV.prototype._onMeta.call(view, { op: 'meta', subtype: 'queue', supported: true, verbs: SEVEN, items: answer }); } catch { } }, answerAt);
+    await new Promise((r) => setTimeout(r, Math.max(answerAt, stagger * 500) + 300));
+    // Stand the 20s no-reply ladder down (⑬c's note: it declares these
+    // half-built views dead inside ⑭'s minute otherwise).
+    view._reattachGen = (view._reattachGen || 0) + 1;
+    return {
+      ids: (view._queue || []).map((r) => String(r?.id || '')), strip: strip.calls, stripOps: strip.ops,
+      // THE ADVERT SIDE (r3): `_queueSupported` is what `_queueCaps()` reads,
+      // and `queueOps` is what the composer gates the rows on.
+      supported: view._queueSupported, queueOps: CV.prototype._queueCaps.call(view).queueOps,
+    };
+  };
+
+  // The PRE-FIX module: the real source with ONLY the recency guard removed
+  // (the stamp still flows, so what is being measured is "last executed wins"
+  // — the behaviour every path had before this round).
+  const GUARD = '    if ((this._queueStatedAt || 0) > at) return;\n';
+  ok('the pre-fix control patches a REAL line of the product source', cvSrc.includes(GUARD));
+  const preRows = preModule([[GUARD, '']]);
+  ok('CONTROL: exactly one line was removed', preRows.hits === 1 && preRows.src.length === cvSrc.length - GUARD.length, preRows.err || '');
+  let Pre = null;
+  // "CAN THIS BE MEASURED" IS ITSELF AN ASSERT (test-stdout-registry r7ⓐ): a
+  // control whose needle went missing must be ONE LOUD RED, never
+  // `import(undefined)` — that throws MODULE_NOT_FOUND and takes every
+  // remaining assert in this file with it (measured, while mutation-testing
+  // this very arm).
+  if (!preRows.file) { ok('⑬d cannot run: the rows pre-fix control was not built — ' + preRows.err, false); }
+  else {
+    ({ ChatView: Pre } = await import(preRows.file));
+
+    // ── ① THE DEFECT: the answer arrives at 10ms, the reset at ~495ms ───────
+    {
+      const now = await drive(ChatView, { answer: [REAL], answerAt: 10, stagger: 0.99 });
+      ok('THE FIX: a restart payload applied ~495ms after it arrived does NOT overwrite the wrapper\'s answer — the real pending row is still on the strip',
+        now.ids.join(',') === 'qReal', JSON.stringify(now));
+      const pre = await drive(Pre, { answer: [REAL], answerAt: 10, stagger: 0.99 });
+      ok('PRE-FIX: the same frames, the same order — the row is applied and then WIPED by the stale guess (the strip goes 1 → 0 and stays there)',
+        pre.ids.length === 0 && JSON.stringify(pre.strip) === '[1,0]', JSON.stringify(pre));
+    }
+    // ── ② …and it really is an ORDERING race, not a broken placeholder ──────
+    {
+      const now = await drive(ChatView, { answer: [REAL], answerAt: 200, stagger: 0.01 });
+      const pre = await drive(Pre, { answer: [REAL], answerAt: 200, stagger: 0.01 });
+      ok('CONTROL: with the reset FIRST and the answer second, both copies are right — which is why 1-in-N runs looked fine and the bug survived round 1',
+        now.ids.join(',') === 'qReal' && pre.ids.join(',') === 'qReal', JSON.stringify({ now, pre }));
+    }
+    // ── ③ THE GHOST IS STILL CLEARED (the direction "known wins" would break) ─
+    {
+      const now = await drive(ChatView, { seedKnown: [GHOST], answer: null, stagger: 0.99 });
+      ok('THE ⑬c FIX IS INTACT: a pre-restart KNOWN row, an unknown payload and NO answer — the ghost still goes (recency, not "known beats unknown")',
+        now.ids.length === 0, JSON.stringify(now));
+      const pre = await drive(Pre, { seedKnown: [GHOST], answer: null, stagger: 0.99 });
+      ok('…identically in the pre-fix copy, so ① measured the guard and not a placeholder this round disabled',
+        pre.ids.length === 0, JSON.stringify(pre));
+    }
+    // ── ④ the rule itself, both directions, on the ONE writer ───────────────
+    {
+      const mk = () => Object.assign(Object.create(ChatView.prototype), {
+        _queue: [], _queueSupported: true, _queueVerbsServed: SEVEN.slice(), _messages: [], _elements: new Map(),
+        _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+        _chatInput: { setQueue() { } }, _drainPendingSteers() { }, _refreshQueueChips() { },
+      });
+      const older = mk();
+      ChatView.prototype._setQueue.call(older, [GHOST], { known: true, at: 1000 });
+      ChatView.prototype._setQueue.call(older, [], { known: false, at: 2000 });
+      ok('a placeholder that arrived AFTER the known list clears it (the incident\'s own shape, stated as a rule)', older._queue.length === 0);
+      const newer = mk();
+      ChatView.prototype._setQueue.call(newer, [REAL], { known: true, at: 2000 });
+      ChatView.prototype._setQueue.call(newer, [], { known: false, at: 1000 });
+      ok('NEGATIVE CONTROL: a placeholder that arrived BEFORE it is ignored — one flag, one rule, two measurements',
+        newer._queue.map((r) => r.id).join(',') === 'qReal', JSON.stringify(newer._queue));
+    }
+    // ── ⑤ THE KNOWN-vs-KNOWN TWIN, which the same rule closes ───────────────
+    // Not the reported shape, and reachable: the payload can know its queue
+    // (any attach after the wrapper has published) while the user steers the
+    // row away INSIDE the 500ms stagger. "Last executed wins" then restores a
+    // message the wrapper has already sent — a ghost row again, from the other
+    // side. Nothing here is special-cased for it; it is the same comparison.
+    {
+      const now = await drive(ChatView, { over: { queue: [GHOST], queueKnown: true }, answer: [], answerAt: 10, stagger: 0.99 });
+      ok('a steer that empties the queue inside the stagger window is NOT undone by the deferred payload\'s older rows',
+        now.ids.length === 0, JSON.stringify(now));
+      const pre = await drive(Pre, { over: { queue: [GHOST], queueKnown: true }, answer: [], answerAt: 10, stagger: 0.99 });
+      ok('PRE-FIX: the same frames put the steered row BACK on the strip (the second instance of the class, measured)',
+        pre.ids.join(',') === 'qGhost', JSON.stringify(pre));
+    }
+    // ── ⑥ THE ADVERT HAS THE SAME RACE, AND THE SAME OUTCOME (r3) ──────────
+    // Round 2 gave the recency rule to the queue ROWS and left the line above
+    // them — the ADVERT — judged by "whatever ran last". That is not a lesser
+    // fact: `_queueCaps()` collapses to NO_QUEUE_CAPS when `_queueSupported`
+    // is false, and ChatInput._renderQueue then does
+    // `const items = this._queueCaps.queueOps ? this._queue : []` and HIDES the
+    // strip. So a stale `queueSupported:false` reproduces r2's own outcome
+    // exactly — a real pending message the wrapper holds, present in `_queue`,
+    // rendered NOWHERE — with the r2 guard intact and looking green.
+    //
+    // REACHABLE wherever the payload's advert is a NO. r1's admission ("the
+    // advert comes from the running wrapper's sidecar and does not change
+    // under a restart") is true only for a LOCAL session with a readable
+    // sidecar; ws-handler names the other case where it asks ("or REMOTE — its
+    // sidecar lives on ITS machine"), and the 2.339.2 resolution-failure class
+    // is a third. There the advert falls back to the IN-BAND publication,
+    // which a restart resets ⇒ the payload says false while the wrapper's own
+    // publication, arriving in ~10ms against the stagger, says true.
+    //
+    // The payload here is not hand-written: it is what the REAL `queueAdvert`
+    // block answers (⑬b's lift idiom) for the REAL `wrapperCaps` of a session
+    // with no local sidecar and a REBUILT normalizer.
+    {
+      const { wrapperCaps } = require(path.join(REPO, 'src/server/wrapper-files.js'));
+      const { LEGACY_QUEUE_VERBS } = require(path.join(REPO, 'src/backend-caps.js'));
+      const { CodexMessageManager } = require(path.join(REPO, 'src/codex-message-manager.js'));
+      const noSidecarDir = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-qs-nosidecar-'));
+      const wc = wrapperCaps(noSidecarDir, 'sess-remote-1', null);
+      try { fs.rmSync(noSidecarDir, { recursive: true, force: true }); } catch { }
+      ok('the REAL wrapperCaps answers no-sidecar for a session whose wrapper wrote none here (a REMOTE session; ws-handler names this case where it asks)',
+        wc.inputQueue === false && wc.queueResync === false && wc.reason === 'no-sidecar', JSON.stringify(wc));
+      const body = /const queueAdvert = \(\(\) => \{([\s\S]*?)\n              \}\)\(\);/.exec(read('src/ws-handler.js'));
+      ok('…and the advert block is still liftable (same needle ⑬b uses)', !!body);
+      const advertFn = new Function('wcapsAttach', 'session', 'LEGACY_QUEUE_VERBS', body[1]);
+      const remoteAdvert = advertFn(wc, { _normalizer: new CodexMessageManager('adv-remote-rebuilt') }, LEGACY_QUEUE_VERBS);
+      ok('THE PAYLOAD THIS ARM DRIVES IS THE PRODUCT\'S OWN: no sidecar + a rebuilt normalizer ⇒ queueSupported FALSE (the advert a running wrapper is about to contradict)',
+        remoteAdvert.queueSupported === false && remoteAdvert.queueVerbs === null, JSON.stringify(remoteAdvert));
+
+      // The wrapper's own publication carries supported:true + the SAME verbs
+      // the pre-restart view already holds ⇒ a NO-CHANGE call. That is why the
+      // guard must sit ABOVE `_setQueueSupported`'s no-change early return.
+      const now = await drive(ChatView, { over: remoteAdvert, answer: [REAL], answerAt: 10, stagger: 0.99 });
+      ok('THE FIX: the 500ms-old advert does NOT retract the running wrapper\'s — the row is on the strip AND the composer is given controls for it',
+        now.ids.join(',') === 'qReal' && now.supported === true && now.queueOps === true
+        && now.stripOps.every((c) => c.ops === true), JSON.stringify(now));
+      const preAdvert = preModule([['    if ((this._queueAdvertStatedAt || 0) > at) return;\n    this._queueAdvertStatedAt = at;\n', '']]);
+      ok('the advert pre-fix control patches REAL lines of the product source', preAdvert.hits === 1, preAdvert.err || '');
+      // Same rule as the rows control above: a control that was not built is
+      // ONE LOUD RED and the arms that need it are SKIPPED, never an
+      // `import(undefined)` that kills the rest of the file.
+      if (!preAdvert.file) { ok('⑥ cannot compare against the pre-fix advert: the control was not built — ' + preAdvert.err, false); }
+      else {
+        const { ChatView: PreAdvert } = await import(preAdvert.file);
+        const pre = await drive(PreAdvert, { over: remoteAdvert, answer: [REAL], answerAt: 10, stagger: 0.99 });
+        ok('PRE-FIX: the r2 guard keeps the row in `_queue` (green) while the stale advert flips the capability — `queueOps:false` ⇒ ChatInput renders ZERO rows and hides the strip',
+          pre.ids.join(',') === 'qReal' && pre.supported === false && pre.queueOps === false
+          && JSON.stringify(pre.stripOps.map((c) => c.ops)) === '[true,false]', JSON.stringify(pre));
+        // NEGATIVE CONTROL: the same frames in the other order. An ordering race
+        // is only a race if the other order is correct in BOTH copies.
+        const nowC = await drive(ChatView, { over: remoteAdvert, answer: [REAL], answerAt: 200, stagger: 0.01 });
+        const preC = await drive(PreAdvert, { over: remoteAdvert, answer: [REAL], answerAt: 200, stagger: 0.01 });
+        ok('CONTROL: reset FIRST and the answer second — both copies end with the capability the wrapper stated (so ① measures the guard, not a payload this arm broke)',
+          nowC.supported === true && nowC.queueOps === true && preC.supported === true && preC.queueOps === true,
+          JSON.stringify({ nowC, preC }));
+      }
+      // …and the rule's own two directions on the ONE writer, with the SEPARATE
+      // stamp: `_dropQueueRow` stamps the ROWS at `now` from a purely local
+      // inference, and sharing one clock would let it censor a later advert.
+      {
+        const mk = () => Object.assign(Object.create(ChatView.prototype), {
+          _queue: [], _queueSupported: true, _queueVerbsServed: SEVEN.slice(), _messages: [], _elements: new Map(),
+          _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+          _chatInput: { setQueue() { } }, _drainPendingSteers() { }, _refreshQueueChips() { },
+        });
+        const older = mk();
+        ChatView.prototype._setQueueSupported.call(older, true, SEVEN, { at: 2000 });
+        ChatView.prototype._setQueueSupported.call(older, false, null, { at: 1000 });
+        ok('an advert that arrived BEFORE the newest one is ignored', older._queueSupported === true);
+        const newer = mk();
+        ChatView.prototype._setQueueSupported.call(newer, true, SEVEN, { at: 1000 });
+        ChatView.prototype._setQueueSupported.call(newer, false, null, { at: 2000 });
+        ok('NEGATIVE CONTROL: one that arrived AFTER it applies — one rule, two measurements', newer._queueSupported === false);
+        const sep = mk();
+        ChatView.prototype._setQueue.call(sep, [REAL], { known: true, at: 3000 });   // rows stamped LATE
+        ChatView.prototype._setQueueSupported.call(sep, false, null, { at: 2000 });  // advert older than the ROWS
+        ok('SEPARATE STAMPS: a ROW statement never censors an ADVERT statement (`_dropQueueRow` stamps rows at `now` from a local inference — one clock would refuse the next payload\'s advert for no reason)',
+          sep._queueSupported === false, JSON.stringify({ supported: sep._queueSupported, rows: sep._queue.length }));
+      }
+    }
+  }
+  for (const f of preCopies.splice(0)) { try { fs.unlinkSync(f); } catch { } }
+}
+
+// ── ⑭ THE SAME QUESTION, END TO END: a real server, a real wrapper, a REAL
+//     RESTART and a real browser (2026-09-09) ────────────────────────────────
+// ⑬ measures every piece of the restart against a shape WE wrote down. This
+// leg writes none of it down: a worktree server spawns the REAL
+// codex-chat-wrapper under dtach against a stub app-server, a queued message is
+// steered away, the wrapper's 800KB stdout ring is then ROLLED by a long agent
+// reply (the production mechanism, not a truncation we perform), the server is
+// SIGKILLed and booted again — and the questions are asked of the artifacts
+// that survive: the buffer file, the `attached` payload, the wrapper's answer,
+// and the strip in a headless browser.
+//
+// TWO directions, because the guess is wrong BOTH ways:
+//   A steered its message away  ⇒ the wrapper's queue is EMPTY and the strip
+//     must end EMPTY (the ghost row is what the report was about);
+//   B left its message queued   ⇒ the wrapper's queue holds a REAL row and the
+//     server's post-restart `[]` hides it until the resync lands.
+// The NEGATIVE CONTROL is a boot of the same server with the ask gated off
+// (one condition, asserted to have been patched) against the SAME running
+// wrappers: nothing corrects either session, ever.
+console.log('— ⑭ a REAL restart: worktree server + real wrapper + stub app-server + headless chrome');
+{
+  const { spawn, execFileSync } = await import('node:child_process');
+  const { scratch, freePorts } = await import('./scratch.mjs');
+  const { gitEnvFrom } = await import('./git-env.mjs');
+  const WebSocket = require('ws');
+  const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const until = async (fn, ms = 20000, step = 100) => {
+    const t0 = Date.now();
+    for (;;) {
+      let v; try { v = await fn(); } catch { v = null; }
+      if (v) return v;
+      if (Date.now() - t0 > ms) return null;
+      await sleep(step);
+    }
+  };
+  const CHROME14 = ['/usr/bin/google-chrome', '/usr/bin/google-chrome-stable', '/usr/bin/chromium', '/usr/bin/chromium-browser'].find((p) => fs.existsSync(p));
+  // The ONE sanitized git environment (scripts/git-env.mjs): this suite runs
+  // inside somebody else's git process — the pre-push hook exports GIT_DIR and
+  // GIT_INDEX_FILE, and a worktree add obeys every one of them.
+  const GIT_ENV = gitEnvFrom(process.env);
+  // PER-PROCESS scratch + FREE ports (2.369.76): this box hosts ~160 checkouts
+  // and the heavy tier is not the only thing running on it.
+  const ROOT = scratch('qsteer-restart');
+  fs.rmSync(ROOT, { recursive: true, force: true });
+  fs.mkdirSync(ROOT, { recursive: true });
+  const wt = path.join(ROOT, 'wt');
+  const fakeHome = path.join(ROOT, 'home');
+  const stubPath = path.join(ROOT, 'codex-stub');
+  const cwdOf = (n) => path.join(ROOT, 'cwd-' + n);
+  for (const d of [fakeHome, cwdOf('a'), cwdOf('b'), cwdOf('c')]) fs.mkdirSync(d, { recursive: true });
+  const [PORT, CDP_PORT] = await freePorts(2);
+
+  // The stub `codex`. Only the app-server surface the wrapper actually calls,
+  // plus two CONTROL FILES in the session's own cwd (one stub per session, so
+  // each obeys only its own half of the test):
+  //   flood → a long agent reply into the OPEN turn: this is what rolls the
+  //           wrapper's ring in production, and the leg refuses to fake it;
+  //   drain → the app-server drops its queue WITHOUT notifying (it drains its
+  //           own queue when a turn ends), which is how a client legitimately
+  //           ends up holding a row the wrapper no longer has.
+  const STUB = `#!/usr/bin/env node
+'use strict';
+if (process.argv[2] !== 'app-server') { process.stdout.write('codex-cli 0.153.4-stub\\n'); process.exit(0); }
+const fs = require('fs'), path = require('path');
+const CWD = process.env.CODEX_WEBUI_CWD || process.cwd();
+const flood = path.join(CWD, 'flood'), drain = path.join(CWD, 'drain');
+const TID = 'th-' + path.basename(CWD) + '-0000-0000-0000-000000000000';
+const send = (o) => process.stdout.write(JSON.stringify({ jsonrpc: '2.0', ...o }) + '\\n');
+const note = (method, params) => send({ method, params });
+const changed = () => note('thread/queue/changed', { threadId: TID });
+const BIG = 'x'.repeat(40000);
+let buf = '', turns = 0, qseq = 0, queue = [], activeTurn = null;
+setInterval(() => {
+  let f = false, d = false;
+  try { fs.unlinkSync(flood); f = true; } catch { }
+  try { fs.unlinkSync(drain); d = true; } catch { }
+  if (d) queue = [];
+  if (f && activeTurn) for (let i = 0; i < 40; i++) note('item/completed', { threadId: TID, turnId: activeTurn, item: { type: 'agentMessage', id: 'flood-' + Date.now() + '-' + i, text: BIG } });
+}, 100);
+process.stdin.setEncoding('utf8');
+process.stdin.on('end', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0));
+process.stdin.on('data', (d) => {
+  buf += d;
+  let i;
+  while ((i = buf.indexOf('\\n')) !== -1) {
+    const line = buf.slice(0, i); buf = buf.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: TID } } }); continue; }
+    if (m.method === 'turn/start') {
+      const tid = 'turn-' + (++turns); activeTurn = tid;
+      send({ id: m.id, result: { turn: { id: tid } } });
+      note('turn/started', { turn: { id: tid } });
+      continue;
+    }
+    if (m.method === 'thread/queue/add') {
+      const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId };
+      queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); changed(); continue;
+    }
+    if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: queue.slice(), nextCursor: null } }); continue; }
+    if (m.method === 'thread/queue/delete') {
+      const at = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (at < 0) { send({ id: m.id, result: { deleted: false } }); continue; }
+      queue.splice(at, 1); send({ id: m.id, result: { deleted: true } }); changed(); continue;
+    }
+    if (m.method === 'turn/interrupt') { const e = activeTurn; activeTurn = null; send({ id: m.id, result: {} }); note('turn/completed', { turn: { id: e }, status: 'interrupted' }); continue; }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+  fs.writeFileSync(stubPath, STUB, { mode: 0o755 });
+
+  // The worktree: HEAD checked out, then the WORKING TREE's code overlaid
+  // (2.335.1 — a worktree checks out HEAD, so a pre-commit run would otherwise
+  // test the PREVIOUS release). data/ is ONLY the tracked agent tools; the
+  // repo's data/ is PRODUCTION (#127 class).
+  execFileSync('git', ['-C', REPO, 'worktree', 'add', '--detach', wt, 'HEAD'], { stdio: 'ignore', env: GIT_ENV });
+  for (const f of ['src', 'public', 'server.js', 'package.json']) {
+    execFileSync('rm', ['-rf', path.join(wt, f)]);
+    execFileSync('cp', ['-r', path.join(REPO, f), path.join(wt, f)]);
+  }
+  execFileSync('rm', ['-rf', path.join(wt, 'data')]);
+  fs.mkdirSync(path.join(wt, 'data'), { recursive: true });
+  execFileSync('cp', ['-r', path.join(REPO, 'data/bin'), path.join(wt, 'data/bin')]);
+  fs.symlinkSync(path.join(REPO, 'node_modules'), path.join(wt, 'node_modules'));
+
+  const BUFDIR = path.join(wt, 'data', 'session-buffers');
+  const WSH = path.join(wt, 'src', 'ws-handler.js');
+  const WSH_PRISTINE = fs.readFileSync(WSH, 'utf8');
+  let srv = null, chrome = null, cleaned = false, srvLog = () => '';
+  const sids = [];
+  const cleanup = () => {
+    if (cleaned) return; cleaned = true;
+    // Every wrapper this leg started lives in dtach and OUTLIVES the server by
+    // design — that is the property under test, so the teardown is explicit:
+    // each sidecar names its own pid, inside our own scratch dir.
+    try {
+      for (const f of fs.readdirSync(BUFDIR)) {
+        if (!f.endsWith('.json')) continue;
+        try { const pid = JSON.parse(fs.readFileSync(path.join(BUFDIR, f), 'utf8'))?.pid; if (pid) process.kill(pid, 'SIGKILL'); } catch { }
+      }
+    } catch { }
+    try { chrome?.kill('SIGKILL'); } catch { }
+    try { srv?.kill('SIGKILL'); } catch { }
+    try { execFileSync('git', ['-C', REPO, 'worktree', 'remove', '--force', wt], { stdio: 'ignore', env: GIT_ENV }); } catch { }
+    try { fs.rmSync(ROOT, { recursive: true, force: true }); } catch { }
+  };
+  process.on('exit', cleanup);
+  for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => { cleanup(); process.exit(1); });
+
+  const boot = async () => {
+    srv = spawn(process.execPath, ['server.js'], {
+      cwd: wt,
+      env: { ...process.env, PORT: String(PORT), HOME: fakeHome, CODEX_CMD: stubPath, VIBESPACE_SKIP_AGENT_HOOKS: '1', VIBESPACE_PASSWORD: '' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let out = '';
+    srv.stdout.on('data', (d) => { out += d; });
+    srv.stderr.on('data', (d) => { out += d; });
+    srvLog = () => out;                        // the CURRENT boot's log (`mk` runs against three of them)
+    const up = await until(async () => { try { await fetch(`http://127.0.0.1:${PORT}/api/home`); return true; } catch { return false; } }, 60000, 250);
+    return { up, log: () => out };
+  };
+  const restart = async () => {
+    try { srv.kill('SIGKILL'); } catch { }
+    await sleep(800);
+    return boot();
+  };
+  // ONE socket per question, every frame kept: the resync's answer arrives as
+  // an ordinary broadcast op AFTER the `attached` payload, so the assertion is
+  // about a conversation, not a single reply.
+  const openWs = async () => {
+    const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws`);
+    const frames = [];
+    await new Promise((res, rej) => { w.on('open', res); w.on('error', rej); });
+    w.on('message', (d) => { try { frames.push(JSON.parse(String(d))); } catch { } });
+    return { w, frames, send: (o) => w.send(JSON.stringify(o)), close: () => { try { w.close(); } catch { } } };
+  };
+  const queueOps = (frames, sid) => frames.filter((f) => f.type === 'msg' && f.sessionId === sid && f.op === 'meta' && f.subtype === 'queue');
+  const sidecar = (sid) => { try { return JSON.parse(fs.readFileSync(path.join(BUFDIR, sid + '.json'), 'utf8')); } catch { return null; } };
+  const bufferFile = (sid) => { try { return fs.readFileSync(path.join(BUFDIR, sid + '.buf'), 'utf8'); } catch { return ''; } };
+
+  const boot1 = await boot();
+  ok('⑭ setup: an isolated worktree server is up (its own data/, a fake HOME, a stub `codex` — never the production checkout)', !!boot1.up, boot1.log().slice(-600));
+
+  if (!boot1.up) {
+    ok('⑭ ran', false, 'the worktree server never answered — the rest of ⑭ did not run');
+  } else {
+    // ── the sessions, driven through the REAL create/chat-input/queue-op path ──
+    const mk = async (name, { steer }) => {
+      const c = await openWs();
+      c.send({ type: 'create', backend: 'codex', mode: 'chat', cwd: cwdOf(name), reqId: 'mk-' + name });
+      const created = await until(() => c.frames.find((f) => f.type === 'created'), 60000);
+      ok(`${name}: a codex chat session is created through the real spawn path (real wrapper under dtach, stub app-server)`, !!created, srvLog().slice(-600));
+      if (!created) return null;
+      const sid = created.sessionId; sids.push(sid);
+      ok(`${name}: the RUNNING wrapper adverts caps.queueResync in the sidecar it writes`,
+        !!(await until(() => sidecar(sid)?.caps?.queueResync === true, 30000)), JSON.stringify(sidecar(sid)?.caps));
+      c.send({ type: 'attach', sessionId: sid });
+      await until(() => c.frames.find((f) => f.type === 'attached' && f.sessionId === sid), 60000);
+      // a turn, so the next message QUEUES instead of starting one
+      c.send({ type: 'chat-input', sessionId: sid, text: 'start a turn', msgId: `${name}-go` });
+      ok(`${name}: a turn is running (the queue only exists while one is)`, !!(await until(() => sidecar(sid)?.activeTurnId, 30000)), JSON.stringify(sidecar(sid)?.activeTurnId));
+      c.send({ type: 'chat-input', sessionId: sid, text: `the ${name} message`, msgId: `${name}-q` });
+      const withRow = await until(() => queueOps(c.frames, sid).slice(-1).find((o) => (o.items || []).length === 1), 30000);
+      ok(`${name}: it QUEUES and the wrapper publishes the row`, !!withRow, JSON.stringify(queueOps(c.frames, sid).map((o) => (o.items || []).length)));
+      const rowId = withRow?.items?.[0]?.id || null;
+      if (steer) {
+        c.send({ type: 'queue-op', sessionId: sid, op: 'steer', id: rowId });
+        ok(`${name}: STEERED — the wrapper's queue is now EMPTY and it says so`,
+          !!(await until(() => queueOps(c.frames, sid).slice(-1).find((o) => (o.items || []).length === 0), 30000)),
+          JSON.stringify(queueOps(c.frames, sid).map((o) => (o.items || []).length)));
+      }
+      return { sid, rowId, c };
+    };
+    const A = await mk('a', { steer: true });
+    const B = await mk('b', { steer: false });
+
+    // ── THE RING, ROLLED FOR REAL ────────────────────────────────────────────
+    // A long agent reply into the open turn. The wrapper writes every record to
+    // its 800KB buffer and drops the HEAD, so the queue publication scrolls out
+    // of the very file a restarted server rebuilds from. Measured on the file,
+    // never assumed.
+    if (A && B) {
+      for (const s of ['a', 'b']) fs.writeFileSync(path.join(cwdOf(s), 'flood'), '1');
+      const rolled = await until(() => [A, B].every((s) => bufferFile(s.sid).length > 400000 && !bufferFile(s.sid).includes('queue_changed')), 90000, 250);
+      ok('THE RING ROLLED: after a long reply neither buffer file carries a `queue_changed` any more — the record a restarted server would have learned from is GONE',
+        !!rolled, JSON.stringify([A, B].map((s) => ({ bytes: bufferFile(s.sid).length, queueRecords: (bufferFile(s.sid).match(/queue_changed/g) || []).length }))));
+      A.c.close(); B.c.close();
+    }
+
+    // ── THE NEGATIVE CONTROL FIRST: the same wrappers, a server that does not ask ──
+    // One condition gated off (asserted to have been patched), the SAME dtach
+    // wrappers still holding both queues. Nothing corrects either session.
+    if (A && B) {
+      const patched = WSH_PRISTINE.replace('if (!queueAdvert.queueKnown && session.pty && wcapsAttach.queueResync',
+        'if (false && !queueAdvert.queueKnown && session.pty && wcapsAttach.queueResync');
+      ok('PRE-FIX control: the ask is gated off in the worktree copy of the REAL ws-handler (the patch hit)', patched !== WSH_PRISTINE);
+      fs.writeFileSync(WSH, patched);
+      const b2 = await restart();
+      ok('PRE-FIX control: the server boots again and the dtach wrappers survived it (that survival is the whole premise)', !!b2.up, b2.log().slice(-600));
+      if (b2.up) {
+        for (const [name, S] of [['a', A], ['b', B]]) {
+          const c = await openWs();
+          c.send({ type: 'attach', sessionId: S.sid });
+          const att = await until(() => c.frames.find((f) => f.type === 'attached' && f.sessionId === S.sid), 60000);
+          ok(`PRE-FIX ${name}: the rebuilt normalizer reports an EMPTY queue and knows it never heard one (queueKnown false) — the guess`,
+            !!att && (att.queue || []).length === 0 && att.queueKnown === false, JSON.stringify({ queue: att?.queue, known: att?.queueKnown }));
+          await sleep(6000);
+          ok(`PRE-FIX ${name}: …and NOTHING corrects it — no publication ever arrives, so waiting is not a fix`,
+            queueOps(c.frames, S.sid).length === 0, JSON.stringify(queueOps(c.frames, S.sid)));
+          c.close();
+        }
+      }
+      fs.writeFileSync(WSH, WSH_PRISTINE);
+    }
+
+    // ── THE FIX, on the same wrapper processes ───────────────────────────────
+    const b3 = (A && B) ? await restart() : null;
+    if (b3) ok('the fixed server boots against the SAME running wrappers (nothing about the sessions changed — only the server did)', !!b3.up, b3.log().slice(-600));
+    const attachAndWait = async (S) => {
+      const c = await openWs();
+      c.send({ type: 'attach', sessionId: S.sid });
+      const att = await until(() => c.frames.find((f) => f.type === 'attached' && f.sessionId === S.sid), 60000);
+      const answer = await until(() => queueOps(c.frames, S.sid).slice(-1)[0], 30000);
+      return { c, att, answer };
+    };
+    if (b3?.up) {
+      {
+        const { c, att, answer } = await attachAndWait(A);
+        ok('A (steered away): the attach payload says the queue is a GUESS — `queue: []` with queueKnown FALSE, controls still on',
+          !!att && (att.queue || []).length === 0 && att.queueKnown === false && att.queueSupported === true && (att.queueVerbs || []).includes('steer'),
+          JSON.stringify({ queue: att?.queue, known: att?.queueKnown, supported: att?.queueSupported, verbs: att?.queueVerbs }));
+        ok('…and the WRAPPER answers within the round trip with an authoritative EMPTY publication (the answer a rebuilt normalizer cannot produce for itself)',
+          !!answer && Array.isArray(answer.items) && answer.items.length === 0 && answer.supported === true, JSON.stringify(answer));
+        const c2 = await openWs();
+        c2.send({ type: 'attach', sessionId: A.sid });
+        const att2 = await until(() => c2.frames.find((f) => f.type === 'attached' && f.sessionId === A.sid), 60000);
+        ok('…so the NEXT attach states it as a FACT (queueKnown true) — the ask is self-limiting, not one frame per attach',
+          att2?.queueKnown === true, JSON.stringify({ known: att2?.queueKnown, queue: att2?.queue }));
+        c.close(); c2.close();
+      }
+      {
+        const { c, att, answer } = await attachAndWait(B);
+        ok('B (still queued): the same guess on the wire — and here it is the OPPOSITE error, a real pending message the server cannot see',
+          !!att && (att.queue || []).length === 0 && att.queueKnown === false, JSON.stringify({ queue: att?.queue, known: att?.queueKnown }));
+        ok('…and the wrapper hands the REAL row back, so the strip comes back rather than staying empty for ever',
+          !!answer && (answer.items || []).length === 1 && /the b message/.test(JSON.stringify(answer.items)), JSON.stringify(answer));
+        c.close();
+      }
+    }
+
+    // ── THE BROWSER ─────────────────────────────────────────────────────────
+    if (!CHROME14) {
+      console.log('  SKIP: no chrome/chromium on this box — the DOM half of ⑭ did not run');
+    } else if (!read('public/bundle.js').includes('queueKnown')) {
+      ok('the built bundle carries this change (run `npm run build` — the DOM half tests the BUILT client, not the source)', false);
+    } else if (b3?.up && A && B) {
+      const profile = path.join(ROOT, 'chrome');
+      chrome = spawn(CHROME14, ['--headless=new', `--remote-debugging-port=${CDP_PORT}`, '--no-first-run', '--no-sandbox', '--disable-gpu',
+        '--disable-dev-shm-usage', '--disable-background-timer-throttling', `--user-data-dir=${profile}`, 'about:blank'], { stdio: 'ignore' });
+      let cws = null;
+      try {
+        const target = await until(async () => (await (await fetch(`http://127.0.0.1:${CDP_PORT}/json`)).json()).find((x) => x.type === 'page'), 40000, 250);
+        if (!target) throw new Error('chrome never exposed a CDP page target');
+        cws = new WebSocket(target.webSocketDebuggerUrl, { maxPayload: 64 * 1024 * 1024 });
+        await new Promise((r, j) => { cws.on('open', r); cws.on('error', j); });
+        let seq = 0; const pend = new Map();
+        cws.on('message', (d) => { const m = JSON.parse(d); if (m.id && pend.has(m.id)) { pend.get(m.id)(m); pend.delete(m.id); } });
+        const cdp = (method, params = {}) => new Promise((res) => { const id = ++seq; pend.set(id, res); cws.send(JSON.stringify({ id, method, params })); });
+        const evaljs = async (expr) => {
+          const r = await cdp('Runtime.evaluate', { expression: expr, awaitPromise: true, returnByValue: true });
+          if (r.result?.exceptionDetails) throw new Error(JSON.stringify(r.result.exceptionDetails).slice(0, 400));
+          return r.result?.result?.value;
+        };
+        await cdp('Runtime.enable'); await cdp('Page.enable');
+        await cdp('Page.navigate', { url: `http://127.0.0.1:${PORT}/` });
+        const ready = await until(() => evaljs('!!(window.app && window.app.ready && window.app.wm)').catch(() => false), 60000, 300);
+        await evaljs('window.app.ready.then(() => true)').catch(() => { });
+        ok('BROWSER: the real client is loaded against the live worktree server', !!ready);
+        // ONE window per session, and each strip is read from ITS OWN container
+        // (a document-wide query finds another window's first).
+        const openWin = async (sid, label, cwd) => evaljs(`(async () => {
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+          const win = window.app.attachSession(${JSON.stringify(sid)}, ${JSON.stringify(label)}, ${JSON.stringify(cwd)}, { mode: 'chat', backend: 'codex' });
+          for (let i = 0; i < 100; i++) { if (window.app.sessions.get(win.id)?._container) break; await sleep(200); }
+          const v = window.app.sessions.get(win.id);
+          window.__q = window.__q || {};
+          window.__q[${JSON.stringify(sid)}] = v;
+          return !!v;
+        })()`);
+        const strip = (sid) => evaljs(`(() => {
+          const v = window.__q[${JSON.stringify(sid)}];
+          if (!v || !v._container) return { rows: -1, red: -1, texts: [] };
+          const rows = [...v._container.querySelectorAll('.chat-queue-item')];
+          return { rows: rows.length, red: v._container.querySelectorAll('.chat-queue-item[data-queue-state="refused"]').length,
+                   texts: rows.map((r) => (r.querySelector('.chat-queue-preview')?.textContent || '').trim()) };
+        })()`);
+        ok('BROWSER: session A is open', (await openWin(A.sid, 'A', cwdOf('a'))) === true);
+        ok('BROWSER: session B is open', (await openWin(B.sid, 'B', cwdOf('b'))) === true);
+        // A: the ghost is what this whole change removes — the strip ends EMPTY.
+        const aEnd = await until(async () => { const s = await strip(A.sid); return s && s.rows === 0 ? s : null; }, 30000, 250);
+        ok('BROWSER A: the strip is EMPTY — that message left the queue an hour and one restart ago, and nothing on screen claims otherwise',
+          !!aEnd && aEnd.rows === 0 && aEnd.red === 0, JSON.stringify(await strip(A.sid)));
+        // B: the answer ARRIVES — "show nothing until the wrapper speaks" is a
+        // round trip, not a permanent loss.
+        const bEnd = await until(async () => { const s = await strip(B.sid); return s && s.rows === 1 ? s : null; }, 40000, 250);
+        ok('BROWSER B: the REAL queued row is back on the strip within the round trip (the server never knew it — the wrapper did)',
+          !!bEnd && bEnd.rows === 1 && /the b message/.test(bEnd.texts.join(' ')) && bEnd.red === 0, JSON.stringify(await strip(B.sid)));
+
+        // ── 'gone': the row LEAVES, and is never painted red ────────────────
+        // A queue the app-server drained WITHOUT telling the wrapper is how a
+        // client legitimately holds a row that no longer exists. The user
+        // clicks ✕ on it — a real DOM click, through the real ws.
+        const C = await mk('c', { steer: false });
+        if (C) {
+          const rec = await openWs();            // a recorder, so the REAL verdict frame can be replayed below
+          rec.send({ type: 'attach', sessionId: C.sid });
+          await until(() => rec.frames.find((f) => f.type === 'attached' && f.sessionId === C.sid), 60000);
+          ok('BROWSER: session C is open', (await openWin(C.sid, 'C', cwdOf('c'))) === true);
+          ok('BROWSER C: its queued row is on the strip',
+            !!(await until(async () => { const s = await strip(C.sid); return s && s.rows === 1 ? s : null; }, 30000, 250)), JSON.stringify(await strip(C.sid)));
+          fs.writeFileSync(path.join(cwdOf('c'), 'drain'), '1');   // the app-server drains its own queue, silently
+          await sleep(1500);
+          ok('BROWSER C: the row is STILL on screen after the app-server dropped it silently — a real client holding a row nobody can act on',
+            (await strip(C.sid)).rows === 1, JSON.stringify(await strip(C.sid)));
+          const reds = [];
+          const clicked = await evaljs(`(() => {
+            const v = window.__q[${JSON.stringify(C.sid)}];
+            const b = v._container.querySelector('.chat-queue-item [data-queue-op="remove"]');
+            if (!b) return false; b.click(); return true;
+          })()`);
+          ok('BROWSER C: the ✕ on that row is clicked (a real DOM click through the real ws)', clicked === true);
+          const gone = await until(async () => { const s = await strip(C.sid); reds.push(s.red); return s.rows === 0 ? s : null; }, 30000, 150);
+          ok('BROWSER C: the row DISAPPEARS — the wrapper is authoritative about absence, so `gone` removes it', !!gone, JSON.stringify(await strip(C.sid)));
+          ok('…and it is never painted REFUSED on the way out (the red ghost is the state the report was about)',
+            reds.length > 0 && reds.every((n) => n === 0), JSON.stringify(reds));
+          const verdict = rec.frames.filter((f) => f.type === 'msg' && f.sessionId === C.sid && f.op === 'meta' && f.subtype === 'queue-result').slice(-1)[0];
+          ok("THE WIRE: the wrapper's verdict really is `gone` (ok:false) — the client is not guessing",
+            !!verdict && verdict.ok === false && verdict.reason === 'gone', JSON.stringify(verdict));
+          rec.close();
+          // …and THAT frame, given to the PRE-FIX client, paints the row red and
+          // keeps it: both halves are judged on the SAME bytes off the wire.
+          if (verdict) {
+            const { ChatView } = await import(path.join(REPO, 'src/lib/chat-view.js'));
+            const cvSrc = read('src/lib/chat-view.js');
+            const LINE = "      if (op.ok === false && op.reason === 'gone') this._dropQueueRow(op.id);\n";
+            ok('PRE-FIX control: the drop is a real line of the product source', cvSrc.includes(LINE));
+            const copy = path.join(REPO, 'src/lib', `.chat-view.gone-prefix-${process.pid}.js`);
+            fs.writeFileSync(copy, cvSrc.replace(LINE, ''));
+            try {
+              const { ChatView: Pre } = await import(copy);
+              const drive = (CV) => {
+                const seen = { items: null, results: [] };
+                const v = Object.assign(Object.create(CV.prototype), {
+                  sessionId: C.sid, _queue: [{ id: verdict.id, msgId: 'mq', preview: 'the c message' }], _queueSupported: true,
+                  _queueVerbsServed: ['remove', 'steer'], _messages: [], _elements: new Map(), _disposed: false,
+                  _getSessionIds: () => ({ backend: 'codex' }), winInfo: { backend: 'codex' },
+                  _chatInput: { setQueue: (items) => { seen.items = items; }, setQueueOpResult: (...a) => seen.results.push(a) },
+                  _renderers: { appendSystem() { } }, _drainPendingSteers() { }, _refreshQueueChips() { },
+                });
+                CV.prototype._onMeta.call(v, verdict);
+                return { v, seen };
+              };
+              const pre = drive(Pre), now = drive(ChatView);
+              ok('PRE-FIX: the SAME frame leaves the row in place and marks it REFUSED — the red ghost, reproduced from the product source',
+                pre.v._queue.length === 1 && pre.seen.items === null && pre.seen.results[0]?.[1] === false, JSON.stringify({ q: pre.v._queue, strip: pre.seen.items }));
+              ok('FIXED: the same frame removes it', now.v._queue.length === 0 && (now.seen.items || []).length === 0, JSON.stringify(now.v._queue));
+            } finally { try { fs.unlinkSync(copy); } catch { } }
+          }
+        }
+
+        // ── ⑭b THE WINDOW THAT STAYED OPEN ACROSS THE RESTART ──────────────
+        // Everything above opens FRESH windows AFTER the reboot, so the payload
+        // is applied the moment it lands and always wins. The reported shape is
+        // the other one: the window was already open, a restart always changes
+        // `normEpoch`, and that branch DEFERS the payload behind 2.338.0's
+        // 0-500ms render stagger — while the resync that same attach asked for
+        // is answered in ~10ms. Two arms of ONE experiment, differing in one
+        // file: the same live sessions, the same real wrappers, the same real
+        // restart, the same pinned stagger, and the SAME sequence of calls into
+        // the client — only the outcome differs.
+        const ESBUILD = path.join(REPO, 'node_modules/.bin/esbuild');
+        const CVW = path.join(wt, 'src', 'lib', 'chat-view.js');
+        const CVW_PRISTINE = fs.existsSync(CVW) ? fs.readFileSync(CVW, 'utf8') : '';
+        const GUARD14 = '    if ((this._queueStatedAt || 0) > at) return;\n';
+        if (!fs.existsSync(ESBUILD)) {
+          ok('⑭b: esbuild is available to rebuild the worktree bundle (the arms differ by ONE source line, so each needs its own build)', false, ESBUILD);
+        } else if (!CVW_PRISTINE.includes(GUARD14)) {
+          ok('⑭b: the recency guard is a real line of the worktree copy of chat-view.js', false, CVW);
+        } else {
+          // The page must run the bytes we just built, not a cached bundle.
+          await cdp('Network.enable');
+          await cdp('Network.setCacheDisabled', { cacheDisabled: true });
+          const buildBundle = () => execFileSync(ESBUILD, ['src/client.js', '--bundle', '--outfile=public/bundle.js',
+            '--format=iife', '--platform=browser', '--target=es2020', '--loader:.css=css'], { cwd: wt, stdio: 'pipe' });
+          const sidJson = (s) => JSON.stringify(s);
+          // ONE arm: reload the page onto the freshly built bundle, re-open both
+          // windows, wait for the strips to reach their pre-restart truth,
+          // instrument `_setQueue` (a pass-through recorder — the ONE writer is
+          // where the two arms diverge), PIN the stagger to the top of the
+          // product's own range, and then really SIGKILL the server.
+          const arm = async (label, expectGuard) => {
+            await cdp('Page.navigate', { url: `http://127.0.0.1:${PORT}/` });
+            await until(() => evaljs('!!(window.app && window.app.ready && window.app.wm)').catch(() => false), 60000, 300);
+            await evaljs('window.app.ready.then(() => true)').catch(() => { });
+            // EXACTLY ONE window per session. The layout autosave re-opens the
+            // windows the earlier phase left behind, and the ask is
+            // SELF-LIMITING: whichever view attaches first gets `queueKnown:
+            // false`, provokes the resync and turns the fact on — every other
+            // view then receives a payload that already KNOWS, so the branch
+            // under test never runs in the one this arm is instrumenting (the
+            // first run of this leg measured exactly that, and read it as "the
+            // deferred payload never happened"). Only ids THIS leg created are
+            // closed — never a heuristic sweep of somebody's workspace.
+            const closed = await evaljs(`(() => {
+              const mine = ${JSON.stringify(sids)};
+              const ids = [];
+              for (const [winId, v] of window.app.sessions) if (v && mine.includes(v.sessionId)) ids.push(winId);
+              for (const id of ids) { try { window.app.wm.closeWindow(id); } catch (e) { } }
+              return ids.length;
+            })()`);
+            await sleep(400);
+            await openWin(A.sid, 'A', cwdOf('a'));
+            await openWin(B.sid, 'B', cwdOf('b'));
+            const views = await evaljs(`(() => {
+              const n = {};
+              for (const [, v] of window.app.sessions) if (v && v.sessionId) n[v.sessionId] = (n[v.sessionId] || 0) + 1;
+              return n;
+            })()`);
+            ok(`⑭b ${label}: exactly ONE window per session (${closed} restored duplicates closed) — the resync ask is self-limiting, so a second view would answer this arm's question instead`,
+              views?.[A.sid] === 1 && views?.[B.sid] === 1, JSON.stringify(views));
+            const settled = await until(async () => ((await strip(B.sid)).rows === 1 ? true : null), 60000, 250);
+            ok(`⑭b ${label}: both windows are open and B's real queued row is on the strip BEFORE the restart`,
+              !!settled && (await strip(A.sid)).rows === 0, JSON.stringify({ a: await strip(A.sid), b: await strip(B.sid) }));
+            // ROLL THE RING AGAIN — the premise, re-established rather than
+            // assumed. Every resync since the first roll wrote a FRESH
+            // `queue_changed` into that stdout, so by now the next rebuild
+            // would see one and the payload would be a FACT: the first run of
+            // this leg measured exactly that (one `known:true` call, no
+            // placeholder, both arms "passing" for the wrong reason). Same
+            // production mechanism as above: a long agent reply into the open
+            // turn, measured on the buffer file.
+            for (const s of ['a', 'b']) fs.writeFileSync(path.join(cwdOf(s), 'flood'), '1');
+            const rerolled = await until(() => [A, B].every((s) => !bufferFile(s.sid).includes('queue_changed')), 120000, 250);
+            ok(`⑭b ${label}: the ring is rolled again — neither buffer carries a \`queue_changed\`, so the reboot below really does rebuild a normalizer that has never heard one`,
+              !!rerolled, JSON.stringify([A, B].map((s) => ({ bytes: bufferFile(s.sid).length, queueRecords: (bufferFile(s.sid).match(/queue_changed/g) || []).length }))));
+            // WHICH CODE IS THE PAGE RUNNING? Read it off the loaded prototype —
+            // a caching question must never be answered by hoping.
+            const guardInPage = await evaljs(`(() => { const v = window.__q[${sidJson(B.sid)}];
+              return /_queueStatedAt \\|\\| 0\\) > at/.test(String(Object.getPrototypeOf(v)._setQueue)); })()`);
+            ok(`⑭b ${label}: the loaded client ${expectGuard ? 'HAS' : 'does NOT have'} the recency guard (read off the prototype the page is running)`,
+              guardInPage === expectGuard, String(guardInPage));
+            const armed = await evaljs(`(() => {
+              window.__calls = {};
+              for (const sid of [${sidJson(A.sid)}, ${sidJson(B.sid)}]) {
+                const v = window.__q[sid];
+                if (!v) return 'no view for ' + sid;
+                window.__calls[sid] = [];
+                const orig = v._setQueue.bind(v);
+                v._setQueue = function (items, opts) {
+                  window.__calls[sid].push({ n: (items || []).length, known: !opts || opts.known !== false });
+                  return orig(items, opts);
+                };
+              }
+              window.__realRandom = Math.random; Math.random = () => 0.99;
+              return Math.random() === 0.99 ? 'ok' : 'the stagger pin did not take';
+            })()`);
+            ok(`⑭b ${label}: \`_setQueue\` is instrumented and the 0-500ms stagger is PINNED near its top (the defect is an ordering race — sampling it would make this control a coin toss)`,
+              armed === 'ok', String(armed));
+            const b4 = await restart();
+            ok(`⑭b ${label}: the server was SIGKILLed and booted again — the browser window never closed`, !!b4.up, b4.log().slice(-400));
+            // both the answer AND the deferred payload have run
+            await until(async () => ((await evaljs(`(window.__calls[${sidJson(B.sid)}] || []).length >= 2`)) === true ? true : null), 90000, 200);
+            await sleep(2500);   // …and then the whole stagger window again, so what is read is the STEADY state
+            const calls = await evaljs('JSON.parse(JSON.stringify(window.__calls))');
+            const end = { a: await strip(A.sid), b: await strip(B.sid) };
+            await evaljs('Math.random = window.__realRandom; true');
+            return { calls: calls || {}, end };
+          };
+
+          // ARM 1 — PRE-FIX: the real worktree source with ONLY the guard line
+          // removed, built into the bundle the page loads.
+          fs.writeFileSync(CVW, CVW_PRISTINE.replace(GUARD14, ''));
+          ok('⑭b PRE-FIX: exactly one line was removed from the worktree copy of the product source',
+            fs.readFileSync(CVW, 'utf8').length === CVW_PRISTINE.length - GUARD14.length);
+          buildBundle();
+          const pre14 = await arm('PRE-FIX', false);
+          const bCallsPre = pre14.calls[B.sid] || [];
+          ok('⑭b PRE-FIX: the wrapper ANSWERED first (a known list with the real row) and the stale payload followed with its `queueKnown:false` placeholder — the order the incident produces',
+            bCallsPre.length >= 2 && bCallsPre[0].known === true && bCallsPre[0].n === 1 && bCallsPre.some((c) => c.known === false && c.n === 0),
+            JSON.stringify(bCallsPre));
+          ok('⑭b PRE-FIX: …and the strip ends EMPTY — a message that will really run, held by the wrapper, stated on the wire, and NOWHERE on screen (no row to steer, remove or edit; the ask is self-limiting, so nothing asks again)',
+            pre14.end.b.rows === 0, JSON.stringify(pre14.end));
+
+          // ARM 2 — FIXED: the same file, restored.
+          fs.writeFileSync(CVW, CVW_PRISTINE);
+          buildBundle();
+          const fix14 = await arm('FIXED', true);
+          const bCallsFix = fix14.calls[B.sid] || [];
+          ok('⑭b FIXED: the SAME two calls arrive in the SAME order — the deferred payload really did run, it was not skipped',
+            bCallsFix.length >= 2 && bCallsFix[0].known === true && bCallsFix[0].n === 1 && bCallsFix.some((c) => c.known === false && c.n === 0),
+            JSON.stringify(bCallsFix));
+          ok('⑭b FIXED: …and the row is STILL THERE in the steady state — a payload half a second old cannot overwrite the answer it asked for',
+            fix14.end.b.rows === 1 && /the b message/.test(fix14.end.b.texts.join(' ')) && fix14.end.b.red === 0, JSON.stringify(fix14.end));
+          ok('⑭b BOTH ARMS: session A — whose message really did leave the queue — ends EMPTY either way (the fix is about recency, not about keeping whatever was on screen)',
+            pre14.end.a.rows === 0 && fix14.end.a.rows === 0, JSON.stringify({ pre: pre14.end.a, fix: fix14.end.a }));
+        }
+      } catch (e) {
+        ok('the ⑭ browser leg ran', false, String(e.message || e).slice(0, 400));
+      } finally {
+        try { cws?.close(); } catch { }
+        try { chrome?.kill('SIGKILL'); } catch { }
+        chrome = null;
+      }
+    }
+    // Kill the sessions we started (their wrappers outlive the server by design).
+    try {
+      const k = await openWs();
+      for (const sid of sids) k.send({ type: 'kill', sessionId: sid });
+      await sleep(1500);
+      k.close();
+    } catch { }
+  }
+  cleanup();
+  process.removeListener('exit', cleanup);
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

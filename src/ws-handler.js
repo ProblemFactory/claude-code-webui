@@ -1148,6 +1148,33 @@ function registerWsHandler(wss, ctx) {
               // doing that twice inside the ws attach handler is the 2.369.16 law
               // (no avoidable sync work here).
               const wcapsAttach = wrapperCaps(BUFFERS_DIR, data.sessionId, session.socketPath);
+              // THE QUEUE ADVERT, hoisted out of the payload literal because
+              // the RESYNC decision below needs the same two facts (2026-09-09).
+              const queueAdvert = (() => {
+                const wc = wcapsAttach; // the ONE sidecar read above (2.369.16 law)
+                const inBand = session._normalizer?.queueVerbsPublished?.();
+                // Has THIS server ever seen THIS wrapper publish its queue?
+                const published = !!session._normalizer?.queuePublished?.();
+                const served = wc.inputQueue ? wc.queueVerbs
+                  : (Array.isArray(inBand) ? inBand
+                    : (published ? LEGACY_QUEUE_VERBS.slice() : null));
+                // NULL means "we do not know", NOT "it serves nothing": an
+                // empty ARRAY is a real answer (a wrapper that named no
+                // verbs) and the client intersects with it, so answering []
+                // for the unknown case hid every control (round-2 verifier).
+                //
+                // KNOWN vs GUESSED (2026-09-09, the ghost-row incident). A
+                // queue publication is a stdout record and the wrapper's
+                // stdout is an 800KB RING (MAX_BUFFER, head-dropped), so a
+                // normalizer REBUILT after a server restart has never seen
+                // one: `queueState()` is [] whether the wrapper's queue is
+                // empty or holds 25 items, and the two are byte-identical on
+                // the wire. Say WHICH it is — the client shows no rows on a
+                // guess (a row nobody can act on is worse than a row that
+                // reappears one round trip later) and the resync below asks
+                // the one process that actually knows.
+                return { queueSupported: !!served, queueVerbs: served || null, queueKnown: !served || published };
+              })();
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, mode: 'chat',
                 messages, totalCount, chatStatus, isStreaming, streamingLabel, streamingKind: isStreaming ? (session._streamingKind || null) : null, autoResume: autoResume?.statusFor?.(data.sessionId) || null, outputStyle: session._outputStyle || null, worktree: !!session._worktree, worktreePath: session._worktreePath || null, spawnOrigin: { model: session._modelOrigin || null, effort: session._effortOrigin || null }, taskState: sm.taskState(), turnMap, pendingPermissions: pendingPerms,
                 // The input queue as the normalizer knows it (the wrapper's
@@ -1156,25 +1183,10 @@ function registerWsHandler(wss, ctx) {
                 // strip; harnesses without a queue report [].
                 queue: session._normalizer?.queueState?.() || [],
                 // …and whether the RUNNING wrapper actually publishes/serves a
-                // queue (its own sidecar advert). The client's strip and chip
-                // gate on this AS WELL AS the harness caps row: a session
-                // spawned before the queue/steer release would otherwise wear
-                // controls whose frames its wrapper drops (2.361.1/2.364.1).
-                // …and WHICH verbs that wrapper serves, so the client renders
-                // exactly the controls this process can honour (an older
-                // wrapper gets the legacy three, never a dead reorder handle).
-                ...(() => {
-                  const wc = wcapsAttach; // the ONE sidecar read above (2.369.16 law)
-                  const inBand = session._normalizer?.queueVerbsPublished?.();
-                  const served = wc.inputQueue ? wc.queueVerbs
-                    : (Array.isArray(inBand) ? inBand
-                      : (session._normalizer?.queuePublished?.() ? LEGACY_QUEUE_VERBS.slice() : null));
-                  // NULL means "we do not know", NOT "it serves nothing": an
-                  // empty ARRAY is a real answer (a wrapper that named no
-                  // verbs) and the client intersects with it, so answering []
-                  // for the unknown case hid every control (round-2 verifier).
-                  return { queueSupported: !!served, queueVerbs: served || null };
-                })(),
+                // queue (its own sidecar advert), WHICH verbs it serves, and
+                // whether the `queue` above is a FACT or a guess — see
+                // queueAdvert above.
+                ...queueAdvert,
                 // …and whether that same running wrapper serves the LIVE style
                 // verb. The client needs BOTH facts (2.369.58): with only the
                 // harness caps row, a session spawned before the live-switch
@@ -1196,6 +1208,38 @@ function registerWsHandler(wss, ctx) {
                 normEpoch: session._normEpoch || 0,
                 remoteState: session._remoteState || (session._bareRemote ? { state: 'unprotected' } : null),
                 goal: session._goal || null, goalElapsed: session._goalElapsed || 0, goalStatus: session._goalStatus || null }));
+              // ASK THE ONE PROCESS THAT KNOWS (2026-09-09, the ghost-row
+              // incident). We just told the client our queue is a GUESS, so
+              // the strip is showing NOTHING; the wrapper's answer is an
+              // ordinary authoritative `queue_changed` (including an empty
+              // one) and it arrives through the normal consumer → normalizer →
+              // meta-op path, correcting every attached client at once.
+              //
+              // ONLY when we do not know: once the wrapper has published,
+              // `queueKnown` is true and this never fires again — self-limiting
+              // rather than one frame per attach.
+              //
+              // TWO GATES, the same pair every queue frame passes (never a
+              // backend id): the HARNESS declares a queue at all, and the
+              // RUNNING WRAPPER adverts `queueResync` in the sidecar IT wrote.
+              // The second is load-bearing here for a reason a dropped frame
+              // usually is not: the ACP wrapper answers an unknown stdin verb
+              // with a VISIBLE error card, so asking an older process would
+              // put a red notice in the user's chat on every attach. A wrapper
+              // that cannot answer (old build, or REMOTE — its sidecar lives
+              // on ITS machine) leaves the client on the honest "no rows"
+              // state until that wrapper's own next publication; that is the
+              // state a freshly-loaded page already had, so it is not a
+              // regression, and a stale row is what this whole change removes.
+              // Adapter-formatted like every other stdin verb, so the wire
+              // spelling lives with formatQueueOp rather than here.
+              if (!queueAdvert.queueKnown && session.pty && wcapsAttach.queueResync
+                  && (capsOf(session.backend).inputModes?.queueVerbs || []).length) {
+                try {
+                  const ad = adapterRegistry.get(session.backend);
+                  if (ad) session.pty.write(ad.formatQueueResync() + '\n');
+                } catch (e) { console.log(`[${data.sessionId}] queue resync not sent: ${e.message}`); }
+              }
             } else {
               ws.send(JSON.stringify({ type: 'attached', sessionId: data.sessionId, name: session.name, cwd: session.cwd, buffer: session.buffer || '' }));
               // A Ctrl+G edit still in flight (helper script blocking on its

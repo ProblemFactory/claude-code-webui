@@ -177,7 +177,15 @@ setInterval(() => {
   send({ method: 'turn/completed', params: { threadId: 'th-p2', turn: { id: ended, status: 'failed', items: [], error: { message: "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at Sep 13th, 2026 8:36 PM.", codexErrorInfo: 'usageLimitExceeded', additionalDetails: null } } } });
 }, 40);
 `;
-const w = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), buf, meta, process.execPath, '-e', STUB], {
+// EVERY STUB EXITS WHEN ITS WRAPPER DOES (2026-09-09). A stub is spawned as the
+// wrapper's CHILD over a piped stdin, so killing the wrapper closes that pipe —
+// the real `codex app-server` exits on it, and a stub that ignores it becomes an
+// ORPHAN that outlives the run (measured on this box after two days of gate
+// runs: hundreds of this suite's `node -e` stubs still alive, holding GBs).
+// ONE prologue at the ONE place a stub body reaches `node -e`, rather than a
+// line every future stub author has to remember.
+const stubSrc = (body) => `process.stdin.on('end', () => process.exit(0));\nprocess.on('SIGTERM', () => process.exit(0));\n${body}`;
+const w = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), buf, meta, process.execPath, '-e', stubSrc(STUB)], {
   stdio: ['pipe', 'pipe', 'pipe'],
   env: { ...process.env, CODEX_WEBUI_CWD: dir, VIBESPACE_API: '', VIBESPACE_SESSION_TOKEN: '', VIBESPACE_SKIP_AGENT_HOOKS: '1' },
 });
@@ -491,7 +499,13 @@ ok(/try \{ await clearQueueForStop\(\); \}[\s\S]{0,600}?if \(stopTurnId\) await 
 // handleInput without awaiting it, so two frames really do overlap)
 ok(/let stopSweepInFlight = null;\s*\nasync function clearQueueForStop\(\) \{\s*\n\s*if \(stopSweepInFlight\) return stopSweepInFlight;/.test(wsrc) && /async function _clearQueueForStop\(\) \{/.test(wsrc), 'wrapper pin: the Stop sweep is SINGLE-FLIGHT — a second Stop rides the running one instead of re-listing the queue it is deleting');
 ok(/if \(interruptInFlight && interruptInFlight\.turnId === turnId\)/.test(wsrc), 'wrapper pin: turn/interrupt coalesces per TURN + a live RPC (never a time window — an answered RPC with the turn still running is a real retry)');
-ok(/emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: true, msg_id: known\?\.msgId \|\| '', reason: 'stopped' \}\);/.test(wsrc) && /await refreshQueue\(\{ timeoutMs: rpcBudget\(\) \}\);\s*\n\s*return removed;/.test(wsrc), "wrapper pin: every dropped item is reported as a removal BEFORE the republish (a cleared chip reads as 'it ran'), and that republish is BUDGETED like the rest of the sweep");
+ok(/emitTaskEvent\('queue_op_result', \{ op: 'remove', id, ok: true, msg_id: known\?\.msgId \|\| '', reason: 'stopped' \}\);/.test(wsrc) && /await refreshQueue\(\{ timeoutMs: rpcBudget\(\) \}\);[\s\S]{0,400}\n\s*return removed;/.test(wsrc), "wrapper pin: every dropped item is reported as a removal BEFORE the republish (a cleared chip reads as 'it ran'), and that republish is BUDGETED like the rest of the sweep");
+// …and a `queue-resync` that landed while the latch was up is still OWED
+// (2026-09-09): the closing refresh above dedups on our own fingerprint, so it
+// is not a re-statement — the asker would wait forever for an answer the sweep
+// silently swallowed.
+ok(/if \(queueResyncOwed\) resyncQueue\(\);\s*\n\s*return removed;/.test(wsrc) && /if \(queueSweepActive\) \{ queueResyncOwed = true;/.test(wsrc),
+  'wrapper pin: a resync asked DURING a Stop sweep is deferred, not dropped — the sweep pays it after its own closing refresh');
 // round-2 pins: the three defects, in the source
 ok(/if \(queueSweepActive\) return;\n\s*const fp = JSON\.stringify/.test(wsrc), 'wrapper pin: the sweep latch sits on publishQueue — the ONE choke point (turn/started republishes the CACHED list with no RPC at all)');
 ok(/return resp\?\.deleted !== false;/.test(wsrc) && /ours = await deleteQueuedItem\(id, rpcBudget\(\)\);/.test(wsrc), "wrapper pin: the delete's own {deleted:false} verdict is READ (an item drained between the list and the delete RAN — it is not a Stop removal)");
@@ -514,7 +528,7 @@ const spawnStub = (tag, stubBody) => {
   const d = fs.mkdtempSync(path.join(os.tmpdir(), `vs-cxp2-${tag}-`));
   const sid = `sess-${tag}-1700000000009`;
   const b = path.join(d, sid + '.buf'), mt = path.join(d, sid + '.json'), rl = path.join(d, 'rpc.jsonl');
-  const proc = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), b, mt, process.execPath, '-e', stubBody.replace(/__RPCLOG__/g, JSON.stringify(rl))], {
+  const proc = spawn(process.execPath, [path.join(REPO, 'data/bin/codex-chat-wrapper.js'), b, mt, process.execPath, '-e', stubSrc(stubBody.replace(/__RPCLOG__/g, JSON.stringify(rl)))], {
     stdio: ['pipe', 'pipe', 'pipe'],
     env: { ...process.env, CODEX_WEBUI_CWD: d, VIBESPACE_API: '', VIBESPACE_SESSION_TOKEN: '', VIBESPACE_SKIP_AGENT_HOOKS: '1' },
   });
@@ -1027,7 +1041,7 @@ setInterval(() => {
       fs.writeFileSync(cw, before);
       const sid = 'sess-prefix-1700000000009';
       const cb = path.join(cd, sid + '.buf'), cm2 = path.join(cd, sid + '.json'), crl = path.join(cd, 'rpc.jsonl');
-      const p2 = spawn(process.execPath, [cw, cb, cm2, process.execPath, '-e', STUB_INHERIT.replace(/__RPCLOG__/g, JSON.stringify(crl))], {
+      const p2 = spawn(process.execPath, [cw, cb, cm2, process.execPath, '-e', stubSrc(STUB_INHERIT.replace(/__RPCLOG__/g, JSON.stringify(crl)))], {
         stdio: ['pipe', 'pipe', 'pipe'],
         env: { ...process.env, CODEX_WEBUI_CWD: cd, VIBESPACE_API: '', VIBESPACE_SESSION_TOKEN: '', VIBESPACE_SKIP_AGENT_HOOKS: '1' },
       });
@@ -2035,6 +2049,153 @@ process.stdin.on('data', (d) => {
     ok(RETIRED.test(String(tf.codexErrorInfo)) === false, 'NEGATIVE CONTROL: the spelling the classifier looked for before matches NOTHING the wire sends');
   }
   ok(tf.turn_id === walledTurn, 'and it names the turn that was walled (the wrapper still closes that turn out)', JSON.stringify({ tf: tf.turn_id, walledTurn }));
+}
+
+// ── ⑩ THE RESYNC VERB: "state your queue again, out loud" (2026-09-09) ──────
+// THE INCIDENT: the strip showed a queued message an hour after it had been
+// steered away, through a server restart, and clicking ✕ on it only painted it
+// red. The queue's ONLY channel to the orchestrator is `queue_changed` on
+// stdout, and stdout here is an 800KB RING (MAX_BUFFER, head-dropped) — so a
+// server that restarts rebuilds its normalizer from a tail that carries no
+// queue record at all and reports an EMPTY queue it merely GUESSED.
+// `queue-resync` is how it stops guessing.
+//
+// The load-bearing property is FORCE: `publishQueue` dedups on the wrapper's
+// OWN fingerprint, so "still empty" is exactly what it cannot say by itself —
+// which is also why the `refreshQueue()` the wrapper runs after a 'gone'
+// verdict corrected nobody.
+console.log('— ⑩ queue-resync: the wrapper re-states its queue on demand (including an EMPTY one)');
+const STUB_RESYNC = `
+const fs = require('fs');
+let b = ''; let turns = 0; let queue = []; let qseq = 0; let activeTurn = null;
+const send = (o) => process.stdout.write(JSON.stringify(o) + '\\n');
+const changed = () => send({ method: 'thread/queue/changed', params: { threadId: 'th-resync' } });
+// A PING that changes NOTHING: the app-server's own "the queue moved" signal,
+// fired over an unchanged queue. This is the control the resync verb exists
+// for — the wrapper re-lists and publishes NOTHING, because by its own
+// fingerprint nothing changed.
+setInterval(() => {
+  try { fs.unlinkSync(__PING__); } catch { return; }
+  changed();
+}, 40);
+process.stdin.setEncoding('utf8');
+process.stdin.on('data', (d) => {
+  b += d; let i;
+  while ((i = b.indexOf('\\n')) !== -1) {
+    const line = b.slice(0, i); b = b.slice(i + 1);
+    if (!line.trim()) continue;
+    let m; try { m = JSON.parse(line); } catch { continue; }
+    if (m.id === undefined || !m.method) continue;
+    fs.appendFileSync(__RPCLOG__, line + '\\n');
+    if (m.method === 'thread/start') { send({ id: m.id, result: { thread: { id: 'th-resync' } } }); continue; }
+    if (m.method === 'turn/start') { turns++; const tid = 'turn-' + turns; activeTurn = tid; send({ id: m.id, result: { turn: { id: tid } } }); send({ method: 'turn/started', params: { turn: { id: tid } } }); continue; }
+    if (m.method === 'thread/queue/add') { const q = { id: 'q' + (++qseq), input: m.params.input, clientUserMessageId: m.params.clientUserMessageId }; queue.push(q); send({ id: m.id, result: { queuedSubmission: q } }); changed(); continue; }
+    if (m.method === 'thread/queue/list') { send({ id: m.id, result: { data: queue.slice(), nextCursor: null } }); continue; }
+    if (m.method === 'thread/queue/delete') {
+      const at = queue.findIndex((q) => q.id === m.params.queuedSubmissionId);
+      if (at < 0) { send({ id: m.id, result: { deleted: false } }); continue; }
+      queue.splice(at, 1); send({ id: m.id, result: { deleted: true } }); changed(); continue;
+    }
+    if (m.method === 'turn/interrupt') { send({ id: m.id, result: {} }); const e = activeTurn; activeTurn = null; send({ method: 'turn/completed', params: { turn: { id: e }, status: 'interrupted' } }); continue; }
+    send({ id: m.id, result: {} });
+  }
+});
+`;
+{
+  const pingFile = path.join(dir, 'resync-ping');
+  try { fs.unlinkSync(pingFile); } catch { }
+  const R = spawnStub('resync', STUB_RESYNC.replace(/__PING__/g, JSON.stringify(pingFile)));
+  const ping = () => fs.writeFileSync(pingFile, '1');
+  ok(await waitFor(() => R.meta()?.threadId === 'th-resync'), 'resync stub: the wrapper has a thread');
+
+  // THE ADVERT, from the file the wrapper itself writes. The server gates the
+  // ask on this — an older codex wrapper drops an unknown stdin verb silently
+  // and an older ACP wrapper answers it with a VISIBLE error card, so a
+  // process that cannot answer must never be asked (2.361.1/2.364.1).
+  ok(await waitFor(() => R.meta()?.caps?.queueResync === true),
+    'the RUNNING wrapper adverts caps.queueResync in its own sidecar (the per-PROCESS gate the server reads)', JSON.stringify(R.meta()?.caps));
+
+  // A turn, one queued message, then remove it — the incident's own shape.
+  R.send({ type: 'chat-input', text: 'go', msgId: 'r0' });
+  ok(await waitFor(() => R.meta()?.activeTurnId === 'turn-1'), 'resync stub: a turn is running');
+  R.send({ type: 'chat-input', text: 'the message that will be removed', msgId: 'r1' });
+  ok(await waitFor(() => R.lastQueue().length === 1), 'one message is queued and published', JSON.stringify(R.lastQueue()));
+  const qid = R.lastQueue()[0].id;
+  R.send({ type: 'queue-op', op: 'remove', id: qid });
+  ok(await waitFor(() => R.lastQueue().length === 0), 'it is removed and the EMPTY queue is published once', JSON.stringify(R.queues().map((q) => q.items.length)));
+
+  // THE MECHANISM, as a control: the app-server's own "queue changed" signal
+  // over an UNCHANGED queue publishes NOTHING. This is why a restarted server
+  // can never be corrected by waiting — and why the verb has to FORCE.
+  const beforePing = R.queues().length;
+  ping();
+  await sleep(600);
+  ok(R.queues().length === beforePing,
+    `CONTROL: a thread/queue/changed over an unchanged queue publishes nothing (fingerprint dedup, ${R.queues().length} publications) — waiting cannot correct a server that lost the last one`);
+  ok(R.rpc().filter((m) => m.method === 'thread/queue/list').length > 0, '…and the wrapper really did re-list (the dedup is on the PUBLISH, not on the read)');
+
+  // …and the verb DOES.
+  R.send({ type: 'queue-resync' });
+  ok(await waitFor(() => R.queues().length > beforePing),
+    'THE FIX: `queue-resync` re-states the queue even though nothing changed', `${R.queues().length} vs ${beforePing}`);
+  {
+    const last = R.queues().slice(-1)[0];
+    ok(Array.isArray(last.items) && last.items.length === 0,
+      'and the answer is the EMPTY queue — the whole point (an empty answer is what a rebuilt normalizer cannot produce for itself)', JSON.stringify(last));
+    ok(Array.isArray(last.verbs) && last.verbs.includes('steer'),
+      'it is an ORDINARY publication: `verbs` rides it like every other, so the client re-learns the controls in the same frame', JSON.stringify(last.verbs));
+  }
+  // NO RPC: the answer is what this wrapper already believes (every app-server
+  // mutation arrives as thread/queue/changed), so the ask cannot hang behind a
+  // wedged app-server on the attach path (the 2.369.16 law).
+  {
+    const listsBefore = R.rpc().filter((m) => m.method === 'thread/queue/list').length;
+    R.send({ type: 'queue-resync' });
+    await sleep(500);
+    ok(R.rpc().filter((m) => m.method === 'thread/queue/list').length === listsBefore,
+      'the resync makes NO RPC (it re-states what the wrapper already believes — an attach may not wait on the app-server)');
+  }
+  // A NON-EMPTY queue re-states too: the restart case where items really ARE
+  // pending and the client is showing nothing until this lands.
+  {
+    R.send({ type: 'chat-input', text: 'still queued', msgId: 'r2' });
+    ok(await waitFor(() => R.lastQueue().length === 1), 'a second message is queued');
+    const n = R.queues().length;
+    R.send({ type: 'queue-resync' });
+    ok(await waitFor(() => R.queues().length > n), 'a resync over a NON-empty queue publishes as well');
+    ok((R.queues().slice(-1)[0].items || []).length === 1, '…and it carries the pending item, so the strip comes back', JSON.stringify(R.queues().slice(-1)[0].items));
+  }
+  R.stop();
+
+  // NEGATIVE CONTROL: the PRE-FIX wrapper — the product source with only the
+  // `queue-resync` branch removed — drops the frame SILENTLY and publishes
+  // nothing. That silence is the reason the server gates the ask on the
+  // sidecar advert instead of asking everybody.
+  {
+    const src = fs.readFileSync(path.join(REPO, 'data/bin/codex-chat-wrapper.js'), 'utf8');
+    const BRANCH = "  if (msg.type === 'queue-resync') {\n    resyncQueue();\n    return;\n  }\n";
+    ok(src.includes(BRANCH), 'the pre-fix control patches the REAL branch (its text is present in the product source)');
+    const pd = fs.mkdtempSync(path.join(os.tmpdir(), 'vs-cxp2-resync-pre-'));
+    const pre = path.join(pd, 'codex-chat-wrapper.prefix.js');
+    fs.writeFileSync(pre, src.replace(BRANCH, ''));
+    const psid = 'sess-pre-1700000000009';
+    const pb = path.join(pd, psid + '.buf'), pm = path.join(pd, psid + '.json'), prl = path.join(pd, 'rpc.jsonl');
+    const pp = spawn(process.execPath, [pre, pb, pm, process.execPath, '-e', stubSrc(STUB_RESYNC.replace(/__PING__/g, JSON.stringify(path.join(pd, 'ping'))).replace(/__RPCLOG__/g, JSON.stringify(prl)))],
+      { stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_WEBUI_CWD: pd, VIBESPACE_API: '', VIBESPACE_SESSION_TOKEN: '', VIBESPACE_SKIP_AGENT_HOOKS: '1' } });
+    let po = ''; pp.stdout.on('data', (x) => { po += x; }); pp.stderr.on('data', () => {});
+    const pq = () => po.split('\n').filter(Boolean).map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter((e) => e && e.type === 'event_msg' && e.payload?.type === 'queue_changed');
+    const pmeta = () => { try { return JSON.parse(fs.readFileSync(pm, 'utf8')); } catch { return null; } };
+    ok(await waitFor(() => pmeta()?.threadId === 'th-resync'), 'PRE-FIX control: the patched wrapper boots');
+    const n0 = pq().length;
+    pp.stdin.write(JSON.stringify({ type: 'queue-resync' }) + '\n');
+    await sleep(800);
+    ok(pq().length === n0, `PRE-FIX: the same frame publishes NOTHING (${pq().length} vs ${n0}) — the verb, not the plumbing, is what re-states the queue`);
+    ok(pmeta()?.threadId === 'th-resync', '…and the unknown verb is dropped SILENTLY (the wrapper is still alive) — which is why the server asks only a wrapper that adverts it');
+    try { pp.kill('SIGTERM'); } catch { }
+    await sleep(200);
+    try { fs.rmSync(pd, { recursive: true, force: true }); } catch { }
+  }
 }
 
 try { w.kill('SIGTERM'); } catch {}

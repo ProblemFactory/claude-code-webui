@@ -59,6 +59,14 @@ function resolveWrapperFiles(BUFFERS_DIR, id, sockPath) {
  *  this says what THIS process can do — a codex session spawned before the
  *  queue/steer release wears the harness capability but would drop the frame
  *  silently (the 2.361.1/2.364.1 skew class), so both gates must pass.
+ *  queueResync (2026-09-09): the RUNNING wrapper serves `queue-resync` — it
+ *  will re-state its queue on demand, including an EMPTY one. Needed because a
+ *  queue publication is a stdout record and stdout is a RING in every wrapper
+ *  that owns a queue (800KB, head-dropped): a server that restarts rebuilds a
+ *  normalizer that has never seen one, so its `queue: []` is a GUESS. Same
+ *  per-PROCESS skew law — an older codex wrapper drops the frame silently and
+ *  an older ACP wrapper answers it with a VISIBLE "unknown stdin verb" error
+ *  card, so a session whose wrapper does not advert this is never asked.
  *  queueVerbs (verb table, design-harness-features §2.1): WHICH queue verbs
  *  this process serves. A wrapper that adverts `inputQueue` but no list is a
  *  2.369.55-or-older build — it serves exactly LEGACY_QUEUE_VERBS, so the new
@@ -92,13 +100,13 @@ const QUEUE_OP_MAX_BYTES = 64 * 1024;
 function wrapperCaps(BUFFERS_DIR, id, sockPath) {
   const { sidecar } = resolveWrapperFiles(BUFFERS_DIR, id, sockPath);
   let m;
-  try { m = JSON.parse(fs.readFileSync(sidecar, 'utf-8')); } catch { return { frameFile: false, peerMessage: false, inputQueue: false, queueVerbs: [], responseStyle: false, permissionRules: false, caps: null, reason: 'no-sidecar', startedAt: null, pid: null }; }
+  try { m = JSON.parse(fs.readFileSync(sidecar, 'utf-8')); } catch { return { frameFile: false, peerMessage: false, inputQueue: false, queueVerbs: [], queueResync: false, responseStyle: false, permissionRules: false, caps: null, reason: 'no-sidecar', startedAt: null, pid: null }; }
   const caps = (m && m.caps && typeof m.caps === 'object') ? m.caps : null;
   const inputQueue = !!(caps && caps.inputQueue);
   const queueVerbs = Array.isArray(caps && caps.queueVerbs)
     ? caps.queueVerbs.map((v) => String(v))
     : (inputQueue ? LEGACY_QUEUE_VERBS.slice() : []);
-  return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), inputQueue, queueVerbs, responseStyle: !!(caps && caps.responseStyle), permissionRules: !!(caps && caps.permissionRules), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
+  return { frameFile: !!(caps && caps.frameFile), peerMessage: !!(caps && caps.peerMessage), inputQueue, queueVerbs, queueResync: !!(caps && caps.queueResync), responseStyle: !!(caps && caps.responseStyle), permissionRules: !!(caps && caps.permissionRules), caps, reason: caps ? 'ok' : 'no-caps', startedAt: (m && m.startedAt) || null, pid: (m && m.pid) || null };
 }
 
 module.exports = { resolveWrapperFiles, wrapperCaps, LEGACY_QUEUE_VERBS, QUEUE_EDIT_MAX_CHARS, QUEUE_OP_MAX_BYTES };

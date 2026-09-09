@@ -421,7 +421,14 @@ const meta = {
   // as responseStyle/inputQueue — an older wrapper never adverts it and the ws
   // layer refuses the verb for that session with a reason instead of writing a
   // frame it would drop silently.
-  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true, queueVerbs: QUEUE_VERBS_SERVED, responseStyle: true, permissionRules: true },
+  // queueResync: this wrapper serves `queue-resync` — "state your queue again,
+  // out loud". The queue's ONLY channel to the orchestrator is `queue_changed`
+  // on stdout, and stdout is an 800KB RING here (MAX_BUFFER, head-dropped), so
+  // a server that restarts hours later rebuilds a normalizer that has never
+  // seen one and reports an EMPTY queue it merely guessed. Same per-PROCESS
+  // skew law as the adverts above: a wrapper spawned before this verb would
+  // drop the frame silently and the server must not ask it.
+  caps: { peerMessage: true, frameFile: true, threadScoped: true, inputQueue: true, queueVerbs: QUEUE_VERBS_SERVED, responseStyle: true, permissionRules: true, queueResync: true },
   // The response style (codex Personality) this session actually runs with.
   // '' = the user made no choice ⇒ the key is never sent and ~/.codex/config.toml
   // decides. Reported so Session Properties can name the EFFECTIVE value.
@@ -1673,6 +1680,11 @@ let queueRefreshInFlight = false, queueRefreshAgain = false;
 // when the sweep began: it answers after the latch drops, with pre-sweep rows.
 let queueSweepActive = false;
 let queueSweepSeq = 0;
+// A `queue-resync` that arrived while the sweep held the latch. The sweep's
+// closing refresh is fingerprint-deduped against what WE last published, so it
+// cannot be the answer to "state it again" — the owed re-statement is FORCED
+// after it (see resyncQueue).
+let queueResyncOwed = false;
 // Stop is a SAFETY CONTROL: it must not sit behind a wedged app-server. Every
 // RPC the sweep makes is budgeted, the whole sweep is capped, and whatever is
 // left when the cap expires is REPORTED (ok:false) instead of delaying the
@@ -1881,6 +1893,40 @@ function publishQueue(items, { force = false } = {}) {
   // cannot read this machine's sidecar, so the in-band list is the only advert
   // it will ever see (a publication with no `verbs` = a pre-verb-table build).
   emitTaskEvent('queue_changed', { items, turn_id: meta.activeTurnId || null, verbs: QUEUE_VERBS_SERVED });
+}
+
+/** RE-STATE THE QUEUE, EVEN IF IT HAS NOT CHANGED (`queue-resync`, 2026-09-09).
+ *  The orchestrator's ONLY channel to this queue is `queue_changed` on stdout,
+ *  and stdout is a RING (MAX_BUFFER, head-dropped): a server that restarts an
+ *  hour later rebuilds its normalizer from a tail that carries no queue record
+ *  at all, so its `queue: []` is a GUESS — byte-identical whether this queue is
+ *  empty or holds 25 items. It asks; this answers, and an EMPTY answer is the
+ *  whole point (the incident's strip showed a row that had left the queue 58
+ *  minutes and one restart earlier, and clicking it only painted it red).
+ *
+ *  NO RPC. `meta.queue` IS what this wrapper believes — every app-server
+ *  mutation arrives as `thread/queue/changed` and refreshes it — so the answer
+ *  cannot fail, cannot hang behind a wedged app-server and costs the attach
+ *  path nothing (the 2.369.16 law about work inside the attach handler).
+ *  `force` is required: `publishQueue` dedups on ITS OWN fingerprint, which is
+ *  exactly what makes a re-statement of an unchanged queue impossible without
+ *  it — the reason the incident's `refreshQueue()` after the 'gone' verdict
+ *  corrected nothing.
+ *
+ *  HONEST BOUNDARY: this is the wrapper's BELIEF, not a fresh read. It is the
+ *  best knowledge the process that owns the queue has (every
+ *  `thread/queue/changed` refreshes it with a real `thread/queue/list`), and an
+ *  item the app-server drained without notifying is corrected the moment the
+ *  user acts on the row — `queue-op` re-lists first and answers 'gone', which
+ *  REMOVES it. Trading that residual staleness for an RPC on the attach path
+ *  would put a wedged app-server between the user and their own history. */
+function resyncQueue() {
+  // The Stop sweep owns the publish while it runs (a re-statement mid-sweep
+  // lists items the user has already been told were removed). Owe it instead.
+  if (queueSweepActive) { queueResyncOwed = true; log('queue resync deferred: a Stop sweep owns the publish'); return; }
+  queueResyncOwed = false;
+  publishQueue(meta.queue || [], { force: true });
+  log(`queue resync: re-stated ${(meta.queue || []).length} queued item(s)`);
 }
 
 /** THE FULL QUEUE, paged to the END (`nextCursor`). Returns
@@ -2199,6 +2245,9 @@ async function _clearQueueForStop() {
   // Budgeted like the rest of the sweep: `turn/interrupt` is the caller's very
   // next statement and must not wait on this list.
   await refreshQueue({ timeoutMs: rpcBudget() });
+  // …and an ASK that landed mid-sweep is still owed: the refresh above dedups
+  // on our own fingerprint, so it is not a re-statement (resyncQueue).
+  if (queueResyncOwed) resyncQueue();
   return removed;
 }
 
@@ -2836,6 +2885,10 @@ async function handleInput(msg) {
   }
   if (msg.type === 'queue-op') {
     await handleQueueOp(msg);
+    return;
+  }
+  if (msg.type === 'queue-resync') {
+    resyncQueue();
     return;
   }
   if (msg.type === 'permission-response') {

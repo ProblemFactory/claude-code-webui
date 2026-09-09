@@ -227,6 +227,17 @@ if (fs.existsSync('/proc/self')) {
   // timeout as "no holders" (the very degrade the product no longer commits).
   const lsofUnknown = !!(viaLsof && viaLsof.unknown);
   if (lsofUnknown) console.log(`  ⚠ SKIP: lsof could not answer within ${LSOF_BUDGET_MS} ms on this box (${viaLsof.unknown}) — the no-/proc rung legs are not evidence this round`);
+  // "INSTALLED" IS NOT "ANSWERED" (2026-09-09, found by the fast tier going red
+  // on an unrelated branch). Four asserts below already ask `haveLsofAnswer`,
+  // but three asked `haveLsof` while still CALLING lsof — so on a busy box the
+  // SKIP above announced "the no-/proc rung legs are not evidence this round"
+  // and then those three ran anyway: one went RED (the pre-r3 IDENTITY control,
+  // which needs lsof to REPORT something) and two passed VACUOUSLY (both assert
+  // an EMPTY list, which a timed-out lsof also returns). Measured on this box:
+  // 4371 processes, six lsof calls at ~22 s each against a 20 s budget ⇒ the
+  // whole fast tier RED; with the budget raised to 180 s for one run, lsof
+  // answers, no SKIP is printed, and all three run and pass — so they are live
+  // where they can be, and silent where the suite has already said it is blind.
   const haveLsofAnswer = haveLsof && !lsofUnknown;
   ok(!haveLsofAnswer || viaLsof.includes(rollout),
     'the no-/proc rung REACHES the real codex holder (positive control — an empty answer would make every assert below pass)', JSON.stringify(viaLsof));
@@ -264,7 +275,7 @@ if (fs.existsSync('/proc/self')) {
       return [...set];
     } catch { return []; }
   };
-  ok(!haveLsof || preR3StatusViaLsof(codexRoot).length === 0,
+  ok(!haveLsofAnswer || preR3StatusViaLsof(codexRoot).length === 0,
     'NEGATIVE CONTROL: with `execFileSync` (the pre-r3 spelling) the SAME fixtures yield NOTHING — the macOS/BSD codex liveness fact was a degradation path that could only degrade');
   // NEGATIVE CONTROL #2 — the pre-r3 IDENTITY (`-Fpcn`, the `c` line,
   // `/codex/.test(cmd)`) over stdout that IS read, so the two controls isolate
@@ -292,9 +303,9 @@ if (fs.existsSync('/proc/self')) {
   fs.closeSync(keeperFd2);
   const t1 = Date.now();
   while (!holdsIt(keeper2.pid, keeperRollout) && Date.now() - t1 < 15000) execFileSync('sleep', ['0.05']);
-  ok(!haveLsof || preR3IdentityViaLsof(keeperOnlyRoot).includes(keeperRollout),
+  ok(!haveLsofAnswer || preR3IdentityViaLsof(keeperOnlyRoot).includes(keeperRollout),
     'NEGATIVE CONTROL: the pre-r3 IDENTITY reports a rollout held ONLY by `codex-keeper` — lsof\'s COMMAND field is a substring test over comm');
-  ok(!haveLsof || listOpenRolloutPathsViaLsof(keeperOnlyRoot).length === 0,
+  ok(!haveLsofAnswer || listOpenRolloutPathsViaLsof(keeperOnlyRoot).length === 0,
     '…and the shipped rung reports NOTHING for it: the same predicate as /proc and as the shell (a stopped thread stops reading RUNNING on macOS too)',
     JSON.stringify(haveLsof ? listOpenRolloutPathsViaLsof(keeperOnlyRoot) : []));
   ok(!haveLsofAnswer || JSON.stringify([...viaLsof].sort()) === JSON.stringify([...listOpenCodexRolloutPaths({ sessionsDir: codexRoot })].sort()),

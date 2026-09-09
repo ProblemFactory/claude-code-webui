@@ -1291,12 +1291,94 @@ class ChatView {
     return this._getSessionIds()?.backend || this.winInfo?.backend || 'claude';
   }
 
-  _setQueue(items) {
+  /** THE ONE WRITER of the strip's rows. `known:false` (2026-09-09) = the list
+   *  is a PLACEHOLDER, not an observation — after a restart the server's
+   *  normalizer was rebuilt from a transcript that carries no queue record at
+   *  all (a publication is a stdout record and the wrapper's stdout is an
+   *  800KB RING), so the `[]` it sends is byte-identical whether the wrapper's
+   *  queue is empty or holds 25 items. The rows are applied either way (the
+   *  wire contract is that an unknown queue always IS the empty list, and
+   *  showing nothing for one round trip beats showing a row nobody can act on
+   *  — the incident's strip carried an item that had left the queue 58 minutes
+   *  and one restart earlier, and clicking ✕ on it only painted it red).
+   *
+   *  WHAT THE FLAG ACTUALLY GATES is the INFERENCE. On a KNOWN list the bubble
+   *  chips are reconciled against it — the normalizer's own server-side rule
+   *  (an item that left the queue with no explicit steer/remove RAN), applied
+   *  to whatever this client has rendered. On an unknown we learned nothing, so
+   *  a 'Queued' chip stays: retiring it would assert the message left a queue
+   *  we cannot see. A chip is a claim about the queue too.
+   *
+   *  `at` (2026-09-09 r2) is WHEN THIS STATEMENT ARRIVED, and the strip shows
+   *  the NEWEST statement rather than the last-EXECUTED one. Default `now`,
+   *  which is the truth for every caller that applies a frame as it lands —
+   *  but the epoch-changed re-attach DEFERS its payload by 0-500ms (2.338.0's
+   *  render stagger) while the resync THAT SAME ATTACH asked for is answered
+   *  in ~10ms, so the payload used to land LAST and overwrite the answer it
+   *  provoked. That is the mirror of the ghost row and it is PERMANENT for
+   *  that window: the ask is self-limiting (the server now knows its queue, so
+   *  it never asks again) — the row is on the wire, in the server, and
+   *  nowhere on screen. The same rule covers the known-vs-known twin: a steer
+   *  that empties the queue inside the stagger window must not be undone by
+   *  the deferred payload's older rows.
+   *
+   *  Deliberately NOT "known beats unknown": the pre-restart client's rows are
+   *  a KNOWN list from before the payload was produced, and clearing THEM is
+   *  the whole ghost fix. Recency is the only thing that separates the two. */
+  _setQueue(items, { known = true, at = performance.now() } = {}) {
+    // Monotonic (performance.now), because the only question ever asked of
+    // these two numbers is which of the two frames arrived first.
+    if ((this._queueStatedAt || 0) > at) return;
+    this._queueStatedAt = at;
     this._queue = Array.isArray(items) ? items : [];
+    if (known) this._reconcileQueueChips(this._queue);
     this._chatInput?.setQueue(this._queue, this._queueCaps());
     // A queue update is the ONLY event that can tell us the id of a message
     // the chord just sent (see _steerAfterSend).
     this._drainPendingSteers();
+  }
+
+  /** Drop the 'Queued' chip from every rendered bubble the AUTHORITATIVE queue
+   *  does not list. The server's normalizer does exactly this (2.369.55
+   *  `_processQueueChanged`) and emits an edit per bubble — but a client that
+   *  missed those edits (socket down, or a rebuilt normalizer whose
+   *  `_queuedMsgIds` starts empty) never receives them, so the chip outlives
+   *  the row that justified it. Only ever REMOVES a claim. */
+  _reconcileQueueChips(items) {
+    const live = new Set((items || []).map((it) => String(it?.msgId || '')).filter(Boolean));
+    for (const msg of this._messages || []) {
+      if (msg?.queueState !== 'queued') continue;
+      if (live.has(this._msgIdOf(msg))) continue;
+      this._clearQueueChip(msg);
+    }
+  }
+
+  /** Retire ONE bubble's queue chip (view state + the rendered element). */
+  _clearQueueChip(msg) {
+    if (!msg || msg.queueState !== 'queued') return;
+    msg.queueState = null;
+    // `?.` because this also runs on views the queue reaches before the first
+    // render (and on the partial views the suite drives) — the STATE is what
+    // matters, the element is repainted from it on the next render anyway.
+    const el = this._elements?.get(msg.id);
+    if (el) ChatRenderers.applyQueueChip(el, msg, null);
+  }
+
+  /** A row the WRAPPER says is not in the queue any more ('gone': it listed
+   *  the queue and the item was not there, or `thread/queue/delete` answered
+   *  {deleted:false} = it drained while we asked). The wrapper is
+   *  AUTHORITATIVE ABOUT ABSENCE, so the row leaves — it must not sit there
+   *  painted red, which is what a refusal marker means and is what the
+   *  incident's ✕ click produced. The wrapper's own follow-up `refreshQueue()`
+   *  cannot correct us: `publishQueue` dedups on the wrapper's OWN
+   *  fingerprint, and by its lights nothing changed. */
+  _dropQueueRow(id) {
+    const key = String(id || '');
+    if (!key) return false;
+    const rows = this._queue || [];
+    if (!rows.some((it) => String(it?.id || '') === key)) return false;
+    this._setQueue(rows.filter((it) => String(it?.id || '') !== key));
+    return true;
   }
 
   // ── THE Alt+Enter CHORD, VIEW SIDE ──────────────────────────────────────
@@ -1377,8 +1459,40 @@ class ChatView {
    *  'Queued' chip was dead (round-2 verifier's MAJOR). So a FLIP — in either
    *  direction — re-applies the chips of every rendered message that has a
    *  queueState. The strip has no such problem (it re-renders from
-   *  `_setQueue`); the chips live inside bubbles nobody rebuilds. */
-  _setQueueSupported(next, verbs) {
+   *  `_setQueue`); the chips live inside bubbles nobody rebuilds.
+   *
+   *  `at` (2026-09-09 r3) is WHEN THIS STATEMENT ARRIVED — the SAME rule the
+   *  rows got in r2, because THE ADVERT REACHES THE STRIP TOO: `_queueCaps()`
+   *  collapses to NO_QUEUE_CAPS when this flag is false, and the composer then
+   *  renders ZERO rows and HIDES the strip (`queueOps ? this._queue : []`). So
+   *  a stale `queueSupported:false` produces the exact outcome r2 exists to
+   *  prevent — a real pending message held by the wrapper, present in `_queue`,
+   *  and on screen NOWHERE — and the rows' guard one method up cannot see it.
+   *  REACHED whenever the attach payload's advert is a NO, which is what the
+   *  server answers with no readable LOCAL sidecar (a REMOTE session — its
+   *  sidecar lives on ITS machine, as ws-handler says where it asks — or the
+   *  2.339.2 resolution-failure class): the advert then falls back to the
+   *  IN-BAND publication, which a restart RESETS, so the payload says
+   *  `queueSupported:false` while that same wrapper's own publication — ~10ms,
+   *  against the 0-500ms render stagger — says true.
+   *
+   *  ITS OWN STAMP, not `_queueStatedAt`: these are two different facts stated
+   *  by different frames, and one clock lets a statement about the ROWS censor
+   *  a statement about the ADVERT. `_dropQueueRow` stamps the rows at `now`
+   *  from a purely local inference, which would then refuse a later payload's
+   *  advert for no reason at all.
+   *
+   *  AND THE GUARD SITS ABOVE THE NO-CHANGE EARLY RETURN, which is
+   *  load-bearing rather than tidy: the wrapper's answer is usually a
+   *  no-CHANGE (same process, so the pre-restart view already holds
+   *  `supported:true` with the same verbs), so a guard below that return would
+   *  never record the answer's instant and the stale payload would still win.
+   *  Measured, both ways. */
+  _setQueueSupported(next, verbs, { at = performance.now() } = {}) {
+    // Monotonic (performance.now), like the rows' stamp: the only question
+    // ever asked of these two numbers is which of the two frames arrived first.
+    if ((this._queueAdvertStatedAt || 0) > at) return;
+    this._queueAdvertStatedAt = at;
     const val = !!next;
     const list = Array.isArray(verbs) ? verbs.map((v) => String(v)) : this._queueVerbsServed;
     // The VERB LIST is part of this flag, not a second one: a wrapper can
@@ -1455,7 +1569,14 @@ class ChatView {
     // ("it already ran") for what is really a dead socket.
     if (!this._queueOpsLive()) return;
     const mine = (this._queue || []).find((it) => it.msgId && this._msgIdOf(msg) === it.msgId);
-    if (!mine) { this._renderers.appendSystem(t('That message is no longer queued — it already ran.')); return; }
+    if (!mine) {
+      // Same verdict as the wrapper's 'gone', reached locally: this bubble has
+      // no row. Then its 'Queued' chip is a claim the queue does not support —
+      // retire it here too, or the next click says the same thing again.
+      this._clearQueueChip(msg);
+      this._renderers.appendSystem(t('That message is no longer queued — it already ran.'));
+      return;
+    }
     this._sendQueueOp('steer', mine.id);
   }
 
@@ -1481,8 +1602,31 @@ class ChatView {
     // FIRST: it decides which controls the items are rendered with.
     // carries-the-key guarded (2.368.3 law): a partial meta without queueVerbs
     // keeps the served verb list (undefined = keep, see _setQueueSupported).
-    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined);
-    if ('queue' in meta) this._setQueue(meta.queue);
+    //
+    // WHEN THIS PAYLOAD ARRIVED (2026-09-09 r2, hoisted above the advert in
+    // r3 — BOTH queue facts are judged by it, because a stale advert empties
+    // the strip just as thoroughly as stale rows do). The stamp rides on the
+    // frame itself: the payload IS the meta, and a second out-of-band channel
+    // beside it is the whitelist-drift class. It is NOT a fact about the
+    // session (nothing here is reset when it is missing): every caller that
+    // applies a frame the moment it lands leaves it off, and `now` is then the
+    // truth. Spelled with its own `in meta` test all the same — the absent
+    // case is a behaviour and behaviours get written down.
+    const rxTick = ('__rxTick' in meta) ? Number(meta.__rxTick) : NaN;
+    const rxAt = Number.isFinite(rxTick) ? rxTick : performance.now();
+    if ('queueSupported' in meta) this._setQueueSupported(meta.queueSupported, ('queueVerbs' in meta) ? meta.queueVerbs : undefined, { at: rxAt });
+    // `queueKnown:false` = the server's list is a GUESS (see _setQueue). It is
+    // a MODIFIER of `queue`, so it is read inside that key's guard — but it
+    // carries its own `in meta` test all the same, because the fact it states
+    // when ABSENT has to be spelled out: a payload from before the field is
+    // read as KNOWN, which is the behaviour this branch always had.
+    // …and it is judged by `rxAt` (hoisted above the advert), so a DEFERRED
+    // application of this payload cannot overwrite a statement that landed in
+    // the meantime (see _setQueue).
+    if ('queue' in meta) this._setQueue(meta.queue, {
+      known: ('queueKnown' in meta) ? meta.queueKnown !== false : true,
+      at: rxAt,
+    });
     // Does the RUNNING wrapper serve the live style verb? Same shape as
     // queueSupported and the same reason (2.361.1/2.364.1): the harness caps
     // row is about the PROTOCOL, this is about the process that is running.
@@ -3122,7 +3266,15 @@ class ChatView {
     // The outcome of ONE queue op: the strip row ends its pending state and,
     // on a refusal, wears the reason (the system card the normalizer also
     // emits scrolls away — the control the user pressed must speak too).
-    if (op.subtype === 'queue-result') { this._chatInput?.setQueueOpResult(op.id, op.ok !== false, op.text || ''); return; }
+    if (op.subtype === 'queue-result') {
+      // 'gone' is a FACT ABOUT ABSENCE from the one process that owns the
+      // queue — the row LEAVES (before the result is applied, so the strip
+      // never marks a row it is about to lose). Every other refusal keeps the
+      // row and marks it, because the message really is still queued.
+      if (op.ok === false && op.reason === 'gone') this._dropQueueRow(op.id);
+      this._chatInput?.setQueueOpResult(op.id, op.ok !== false, op.text || '');
+      return;
+    }
     if (op.subtype === 'served-model') {
       this._statusBar.setServedModel(op.data?.model || null);
       return;
@@ -4359,6 +4511,13 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       if (msg.type !== 'attached' || msg.sessionId !== this.sessionId) return;
       this.ws.offGlobal(handler);
       if (gen !== this._reattachGen) return; // a newer reconnect cycle owns the view now
+      // WHEN THIS PAYLOAD ARRIVED (2026-09-09 r2). Everything in it is a
+      // snapshot of the server at THIS instant, and the epoch branch below
+      // hands that snapshot to a timer — so the instant has to travel WITH it,
+      // or a 300ms-old guess wins over an answer that landed at 10ms. Stamped
+      // once (the ws parses each frame once and dispatches the SAME object to
+      // every view, so this is a property of the frame, not of this view).
+      if (typeof msg.__rxTick !== 'number') msg.__rxTick = performance.now();
       if (this._chatInput) this._chatInput.setDisconnected(false);
       // Server normalizer was REBUILT (server restart): message IDs are a
       // plain per-normalizer counter, so the new numbering collides with what
@@ -4376,6 +4535,9 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
         // synchronous marked+DOMPurify passes back-to-back froze the page.
         // A 0-500ms jitter splits them into separate tasks; the DOM wipe
         // happens inside _fullViewReset so nothing is torn meanwhile.
+        // …and by the time this runs the payload is up to half a second OLD —
+        // live state applied from it must be judged against `msg.__rxTick`
+        // (stamped above), never against "whatever ran last".
         setTimeout(() => { if (!this._disposed) this._fullViewReset(msg); }, Math.random() * 500);
         return;
       }
@@ -4390,6 +4552,19 @@ Create this as a design canvas HOSTED BY THIS VIBESPACE (not claude.ai):
       // time, i.e. it already covers everything the catch-up is about to
       // render.
       if (msg.chatStatus) this.applyStatus(msg.chatStatus);
+      // …AND THE REST OF THAT SNAPSHOT (2026-09-09, the ghost-row incident).
+      // The paragraph above was written for chatStatus and stopped there, so
+      // this — the ONLY attach path that does not rebuild — silently dropped
+      // every other live fact the payload carries: the input QUEUE (a strip
+      // whose rows the server no longer knows about survived every reconnect,
+      // and clicking them answered "it already ran" in red), plus
+      // queueSupported/queueVerbs, turnState, inProgressTools, autoResume,
+      // outputStyle, responseStyleLive, spawnOrigin. `_applyLiveMeta` is
+      // carries-the-key guarded throughout, so applying it here can only
+      // REPLACE a fact the server just stated — never clear one it omitted.
+      // The catch-up below fetches MESSAGES; session state is not a message
+      // and nothing else re-states it.
+      this._applyLiveMeta(msg);
       // Sync streaming label from server
       if (msg.isStreaming) this._onServerStreamLabel(msg.streamingLabel || t('thinking...'), msg.streamingKind || null);
       else this._hideTyping();

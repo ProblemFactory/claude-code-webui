@@ -75,3 +75,9 @@ src/server/vs-spend-mut-*.js
 # their relative requires do not resolve). Unlinked on exit, but a SIGKILL can
 # strand one — and a dirty tree is what the release gate REFUSES on.
 src/server/session-stdout.__*_control.js
+# scripts/test-queue-steer.mjs (⑬d and the r3 negative controls) writes PATCHED COPIES of src/lib/chat-view.js — `.chat-view.prefix-<pid>.js` AND `.chat-view.stale-prefix-<pid>-*.js` (2.369.83: the merge verifier found the first name uncovered)
+# beside the real one (they must be SIBLINGS or their relative imports do not
+# resolve). They are unlinked on exit and swept at start, but a SIGKILL can
+# strand one — and a dirty tree is what the release gate REFUSES on, so they can
+# never be allowed to become tree state.
+src/lib/.chat-view.*prefix-*.js
