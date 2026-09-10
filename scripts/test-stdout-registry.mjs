@@ -751,8 +751,28 @@ const inflight = (id) => calls.broadcasts.filter((b) => b.id === id && b.type ==
         JSON.stringify({ leftovers: staleLeftovers(PROJECTS, staleMs).slice(0, 3), junk: junkLive.length }));
       ok('…and discovery never lists it AS A SESSION at all — the fixture guard refuses the convention, not just a stale instance of it',
         !seesFixture(listLive), JSON.stringify({ ctlCwd }));
-      ok(`POSITIVE CONTROL: the same discovery call still lists this machine's real sessions (${listLive.length}), so "not listed" is the guard and not a broken reader`,
-        listLive.length > 0);
+      // The positive control is an ENVIRONMENT-CAPABILITY assert: it needs a
+      // machine that HAS real sessions. The GitHub runner has none (its
+      // ~/.claude/projects holds only the probe's own dirs), and on 2.369.85's
+      // mirror run this line was the fast job's ONE red — a claim about the
+      // runner's home, not about the reader. So it asks the home first: with
+      // no non-fixture project dir carrying a transcript, it SKIPs and says
+      // what it saw; with one, "not listed" must still mean "the guard".
+      const { isFixtureProjectDir } = require(path.join(REPO, 'src/fixture-guard.js'));
+      const realProjectDirs = (() => {
+        try {
+          return fs.readdirSync(PROJECTS, { withFileTypes: true })
+            .filter((d) => d.isDirectory() && !isFixtureProjectDir(d.name) && d.name !== path.basename(ctlDir))
+            .filter((d) => { try { return fs.readdirSync(path.join(PROJECTS, d.name)).some((f) => f.endsWith('.jsonl')); } catch { return false; } })
+            .map((d) => d.name);
+        } catch { return []; }
+      })();
+      if (realProjectDirs.length === 0) {
+        console.log(`  SKIP: POSITIVE CONTROL not measurable here — ${PROJECTS} holds no non-fixture project dir with a transcript (a session-less machine, e.g. the CI runner); "not listed" cannot be told apart from "reader broken" on this box, and the guard legs above still ran`);
+      } else {
+        ok(`POSITIVE CONTROL: the same discovery call still lists this machine's real sessions (${listLive.length} listed; ${realProjectDirs.length} real project dirs on disk), so "not listed" is the guard and not a broken reader`,
+          listLive.length > 0, `real project dirs: ${JSON.stringify(realProjectDirs.slice(0, 3))}`);
+      }
       // NEGATIVE CONTROL: the SAME directory, backdated past the threshold, is
       // a real leftover — the AGE-sensitive reader must flag it, or it is
       // vacuous. Discovery must STILL not list it (the guard is age-blind by

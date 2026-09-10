@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.369.87 — the wire probe's positive control skips with evidence on a session-less machine (gate-only)
+
+- test-stdout-registry asserted that discovery "still lists this machine's real sessions" — a claim about the runner's home, not about the reader: the GitHub Actions runner has no claude sessions at all, so the fast mirror job was RED on 2.369.85/.86 for a positive control that could not be measured there. It now asks `~/.claude/projects` for a non-fixture project dir carrying a transcript first: none ⇒ a loud SKIP naming the directory; one or more ⇒ the same assert as before (locally: 4979 sessions listed over 17 real project dirs). The guard legs beside it are unchanged.
+
 ## 2.369.86 — quota model v2: an account holds a LIST of limits, ONE write path owns the store, and a rejection is a reading too
 
 - **Typed limits per identity (B-9213).** codex pushes a SEPARATE `rate_limits_updated` per limit — on one conversation here: the plan 32×, GPT-5.3-Codex-Spark 149×, `premium` 27× — and every push was flattened into one `{fiveHour, sevenDay, scopedWeekly[]}` file, last writer wins, so the panel read 0 % on an account at 5 %. Every identity now holds a `LimitSet` keyed by `limitId` (src/quota-model.js, PURE); the old shape is a PROJECTION of it; migration `2026-09-backfill-quota-limits` lifts the existing cache files once (archive-never-destroy).
