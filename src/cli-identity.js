@@ -105,7 +105,7 @@
  * now carries this too. node builtins only, no repo imports.
  */
 const fs = require('fs');
-const { execFileSync } = require('child_process');
+const { execFileSync, execFile } = require('child_process');
 
 /** argv[0] values that mean "the real program is an ARGUMENT" (rung 2). */
 const INTERPRETERS = new Set(['node', 'nodejs', 'node.exe', 'bun', 'deno']);
@@ -342,6 +342,88 @@ function readChildPids(pid, opts = {}) {
   return [...(parentIndex({ ...opts, procRoot }).byParent.get(n) || [])];
 }
 
+/** One reused buffer for the cmdline scan below — a fresh Buffer per pid over
+ *  3,000 pids is the allocation this reader exists to avoid. 64 KiB covers
+ *  every real command line; a read that FILLS it re-reads that one pid whole,
+ *  so a giant argv is answered correctly instead of silently truncated.
+ *  SHARING IT IS ONLY SAFE BECAUSE THE /proc WALK IS SYNCHRONOUS END TO END:
+ *  two concurrent callers each run their whole loop inside one tick, so the
+ *  buffer is never live across a yield. An `await` inside that loop would make
+ *  this a data race — put the await outside, or stop sharing the buffer. */
+const CMDLINE_BUF = Buffer.allocUnsafe(64 * 1024);
+
+/** Which live pids carry `needle` in their command line — the `pgrep -f`
+ *  question, and the LAST fork on the kill path (ws-handler asks it to find
+ *  the dtach master that owns a session's socket).
+ *
+ *  /proc FIRST for the same reason as readPpid/readChildPids, but the TRADE is
+ *  different here and is stated rather than implied. Measured on this box
+ *  (3,400 processes), median of 7, one variable:
+ *      RSS        this scan (block = wall)   `pgrep -f` block / wall
+ *       58 MB              23.7 ms              2.0 ms / 87.6 ms
+ *      559 MB              23.7 ms             24.4 ms / 110.6 ms
+ *    1,564 MB              23.6 ms             69.4 ms / 155.2 ms
+ *  So the scan is FLAT in the server's own size while the fork it replaces is
+ *  not, and a fleet server IS a 1.5 GB process: at the shape the incident was
+ *  reported on this is 69 ms of blocked loop down to 24, and 155 ms of latency
+ *  down to 24. HONEST COST: on a freshly booted 58 MB server it is 24 ms of
+ *  block where a fork was 2 — bought back four times over in end-to-end
+ *  latency, and a predictable cost that stops growing is the whole point of
+ *  the class this fix belongs to.
+ *
+ *  MATCHING IS A LITERAL SUBSTRING, `pgrep -f`'s is an ERE — so this rung is
+ *  STRICTLY NARROWER on a path full of `.` and `-`. That is the safe direction
+ *  for a caller that SIGTERMs what it finds, and it cannot miss the real
+ *  holder, whose argv carries the path verbatim. `/proc/<pid>/cmdline` is
+ *  NUL-separated where `pgrep` sees spaces, so a needle containing a space is
+ *  matched against the joined form; a space-free needle must lie inside ONE
+ *  argv word and therefore needs no normalisation.
+ *
+ *  ASYNC because the no-/proc rung must stay async: a Mac pays the fork too,
+ *  and making it synchronous to keep one signature would be a regression. */
+async function pidsMatchingCmdline(needle, opts = {}) {
+  const want = Buffer.from(String(needle == null ? '' : needle), 'utf8');
+  if (!want.length) return [];
+  const procRoot = opts.procRoot || PROC_ROOT;
+  if (hasProcfs(procRoot, opts.now || Date.now)) {
+    const joined = want.includes(0x20);
+    const hits = [];
+    let ents = [];
+    try { ents = fs.readdirSync(procRoot); } catch { return hits; }
+    for (const name of ents) {
+      const c = name.charCodeAt(0);
+      if (c < 48 || c > 57) continue;
+      let fd = -1;
+      try {
+        fd = fs.openSync(`${procRoot}/${name}/cmdline`, 'r');
+        const n = fs.readSync(fd, CMDLINE_BUF, 0, CMDLINE_BUF.length, 0);
+        if (!n) continue;
+        let hay = CMDLINE_BUF.subarray(0, n);
+        if (n === CMDLINE_BUF.length) hay = fs.readFileSync(`${procRoot}/${name}/cmdline`);
+        if (joined) { hay = Buffer.from(hay); for (let i = 0; i < hay.length; i++) if (hay[i] === 0) hay[i] = 0x20; }
+        if (hay.indexOf(want) !== -1) hits.push(Number(name));
+      } catch { /* exited mid-walk, or hidepid — no evidence, never a claim */
+      } finally { if (fd >= 0) { try { fs.closeSync(fd); } catch { } } }
+    }
+    return hits;
+  }
+  // NO /proc (macOS/BSD): ONE `pgrep -f` for the whole question — never one
+  // per candidate, which is the shape this module exists to retire.
+  // No `execImpl` seam here on purpose: `procRoot` already makes this rung
+  // reachable on Linux (test-discovery-spawn §9 drives it over a re-rooted
+  // procfs and COUNTS the real `execFile`), and a control parameter no leg
+  // ever passes is an unmeasured shape wearing a testability costume.
+  const out = await new Promise((res) => {
+    try {
+      execFile('pgrep', ['-f', String(needle)], { encoding: 'utf-8', timeout: 2000 },
+        (err, stdout) => res(err && !stdout ? '' : String(stdout || '')));
+    } catch { res(''); }
+  });
+  const hits = [];
+  for (const line of out.split('\n')) { const p = parseInt(line.trim(), 10); if (p > 0) hits.push(p); }
+  return hits;
+}
+
 /** Drop the memoised tables — for a test that wants to measure "one exec per
  *  sweep" twice in a row, and for nothing else in production. */
 function resetProcTables() { _parentIndex = null; _procfsSeen.clear(); }
@@ -558,6 +640,6 @@ function pidAliveShellFn() {
 
 module.exports = {
   isCliProcess, cliIdentityShellFns, pidAliveShellFn, procArgv, procExe, readPsIdentity, procCmdline, procUid,
-  hasProcfs, readPpid, readChildPids, resetProcTables,
+  hasProcfs, readPpid, readChildPids, pidsMatchingCmdline, resetProcTables,
   PS_IDENTITY_TTL_MS, PROC_TABLE_TTL_MS, PROCFS_RECHECK_MS, INTERPRETERS, MAX_INTERP_FLAGS,
 };

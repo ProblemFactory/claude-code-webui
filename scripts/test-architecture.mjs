@@ -911,6 +911,19 @@ for (const [edge] of EXCEPTIONS) {
 //           enforcement and a fact that grew a second definition goes red.
 //           This half is what catches a per-session `git` or `stat` — a fork
 //           that (a) would never see.
+//
+//     WHAT THESE TWO CANNOT SEE, stated as narrowly as the code allows (round 3
+//     had to correct this sentence once already, so it is worth being exact):
+//       · (a) matches a call whose FIRST ARGUMENT is a process-table tool
+//         spelled as a LITERAL, whatever the callee is named. A tool name held
+//         in a VARIABLE (`execFile(cmd, ['-p', pid])`) is invisible to it.
+//       · (b) is blind to a module that neither defines a sweep fact nor is
+//         one — a per-session `execFile('git', …)` in src/ws-handler.js still
+//         passes both halves.
+//     Both gaps are covered from the other side by the FILE-BLIND consequence
+//     census in scripts/test-discovery-spawn.mjs, which counts every
+//     child_process entry point the REAL sweep, the REAL refreshWebuiPids and
+//     the REAL kill-path socket lookup take, wherever the fork was written.
 {
   const GIT_ENV45 = gitEnvFrom(process.env);
   const lsFiles = spawnSync('git', ['-C', REPO, 'ls-files', '-z'],
@@ -946,6 +959,20 @@ for (const [edge] of EXCEPTIONS) {
   // child_process itself. A DECLARATION is not a call (`function execFileP(cmd,
   // args…)`), so it is blanked first.
   const SPAWN_CALL = /\b(?:execFileSync|execFileP|execFile|execSync|spawnSync|spawn|execImpl)\s*\(|(?<![.\w$])exec\s*\(|\b(?:cp|childProcess|child_process|proc)\.exec\s*\(/;
+  // A PROMISIFIED ALIAS IS STILL A FORK (round 3). SPAWN_CALL is a list of
+  // CALLEE NAMES, so `execFileAsync(` (src/ws-handler.js's own idiom, handed to
+  // ws-create through ctx) and `sh(` (src/incident.js) match none of them —
+  // `execFile` needs a `(` immediately after it. Two live process-table spawns
+  // were therefore absent from the census's own printed inventory, and a
+  // per-session `pgrep -P` loop spelled that way passed EVERY gate on the kill
+  // path, i.e. the incident's own trigger. The signal this census claims to
+  // census is the ARGV, so derive from the TOOL: a call whose FIRST argument is
+  // a process-table tool name is a site whatever the callee is called. The
+  // trailing `,` keeps `_trimGapDom('top')`-shaped calls out, and `top` is
+  // deliberately NOT in this list (a bare `snap('top')` is not a fork) — the
+  // union with SPAWN_CALL still covers `execFile('top', …)`. MEASURED over the
+  // same 243 tracked files: 16 sites → 18, zero false positives.
+  const TOOL_FIRST = /[A-Za-z_$][\w$]*\s*\(\s*['"`](?:ps|pgrep|pkill|pidof|pstree|lsof|fuser)['"`]\s*,/;
   const PID_TOOL = /['"`](?:ps|pgrep|pkill|pidof|pstree|lsof|fuser|top)['"`]/;
   const spawnScan = (l) => String(l).replace(/\bfunction\s+\w+\s*\(/g, 'function DECLARED(');
   const isSpawnComment = (l) => /^\s*(\/\/|\*|\/\*|#)/.test(l);
@@ -956,7 +983,8 @@ for (const [edge] of EXCEPTIONS) {
     const lines = String(text).split('\n');
     const out = [];
     lines.forEach((line, i) => {
-      if (isSpawnComment(line) || !SPAWN_CALL.test(spawnScan(line))) return;
+      const scanned = spawnScan(line);
+      if (isSpawnComment(line) || !(SPAWN_CALL.test(scanned) || TOOL_FIRST.test(scanned))) return;
       if (pidOnly && !PID_TOOL.test(lines.slice(i, i + 3).filter((l) => !isSpawnComment(l)).join('\n'))) return;
       out.push({ n: i + 1, line });
     });
@@ -968,6 +996,7 @@ for (const [edge] of EXCEPTIONS) {
     { file: 'src/cli-identity.js', needle: "execFileSync('ps', ['-p', String(pid), '-o', 'args=']", why: 'NO-/proc FALLBACK ONLY (procArgv, rung 2 of the identity rule).' },
     { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-p', String(pid), '-o', 'uid=,args=']", why: 'NO-/proc FALLBACK ONLY (readPsIdentity, per-pid memo) — the {uid, argv} value read the signalling callers share.' },
     { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-eo', 'pid=,ppid=']", why: 'NO-/proc FALLBACK ONLY, and ONE PER SWEEP for the WHOLE table (parentIndex, memoised) — this is the shape that REPLACED one `ps` per pid. Never reached where /proc exists.' },
+    { file: 'src/cli-identity.js', needle: "execFile('pgrep', ['-f', String(needle)]", why: 'NO-/proc FALLBACK ONLY (pidsMatchingCmdline) — ONE per question for the WHOLE table, never one per candidate. Where /proc exists the rung above it reads every `/proc/<pid>/cmdline` into ONE reused buffer, which is why the kill path now starts no child process at all.' },
     { file: 'src/session-store.js', needle: "execFileP('ps', ['-p', String(pid), '-o', 'comm=']", why: 'NO-/proc FALLBACK ONLY (isProcessClaudeAsync), reached from isLockClaude when a lock carries no numeric procStart AND there is no procfs. On a procfs machine the rung above it is `isCliProcess`, pure file reads.' },
     { file: 'src/discovery-facts.js', needle: "spawnSync('lsof', ['-Fpn', '+D', root]", why: 'NO-/proc FALLBACK ONLY (macOS/BSD codex liveness), ONE per scan of the whole sessions tree.' },
     { file: 'src/agentd/agentd.js', needle: "spawnSync('ps', ['-p', String(pid), '-o', 'lstart=']", why: 'NO-/proc FALLBACK ONLY (pidStartTime) — /proc/<pid>/stat field 22 is the rung above it. Asked when a pipe session is adopted, not per poll.' },
@@ -981,6 +1010,7 @@ for (const [edge] of EXCEPTIONS) {
     { file: 'src/sysinfo.js', needle: "execFile('ps', ['aux']", why: 'ONE per sysinfo read — the fallback for a `ps` with no --sort.' },
     { file: 'src/sysinfo.js', needle: "execFile('ps', ['axo', PS_COLUMNS]", why: 'ONE per process-list read (listProcs), the System panel table.' },
     { file: 'src/transcript-service.js', needle: "execFileSync('fuser', [fp]", why: 'ONE per human-triggered `rescue` — the two-writer refusal. Not on any poll.' },
+    { file: 'src/incident.js', needle: "sh('ps', ['-eo', 'pid,ppid,lstart,etime,rss,stat,args']", why: 'ONE per HUMAN-TRIGGERED incident capture ("Report a problem"), and the WHOLE-TABLE form — the frozen scene is exactly what a human needs and /proc would only re-implement `ps`. Not on any poll, create or kill. Spelled through a promisified alias, which is why TOOL_FIRST exists.' },
   ];
   if (!gitOk) {
     ok(true, `(a) PID-QUESTION CENSUS SKIPPED — \`git -C <repo> ls-files\` could not answer here: ${gitWhy45}`);
@@ -1046,6 +1076,7 @@ for (const [edge] of EXCEPTIONS) {
     { file: 'src/cli-identity.js', needle: "execFileSync('ps', ['-p', String(pid), '-o', 'args=']", why: 'NO-/proc FALLBACK ONLY (procArgv) — see (a).' },
     { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-p', String(pid), '-o', 'uid=,args=']", why: 'NO-/proc FALLBACK ONLY (readPsIdentity) — see (a).' },
     { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-eo', 'pid=,ppid=']", why: 'NO-/proc FALLBACK ONLY, ONE per sweep for the whole table — see (a).' },
+    { file: 'src/cli-identity.js', needle: "execFile('pgrep', ['-f', String(needle)]", why: 'NO-/proc FALLBACK ONLY (pidsMatchingCmdline), ONE per question — see (a).' },
     { file: 'src/discovery-facts.js', needle: "spawnSync('lsof', ['-Fpn', '+D', root]", why: 'NO-/proc FALLBACK ONLY (macOS/BSD codex liveness), ONE per scan — see (a).' },
     { file: 'server.js', needle: "execFileSync('git', ['-C', repoDir, 'pull', '--ff-only']", why: 'BOOT ONLY, ONCE (the auto-update pull, before anything is served).' },
     { file: 'server.js', needle: "execFileSync('npm', ['install'", why: 'BOOT ONLY, ONCE, and only when the pull actually moved.' },
@@ -1109,6 +1140,31 @@ for (const [edge] of EXCEPTIONS) {
     `NEGATIVE CONTROL ③: a per-session \`git\` spawn is invisible to (a) (+${gA}) and a stray in (b) (+${gB}) — the reason both halves exist`);
   ok(retired.every((l) => isSpawnComment('  // ' + l.trim())),
     'NEGATIVE CONTROL ④: the same lines behind a `//` are prose, not offenders');
+  // ⑤ THE ROUND-3 SHAPE: the retired per-session `pgrep -P`, spelled through a
+  //    PROMISIFIED ALIAS. Round 2's census matched callee NAMES, so this line
+  //    was invisible to BOTH halves — verified on the real tree by splicing it
+  //    into ws-handler.js's kill case, where `node scripts/test-architecture.mjs`,
+  //    `test-discovery-spawn.mjs` and `test-ws-contract.mjs` all answered
+  //    ALL PASS. It is driven twice: as a bare line (the rule) and spliced into
+  //    ws-handler's REAL text at the incident's own trigger (the consequence).
+  const aliasRetired = "                const out = await execFileAsync('pgrep', ['-P', String(ls._childPid)], { timeout: 2000 });";
+  ok(spawnSites(aliasRetired, { pidOnly: true }).length === 1,
+    'NEGATIVE CONTROL ⑤: the retired per-session `pgrep -P` spelled through a promisified ALIAS is a site (round 3: it was invisible, and that is how it re-entered the kill path)');
+  const WS_ANCHOR = 'refreshWebuiPids();';
+  const wsText = read('src/ws-handler.js');
+  ok(wsText.includes(WS_ANCHOR),
+    'NEGATIVE CONTROL ⑤ setup: the splice anchor exists in src/ws-handler.js\'s kill case (a control that cannot be built proves nothing)');
+  const wsStray = (text) => spawnSites(text, { pidOnly: true })
+    .filter((s) => !PID_ALLOWED.some((x) => x.file === 'src/ws-handler.js' && s.line.includes(x.needle))).length;
+  const wsMut = wsText.replace(WS_ANCHOR, `${WS_ANCHOR}\n${aliasRetired}`);
+  const wA = wsStray(wsMut) - wsStray(wsText);
+  ok(wA === 1,
+    `NEGATIVE CONTROL ⑤: spliced into ws-handler's real kill case it is a stray in (a) (+${wA}) — the exact mutation round 2's census answered ALL PASS on`);
+  // …and the FIX itself, asserted where it was made: the kill path asks THE
+  // process reader, so ws-handler carries no process-table spawn of its own.
+  ok(!wsStray(wsText) && /pidsMatchingCmdline\(session\.socketPath\)/.test(wsText)
+    && /require\('\.\/cli-identity'\)/.test(wsText),
+    '(a) the kill path asks THE process reader (`pidsMatchingCmdline`) and ws-handler starts no process-table child of its own');
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

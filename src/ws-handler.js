@@ -12,6 +12,7 @@ const { cwdToProjectDir, findSessionJsonlPath } = require('./session-store');
 const { get: harnessOf } = require('./harnesses'); // S3: store.warmTranscript per harness (claude parse-cache warm / codex thread/read fallback)
 const { capsOf } = require('./backend-caps');      // inputModes.queueVerbs / review / renameWriteback gates (never a backend-id branch)
 const { reconcileAttachStreaming } = require('./turn-state'); // §2.5: ONE attach-time streaming decision, shared with the live consumer
+const { pidsMatchingCmdline } = require('./cli-identity'); // THE process reader: the kill path's `pgrep -f` without the fork
 
 /** The sentence a harness-level verb refusal carries. Every branch says what
  *  happens to the message ANYWAY — a refusal that only says "no" leaves the
@@ -1347,12 +1348,15 @@ function registerWsHandler(wss, ctx) {
             // The dtach process is the parent of our attach PTY's target
             if (session.socketPath) {
               try {
-                // Find dtach process by socket path and kill it
-                // async (P1 sweep): pgrep under a loaded box is fast but the
-                // rule is loop-blocking-free handlers, no exceptions.
-                const out = String(await execFileAsync('pgrep', ['-f', session.socketPath], { encoding: 'utf-8', timeout: 2000 }) || '').trim();
-                for (const line of out.split('\n')) {
-                  const dpid = parseInt(line.trim());
+                // Find the dtach process by socket path and kill it. THE
+                // PROCESS READER answers this — `pgrep -f` is a fork, and a
+                // fork is paid by THIS process in proportion to its own RSS
+                // (measured: 2.0 ms of blocked loop at 58 MB, 69.4 ms at
+                // 1,564 MB, plus `pgrep`'s own ~85 ms walk of a 3,400-process
+                // /proc). This is the kill path, i.e. the incident's own
+                // trigger, so where /proc exists it starts no child at all:
+                // 23.6 ms flat, and 155 ms of latency down to 24.
+                for (const dpid of await pidsMatchingCmdline(session.socketPath)) {
                   if (dpid && dpid !== session.pty?.pid) {
                     try { process.kill(dpid, 'SIGTERM'); } catch {}
                   }

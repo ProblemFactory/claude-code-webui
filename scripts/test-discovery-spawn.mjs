@@ -511,6 +511,137 @@ const hasTmux = !!require(path.join(REPO, 'src/session-store.js')).tmuxOnPath();
   }
 }
 
+// ── §9 THE LAST FORK ON THE KILL PATH (r3, the round-2 verifier's finding).
+//    Beside `refreshWebuiPids` the kill case asks a SECOND process-table
+//    question — "which dtach process owns this session's socket" — and it asked
+//    it with `execFileAsync('pgrep', ['-f', socketPath])`. That is one per kill
+//    rather than one per session, so it is not the 11-17 s block; it is the
+//    same COST though, and it grows with the server: measured here, the
+//    synchronous part of that call (the fork) is 2.9 ms at 78 MB RSS, 25 ms at
+//    582 MB and 70.9 ms at 1,587 MB, while a /proc cmdline scan of the same
+//    3,075 processes is ~20 ms whatever the server weighs — and end to end 20 ms
+//    against `pgrep`'s 83-150 ms. A fleet server IS a 1.5 GB process.
+//
+//    Why this leg exists AT ALL: the census in test-architecture §45 is a text
+//    scan, and round 2's could not see that call because it was spelled through
+//    a promisified alias. This half is FILE-BLIND — it counts what the SHIPPED
+//    kill-path bytes actually start, wherever they were written.
+{
+  // The kill case is not a function, so slice its `try` BODY. The anchor is the
+  // kill case's OWN comment, not `if (session.socketPath) {` — that spelling
+  // also opens the broken-stdin detector 780 lines earlier, and slicing THAT
+  // one builds a body full of names this leg does not inject, i.e. a red that
+  // says nothing about the fork under test.
+  const KILL_ANCHOR = '// Kill the dtach session process (which kills claude as its child)';
+  const sliceKillBody = (text) => {
+    const a = text.indexOf(KILL_ANCHOR);
+    if (a < 0) return null;
+    const i = text.indexOf('if (session.socketPath) {', a);
+    if (i < 0) return null;
+    const t = text.indexOf('try {', i);
+    if (t < 0) return null;
+    const open = text.indexOf('{', t);
+    let depth = 0;
+    for (let k = open; k < text.length; k++) {
+      if (text[k] === '{') depth++;
+      else if (text[k] === '}' && --depth === 0) return text.slice(open + 1, k);
+    }
+    return null;
+  };
+
+  const NEEDLE = path.join(scratch('disc-kill-sock'), 'cw-kill-fixture');  // never a real socket
+  const killKids = [];
+  for (let i = 0; i < 3; i++) {
+    // argv = ['sh','-c','sleep 300', NEEDLE] — the needle is $0, so it is in
+    // the command line exactly the way a dtach master carries its socket path.
+    const k = spawn('/bin/sh', ['-c', 'sleep 300', NEEDLE], { stdio: 'ignore' });
+    killKids.push(k); kids.push(k);
+  }
+  await new Promise((r) => setTimeout(r, 500));
+  const wantPids = killKids.map((k) => k.pid).sort((a, b) => a - b);
+  ok(ident.pidsMatchingCmdline && (await ident.pidsMatchingCmdline(NEEDLE)).length === 3,
+    `POSITIVE CONTROL: the fixture really carries the needle in ${wantPids.length} live command lines (${JSON.stringify(wantPids)})`);
+
+  // The session's OWN attach pty is excluded by both copies — give it one of
+  // the three so the exclusion is exercised rather than assumed.
+  const PTY_PID = wantPids[0];
+  const expectKilled = wantPids.slice(1);
+
+  const runKill = async (src, label) => {
+    if (!src) return { error: `no kill-path body to run (${label})` };
+    const killed = [];
+    const fakeProcess = { kill: (pid) => { killed.push(pid); } };   // NEVER signals anything
+    const execFileAsync = (cmd, args, opts) => new Promise((res, rej) =>
+      CP.execFile(cmd, args, opts || {}, (e, out) => (e && !out ? rej(e) : res(out))));
+    let fn;
+    try {
+      fn = new Function('session', 'pidsMatchingCmdline', 'execFileAsync', 'process', 'fs',
+        `return (async () => {${src}})();`);
+    } catch (e) { return { error: `could not build the sliced body: ${e.message}` }; }
+    censusStart();
+    const t0 = process.hrtime.bigint();
+    try {
+      await fn({ socketPath: NEEDLE, pty: { pid: PTY_PID } }, ident.pidsMatchingCmdline, execFileAsync, fakeProcess, fs);
+    } catch (e) { censusStop(); return { error: `the sliced body threw: ${e.message}` }; }
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    const tally = censusStop();
+    return { ms: +ms.toFixed(1), spawns: tally.spawns, byCmd: tally.byCmd, killed: killed.sort((a, b) => a - b) };
+  };
+
+  const shippedSrc = sliceKillBody(fs.readFileSync(path.join(REPO, 'src/ws-handler.js'), 'utf8'));
+  // WHOLE-LINE COMMENTS ARE BLANKED FIRST: the prose above the call NAMES
+  // `pgrep -f` on purpose (it says what this replaced and what it cost), and a
+  // word-match would fail the fix on the comment that explains it. This is the
+  // same rule test-architecture §45 applies — a census reads CODE.
+  const codeOnly = (s) => String(s || '').split('\n').filter((l) => !/^\s*(\/\/|\*|\/\*)/.test(l)).join('\n');
+  ok(!!shippedSrc && /pidsMatchingCmdline\(session\.socketPath\)/.test(codeOnly(shippedSrc))
+    && !/pgrep/.test(codeOnly(shippedSrc)),
+    `the shipped kill-path body asks THE process reader and spawns no \`pgrep\` (${shippedSrc ? shippedSrc.length + ' chars' : 'NOT FOUND'})`);
+  const kHead = await runKill(shippedSrc, 'shipped');
+  console.log(`  · kill-path socket lookup, SHIPPED: ${JSON.stringify(kHead.error ? kHead : { ms: kHead.ms, spawns: kHead.spawns, killed: kHead.killed })}`);
+  ok(!kHead.error, `the shipped copy runs (${kHead.error || 'ok'})`);
+  ok(kHead.spawns === 0,
+    `ZERO child processes to find the dtach master (${kHead.spawns}: ${JSON.stringify(kHead.byCmd)}) — the last fork on the kill path`);
+  ok(JSON.stringify(kHead.killed) === JSON.stringify(expectKilled),
+    `and it SIGTERMs exactly the right pids, minus the session's own attach pty (${JSON.stringify(kHead.killed)} === ${JSON.stringify(expectKilled)})`);
+
+  // NEGATIVE CONTROL: master's own bytes, same fixture, one variable.
+  {
+    const git = spawnSync('git', ['show', 'master:src/ws-handler.js'],
+      { cwd: REPO, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, env: gitEnvFrom(process.env) });
+    if (git.status !== 0 || !git.stdout) {
+      ok(true, `NEGATIVE CONTROL SKIPPED — \`git show master:src/ws-handler.js\` is unavailable here: ${(git.stderr || git.error?.message || 'no output').trim().slice(0, 160)}`);
+    } else {
+      const preSrc = sliceKillBody(git.stdout);
+      ok(!!preSrc && /execFileAsync\('pgrep', \['-f', session\.socketPath\]/.test(preSrc),
+        'the control copy really carries the retired `pgrep -f <socketPath>` (or it controls nothing)');
+      const kPre = await runKill(preSrc, 'pre-fix');
+      console.log(`  · kill-path socket lookup, PRE-FIX: ${JSON.stringify(kPre.error ? kPre : { ms: kPre.ms, spawns: kPre.spawns, killed: kPre.killed })}`);
+      ok(!kPre.error, `the control copy runs (${kPre.error || 'ok'})`);
+      ok(kPre.spawns === 1 && Object.keys(kPre.byCmd).some((k) => k.endsWith(':pgrep')),
+        `PRE-FIX: ONE child process per kill (${kPre.spawns}: ${JSON.stringify(kPre.byCmd)}) — the fork whose cost grows with the server's RSS`);
+      // `undefined === undefined` is not an agreement: name the pids BOTH arms
+      // had to find, or this assert passes hardest when neither arm ran.
+      ok(Array.isArray(kPre.killed) && kPre.killed.length === expectKilled.length
+        && JSON.stringify(kPre.killed) === JSON.stringify(kHead.killed),
+        `and the two answers are IDENTICAL (${JSON.stringify(kPre.killed)}) — the fork bought nothing`);
+    }
+  }
+
+  // The no-/proc rung is ONE `pgrep -f` for the WHOLE question, never one per
+  // candidate — driven on Linux by re-rooting procfs, the r5 `vs_argv` lesson.
+  {
+    censusStart();
+    const viaPs = await ident.pidsMatchingCmdline(NEEDLE, { procRoot: path.join(scratch('disc-kill-noproc'), 'nope') });
+    const t = censusStop();
+    ok(t.spawns === 1 && Object.keys(t.byCmd).some((k) => k.endsWith(':pgrep')),
+      `no-/proc rung: ONE \`pgrep -f\` for the whole question (${t.spawns}: ${JSON.stringify(t.byCmd)})`);
+    ok(JSON.stringify(viaPs.sort((a, b) => a - b)) === JSON.stringify(wantPids),
+      `and it names the SAME pids as the /proc rung (${JSON.stringify(viaPs)})`);
+  }
+  ident.resetProcTables();
+}
+
 cleanup();
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);
