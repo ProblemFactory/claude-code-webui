@@ -1,21 +1,30 @@
 #!/usr/bin/env node
-// ZERO SPAWNS PER SESSION IN THE LOCAL DISCOVERY SWEEP (2026-09-09, userW's
-// pod: every session create and every kill was followed by an 11-17 s
-// event-loop block, 27 of 27 over seven days).
+// ZERO SPAWNS PER SESSION ON THE PATHS A POLL, A CREATE OR A KILL RUNS
+// (2026-09-09, userW's pod: every session create and every kill was followed by
+// an 11-17 s event-loop block, 27 of 27 over seven days).
 //
-// THE INVARIANT THIS SUITE IS: one /api/sessions sweep costs AT MOST ONE child
-// process — `tmux list-panes`, and only where a tmux binary exists — no matter
-// how many claude lock files and live sessions the machine has. Not "few". Not
-// "cached". The per-item shapes it replaces (`ps -p <pid> -o ppid=` per lock,
-// `pgrep -P <childPid>` per live session) are per-item forks, and a fork is
-// paid by the PARENT: it copies the caller's page tables on the calling thread
-// (measured on this box: 1.8 ms at 45 MB RSS, 18.8 ms at 543 MB, 67-73 ms at
-// 1.5 GB), and `Promise.all` lines N of them up inside ONE tick. 2.242.0 moved
-// the WAIT off the loop and left the FORK — this is the other half.
+// THE INVARIANT THIS SUITE IS, in two halves:
+//   §3-§7  one /api/sessions sweep costs AT MOST ONE child process —
+//          `tmux list-panes`, and only where a tmux binary exists — no matter
+//          how many claude lock files and live sessions the machine has.
+//   §8     `refreshWebuiPids()`, the OTHER reader of "what did this wrapper
+//          fork", costs ZERO. It runs IN-BAND on every kill and 3 s after every
+//          create, and round 1 fixed the sweep while leaving this twin holding
+//          one SYNCHRONOUS `pgrep -P` per live session (r2, the verifier's
+//          HIGH: 9.16 s of blocked loop at 61 sessions / 1.5 GB RSS on this
+//          box, for the identical 244 pids /proc hands over in 2.3 ms).
+//
+// Not "few". Not "cached". A fork is paid by the PARENT: it copies the caller's
+// page tables on the calling thread (measured here: 1.8 ms at 45 MB RSS,
+// 18.8 ms at 543 MB, 67-73 ms at 1.5 GB), `Promise.all` lines N of them up
+// inside ONE tick, and a SYNCHRONOUS one additionally waits out the child's own
+// runtime (`pgrep` walks a 3,000-process /proc: ~80 ms each). 2.242.0 moved the
+// WAIT off the loop and left the FORK — this is the other half.
 //
 // The census PRINTS what it counted, the fixture is a scratch HOME (the real
-// ~/.claude is never read), and the NEGATIVE CONTROL is `master`'s own
-// session-store.js dropped in beside the real one, which must count ≥ N.
+// ~/.claude is never read), and each half has `master`'s own copy of the module
+// under test as its NEGATIVE CONTROL — the sweep's dropped in beside the real
+// one, refreshWebuiPids' sliced out of `git show master:server.js`.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -353,6 +362,153 @@ const hasTmux = !!require(path.join(REPO, 'src/session-store.js')).tmuxOnPath();
   const t2 = censusStop();
   ok(t2.spawns === 1 && Object.keys(t2.byCmd)[0].endsWith(':ps'),
     `POSITIVE CONTROL: the census sees session-store's OWN destructured exec (${JSON.stringify(t2)})`);
+}
+
+// ── §8 THE OTHER READER OF THE SAME FACT (r2, the round-1 verifier's HIGH).
+//    Round 1 deleted the per-session `pgrep -P` from the discovery sweep and
+//    left its TWIN: `refreshWebuiPids()` in server.js runs ONE **synchronous**
+//    `execFileSync('pgrep', ['-P', childPid])` per live session, and it runs
+//    IN-BAND on every kill (ws-handler, between `activeSessions.delete` and the
+//    broadcast) and 3 s after every create — exactly the two moments the
+//    incident reports as an 11-17 s block. Synchronous is strictly worse than
+//    the sweep's `execFileP`: the caller pays the fork AND `pgrep`'s own
+//    runtime (~80 ms while it walks a 3,000-process /proc), one after another.
+//
+//    server.js is a bootstrap that cannot be required (it binds a port), so the
+//    arms are the SHIPPED FUNCTION TEXT, sliced out and given its free names —
+//    the same "drive the published bytes" idiom test-writer-sweep uses for its
+//    shell builders. The control is `master`'s copy of that same function.
+//
+//    VS_WEBUI_RSS_MB inflates this process the way a long-lived server is
+//    inflated (mapped AND touched) — the wall-clock numbers in the essay were
+//    taken with 1500; the ASSERTS are spawn counts and answer equality, which
+//    are RSS-independent, so the default is 0 and the gate stays cheap.
+{
+  const WEBUI_N = Number(process.env.VS_WEBUI_N || 20);
+  const RSS_MB = Number(process.env.VS_WEBUI_RSS_MB || 0);
+  const BUFS = scratch('disc-webui-bufs');
+  fs.rmSync(BUFS, { recursive: true, force: true });
+  fs.mkdirSync(BUFS, { recursive: true });
+  process.on('exit', () => { try { fs.rmSync(BUFS, { recursive: true, force: true }); } catch { } });
+
+  // Brace-matched slice of a top-level function declaration. Naive about braces
+  // inside strings — asserted sane below, and the arms only run if it parses.
+  const sliceFn = (text, name) => {
+    const start = text.indexOf(`function ${name}(`);
+    if (start < 0) return null;
+    let depth = 0;
+    for (let i = text.indexOf('{', start); i >= 0 && i < text.length; i++) {
+      if (text[i] === '{') depth++;
+      else if (text[i] === '}' && --depth === 0) return text.slice(start, i + 1);
+    }
+    return null;
+  };
+  const headSrc = sliceFn(fs.readFileSync(path.join(REPO, 'server.js'), 'utf8'), 'refreshWebuiPids');
+  ok(!!headSrc && /activeSessions/.test(headSrc) && headSrc.endsWith('}'),
+    `the shipped refreshWebuiPids() sliced out of server.js (${headSrc ? headSrc.length + ' chars' : 'NOT FOUND'})`);
+  ok(!!headSrc && !/pgrep/.test(headSrc) && /readChildPids\(meta\.childPid\)/.test(headSrc),
+    'the shipped copy asks THE process reader and carries no `pgrep`');
+
+  // THE FIXTURE: N pty-wrapper stand-ins, each with TWO real children — the
+  // "claude forks from the node-pty spawn" shape the function exists to catch.
+  // If `sh` did not fork, BOTH arms would agree on a smaller set and every
+  // assert under this would be vacuous, so the child count is asserted.
+  const webuiSessions = new Map();
+  for (let i = 0; i < WEBUI_N; i++) {
+    const k = spawn('/bin/sh', ['-c', 'sleep 300 & sleep 300 & read x'], { stdio: ['pipe', 'ignore', 'ignore'] });
+    kids.push(k);
+    const id = `cw-${i}-webui`;
+    webuiSessions.set(id, {});
+    fs.writeFileSync(path.join(BUFS, id + '.json'), JSON.stringify({ pid: 900000 + i, childPid: k.pid }));
+  }
+  await new Promise((r) => setTimeout(r, 800));   // let the shells fork
+  const realChildren = [...webuiSessions.keys()].reduce((n, id) => {
+    const meta = JSON.parse(fs.readFileSync(path.join(BUFS, id + '.json'), 'utf8'));
+    return n + ident.readChildPids(meta.childPid).length;
+  }, 0);
+  ok(realChildren === WEBUI_N * 2,
+    `POSITIVE CONTROL: the fixture really forked ${WEBUI_N * 2} grandchildren (${realChildren}) — without them both arms would agree on nothing`);
+
+  let webuiBallast = null;
+  if (RSS_MB > 0) {
+    webuiBallast = Buffer.allocUnsafe(RSS_MB * 1024 * 1024);
+    for (let o = 0; o < webuiBallast.length; o += 4096) webuiBallast[o] = (o & 255);
+    // held on a GLOBAL on purpose: V8 collects a block-scoped binding after its
+    // last READ, so a `let` whose only remaining mention is `= null` is dead and
+    // the RSS this leg exists to simulate evaporates before the arms run
+    // (measured: 59 MB where 1554 was asked for).
+    globalThis.__vsWebuiBallast = webuiBallast;
+  }
+
+  // A slice that will not build is a LOUD red, never a thrown suite: the brace
+  // matcher is naive about `{` inside a string, and the day that bites, the
+  // gate must say which copy it could not build rather than die at line 1.
+  const runRefresher = (src) => {
+    if (!src) return { error: 'no function text to run' };
+    const set = new Set();
+    const sessions = new Map([...webuiSessions.keys()].map((id) => [id, {}]));
+    // `execFileSync` is injected as the PATCHED module method — the same object
+    // server.js destructures at require time — so the suite's own census is the
+    // ONE counter here, and it also sees anything readChildPids might start.
+    let fn;
+    try {
+      const make = new Function('fs', 'path', 'execFileSync', 'readChildPids', 'activeSessions', 'BUFFERS_DIR', 'webuiPids',
+        `${src}\nreturn refreshWebuiPids;`);
+      fn = make(fs, path, CP.execFileSync, ident.readChildPids, sessions, BUFS, set);
+    } catch (e) { return { error: `could not build the sliced function: ${e.message}` }; }
+    censusStart();
+    const t0 = process.hrtime.bigint();
+    fn();
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    const tally = censusStop();
+    return { ms: +ms.toFixed(1), spawns: tally.spawns, byCmd: tally.byCmd, set, stamped: [...sessions.values()].filter((s) => s._childPid).length };
+  };
+
+  const head = runRefresher(headSrc);
+  console.log(`  · refreshWebuiPids, SHIPPED, ${WEBUI_N} live sessions at ${Math.round(process.memoryUsage().rss / 1048576)} MB RSS: ${JSON.stringify(head.error ? head : { ms: head.ms, spawns: head.spawns, pids: head.set.size })}`);
+  ok(!head.error, `the shipped copy runs (${head.error || 'ok'})`);
+  ok(head.spawns === 0,
+    `ZERO child processes for ${WEBUI_N} live sessions (${head.spawns}: ${JSON.stringify(head.byCmd)}) — in-band on every kill, so this is the fork the incident is made of`);
+  ok(head.set?.size === WEBUI_N * 4,
+    `and it still names every pid: wrapper + 2 children + the meta pid, ${WEBUI_N * 4} of them (${head.set?.size})`);
+  ok(head.stamped === WEBUI_N,
+    `and it still stamps session._childPid for every session (${head.stamped}/${WEBUI_N}) — the other thing this function is for`);
+
+  // NEGATIVE CONTROL: master's own copy of the SAME function, same fixture, one
+  // variable. Without it, "0 spawns" could mean the arm never reached the loop.
+  {
+    const git = spawnSync('git', ['show', 'master:server.js'],
+      { cwd: REPO, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, env: gitEnvFrom(process.env) });
+    if (git.status !== 0 || !git.stdout) {
+      ok(true, `NEGATIVE CONTROL SKIPPED — \`git show master:server.js\` is unavailable here: ${(git.stderr || git.error?.message || 'no output').trim().slice(0, 160)}`);
+    } else {
+      const preSrc = sliceFn(git.stdout, 'refreshWebuiPids');
+      ok(!!preSrc && /execFileSync\('pgrep', \['-P'/.test(preSrc),
+        'the control copy really carries the retired per-session `pgrep -P` (or it controls nothing)');
+      const pre = runRefresher(preSrc);
+      console.log(`  · refreshWebuiPids, PRE-FIX, same fixture: ${JSON.stringify(pre.error ? pre : { ms: pre.ms, spawns: pre.spawns, pids: pre.set.size })}`);
+      ok(!pre.error, `the control copy runs (${pre.error || 'ok'})`);
+      ok(pre.spawns >= WEBUI_N,
+        `PRE-FIX: ${pre.spawns} SYNCHRONOUS child processes for ${WEBUI_N} live sessions — the defect reproduces`);
+      const same = !!pre.set && !!head.set && pre.set.size === head.set.size && [...pre.set].every((p) => head.set.has(p));
+      ok(same,
+        `and the two answers are IDENTICAL (${pre.set?.size} === ${head.set?.size} pids) — the fork bought nothing`);
+      ok(pre.ms > head.ms,
+        `PRE-FIX blocked the loop ${pre.ms} ms where the shipped copy takes ${head.ms} ms (same box, same fixture; ~9.16 s vs 1.6 ms at 61 sessions / 1.5 GB RSS — VS_WEBUI_N=61 VS_WEBUI_RSS_MB=1500)`);
+    }
+  }
+  webuiBallast = null; delete globalThis.__vsWebuiBallast;
+
+  // WIRING PIN: this leg is only worth running because that function is on the
+  // create/kill path. If it stops being called, the reason changes and somebody
+  // must re-read this section rather than keep a green that means nothing.
+  {
+    const callers = ['src/ws-handler.js', 'src/ws-create.js', 'src/server/boot-restore.js']
+      .filter((f) => /refreshWebuiPids\(\)/.test(fs.readFileSync(path.join(REPO, f), 'utf8')));
+    ok(callers.length >= 3, `refreshWebuiPids is still called from the kill / create / restore paths (${callers.join(', ')})`);
+    ok(/activeSessions\.delete\(data\.sessionId\);\s*\n\s*refreshWebuiPids\(\);/.test(fs.readFileSync(path.join(REPO, 'src/ws-handler.js'), 'utf8')),
+      'and the kill case still calls it IN-BAND, before the broadcast — the shape that made a Terminate blank the window for 30 s');
+  }
 }
 
 cleanup();

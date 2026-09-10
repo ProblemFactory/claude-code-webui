@@ -877,70 +877,238 @@ for (const [edge] of EXCEPTIONS) {
     'POSITIVE CONTROL: listing that category is the whole fix (one array entry)');
 }
 
-// 45. THE DISCOVERY SPAWN CENSUS (2026-09-09, userW's pod: 27 of 27 session
-//     creates and kills followed by an 11-17 s event-loop block). The
-//     /api/sessions sweep runs on a 4.5 s cache with clients polling at 5 s,
-//     and again after every create and kill, so a spawn inside it is paid
-//     several times a minute — and a spawn is paid by the PARENT: fork(2)
-//     copies the caller's page tables on the calling thread (measured on this
-//     box: 1.8 ms at 45 MB RSS, 18.8 ms at 543 MB, 67-73 ms at 1.5 GB), and
-//     `Promise.all` lines N of them up inside ONE tick. The rule is therefore
-//     not "few spawns" but "NO SPAWN PER ITEM": parents and children come from
-//     /proc through THE process reader (src/cli-identity.js), and the only
-//     survivors are one-per-sweep or no-/proc fallbacks — each named here WITH
-//     its reason.
+// 45. THE PER-ITEM SPAWN CENSUS (2026-09-09, userW's pod: 27 of 27 session
+//     creates and kills followed by an 11-17 s event-loop block). A spawn is
+//     paid by the PARENT — fork(2) copies the caller's page tables on the
+//     calling thread (measured on this box: 1.8 ms at 45 MB RSS, 18.8 ms at
+//     543 MB, 67-73 ms at 1.5 GB) — and a loop over N sessions lines N of them
+//     up inside ONE tick, whether it awaits or not. The rule is therefore not
+//     "few spawns" but "NO SPAWN PER ITEM" on anything a poll, a create or a
+//     kill can reach: those facts come from /proc through THE process reader
+//     (src/cli-identity.js), and the survivors are one-per-sweep or no-/proc
+//     fallbacks, each named below WITH its reason.
 //
-//     It lives in the build (scripts/test-discovery-spawn.mjs measures the
-//     CONSEQUENCE over a 50-lock fixture; this measures the SHAPE) because the
-//     regression is one new line in a hot loop. A dead row fails too: a reason
-//     nobody can point at a call site is a reason nobody re-derived.
+//     ROUND 2 — THE FILE SET IS DERIVED, NOT TYPED. Round 1 wrote the three
+//     sweep modules into a literal array, and the very next reader of the very
+//     same fact — `refreshWebuiPids()` in server.js, one SYNCHRONOUS
+//     `pgrep -P <childPid>` per live session, in-band on every kill and 3 s
+//     after every create — was invisible to it: measured 9.16 s of blocked
+//     loop for 61 sessions at 1.5 GB RSS, for the identical 244 pids /proc
+//     hands over in 1.6 ms. A hand-written file list is the tool this class has
+//     already defeated twice here (test-writer-sweep §17 r7 is the first), so
+//     both halves below derive their scope and PRINT what they walked:
+//
+//       (a) THE PID-QUESTION CENSUS — repo-wide. Every tracked JS file the
+//           server or the daemon runs, every spawn whose argv names a
+//           process-table tool (`ps`/`pgrep`/`pidof`/`pstree`/`lsof`/`fuser`).
+//           That family IS what this incident is made of ("who is this pid's
+//           parent", "what did it fork", "who holds this file"), it is small
+//           enough to reason about one row at a time, and it is the half that
+//           would have caught server.js.
+//       (b) THE SWEEP-MODULE CENSUS — every spawn, in the modules that answer
+//           the sweep's own named facts. The file set is resolved BY LOOKING UP
+//           WHERE EACH FACT IS DEFINED, so moving a function keeps its
+//           enforcement and a fact that grew a second definition goes red.
+//           This half is what catches a per-session `git` or `stat` — a fork
+//           that (a) would never see.
 {
-  const SPAWN_FILES = ['src/session-store.js', 'src/discovery-facts.js', 'src/cli-identity.js'];
+  const GIT_ENV45 = gitEnvFrom(process.env);
+  const lsFiles = spawnSync('git', ['-C', REPO, 'ls-files', '-z'],
+    { encoding: 'utf-8', env: GIT_ENV45, maxBuffer: 64 * 1024 * 1024 });
+  // SKIP QUOTES GIT (§42 round 6): a self-invented reason turns "this census
+  // was switched off" into "there was nothing to look at". Half (b) still runs
+  // — it reads named files and needs no index.
+  const gitOk = !lsFiles.error && lsFiles.status === 0 && lsFiles.stdout;
+  const gitWhy45 = lsFiles.error ? `spawn failed: ${lsFiles.error.code || lsFiles.error.message}`
+    : `exit ${lsFiles.status}: ${String(lsFiles.stderr || '').trim().replace(/\s+/g, ' ').slice(0, 160) || '(no stderr)'}`;
+  // SCOPE: EVERY tracked JS except two named exclusions — over-inclusion only
+  // widens enforcement, a false negative IS the defect (test-writer-sweep §17
+  // r7). `scripts/` is out because the suites deliberately SPELL the forbidden
+  // shapes as controls (this very block holds two `execFileSync('ps', …)`
+  // literals) and because no product path requires anything from there — which
+  // is ASSERTED below rather than assumed. `public/` is out because it is the
+  // built bundle: a tracked bundle.js would carry cli-identity's own allowlisted
+  // `ps` calls under a second filename and redden the build for a legitimate
+  // act. `docs/` is IN (2 tracked files, measured clean) — the earlier "it's
+  // prose" exclusion was an unaudited sample, and docs/examples/hello-plugin is
+  // code somebody runs. The listing is the git INDEX, never a readdir, because
+  // data/bin holds a 64 MB untracked `rclone` (the §42 round-5 lesson, same
+  // directory).
+  const inScope = (f) => /\.(js|mjs|cjs)$/.test(f)
+    && !f.startsWith('scripts/') && !f.startsWith('public/');
+  const tracked = gitOk
+    ? (lsFiles.stdout || '').split('\0').filter(Boolean).filter(inScope)
+    : [];
+
   // Every way this repo STARTS A CHILD PROCESS, in JS. `exec` is the awkward
-  // one: `re.exec(str)` is a regex match, not a fork, and these three files
-  // hold four of them — so the bare form is taken only when it is NOT a method
-  // call, plus the dotted spellings of child_process itself. A DECLARATION is
-  // not a call (`function execFileP(cmd, args…)`), so it is blanked first.
+  // one: `re.exec(str)` is a regex match, not a fork, so the bare form is taken
+  // only when it is NOT a method call, plus the dotted spellings of
+  // child_process itself. A DECLARATION is not a call (`function execFileP(cmd,
+  // args…)`), so it is blanked first.
   const SPAWN_CALL = /\b(?:execFileSync|execFileP|execFile|execSync|spawnSync|spawn|execImpl)\s*\(|(?<![.\w$])exec\s*\(|\b(?:cp|childProcess|child_process|proc)\.exec\s*\(/;
+  const PID_TOOL = /['"`](?:ps|pgrep|pkill|pidof|pstree|lsof|fuser|top)['"`]/;
   const spawnScan = (l) => String(l).replace(/\bfunction\s+\w+\s*\(/g, 'function DECLARED(');
-  const ALLOWED = [
-    { file: 'src/session-store.js', needle: 'execFile(cmd, args,', why: 'THE async exec primitive itself, the body of execFileP. It starts nothing on its own — this census is about its CALLERS, which are the two rows below.' },
-    { file: 'src/session-store.js', needle: "execFileP('tmux', ['list-panes'", why: 'ONE PER SWEEP, and only where a `tmux` binary is on PATH (statted, never `which`); the map is cached for TMUX_MAP_TTL_MS so a create/kill burst shares it. This is the one child process a sweep may start.' },
-    { file: 'src/session-store.js', needle: "execFileP('ps', ['-p', String(pid), '-o', 'comm=']", why: 'NO-/proc FALLBACK ONLY (isProcessClaudeAsync): reached from isLockClaude when the lock carries no numeric procStart AND there is no procfs to ask — i.e. macOS. On a procfs machine the rung above it is `isCliProcess`, pure file reads.' },
-    { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-p', String(pid), '-o', 'uid=,args=']", why: 'NO-/proc FALLBACK ONLY (readPsIdentity, per-pid memo) — the {uid, argv} value read the signalling callers share. Not on the discovery sweep path at all.' },
-    { file: 'src/cli-identity.js', needle: "execFileSync('ps', ['-p', String(pid), '-o', 'args=']", why: 'NO-/proc FALLBACK ONLY (procArgv, rung 2 of the identity rule).' },
-    { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-eo', 'pid=,ppid=']", why: 'NO-/proc FALLBACK ONLY, and ONE PER SWEEP for the WHOLE table (parentIndex, memoised PROC_TABLE_TTL_MS) — this is the shape that replaced one `ps` per pid. Where /proc exists it is never reached.' },
-    { file: 'src/discovery-facts.js', needle: "spawnSync('lsof', ['-Fpn', '+D', root]", why: 'NO-/proc FALLBACK ONLY (macOS/BSD codex liveness), ONE per scan of the whole sessions tree; the Linux rung above it walks /proc with zero forks.' },
-  ];
   const isSpawnComment = (l) => /^\s*(\/\/|\*|\/\*|#)/.test(l);
-  const walked = [], stray = [], hitNeedles = new Set();
-  for (const f of SPAWN_FILES) {
-    const text = read(f);
-    ok(text.length > 0, `spawn census can read ${f}`);
-    text.split('\n').forEach((line, i) => {
+  // The tool name usually sits on the spawn's own line; a wrapped call puts it
+  // on the next one or two. Over-inclusion is the safe direction here — it can
+  // only demand one more reason row.
+  const spawnSites = (text, { pidOnly }) => {
+    const lines = String(text).split('\n');
+    const out = [];
+    lines.forEach((line, i) => {
       if (isSpawnComment(line) || !SPAWN_CALL.test(spawnScan(line))) return;
-      walked.push(`${f}:${i + 1}`);
-      const a = ALLOWED.find((x) => x.file === f && line.includes(x.needle));
-      if (a) hitNeedles.add(a.needle); else stray.push(`${f}:${i + 1}: ${line.trim().slice(0, 100)}`);
+      if (pidOnly && !PID_TOOL.test(lines.slice(i, i + 3).filter((l) => !isSpawnComment(l)).join('\n'))) return;
+      out.push({ n: i + 1, line });
     });
+    return out;
+  };
+
+  // ── (a) THE PID-QUESTION CENSUS ────────────────────────────────────────────
+  const PID_ALLOWED = [
+    { file: 'src/cli-identity.js', needle: "execFileSync('ps', ['-p', String(pid), '-o', 'args=']", why: 'NO-/proc FALLBACK ONLY (procArgv, rung 2 of the identity rule).' },
+    { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-p', String(pid), '-o', 'uid=,args=']", why: 'NO-/proc FALLBACK ONLY (readPsIdentity, per-pid memo) — the {uid, argv} value read the signalling callers share.' },
+    { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-eo', 'pid=,ppid=']", why: 'NO-/proc FALLBACK ONLY, and ONE PER SWEEP for the WHOLE table (parentIndex, memoised) — this is the shape that REPLACED one `ps` per pid. Never reached where /proc exists.' },
+    { file: 'src/session-store.js', needle: "execFileP('ps', ['-p', String(pid), '-o', 'comm=']", why: 'NO-/proc FALLBACK ONLY (isProcessClaudeAsync), reached from isLockClaude when a lock carries no numeric procStart AND there is no procfs. On a procfs machine the rung above it is `isCliProcess`, pure file reads.' },
+    { file: 'src/discovery-facts.js', needle: "spawnSync('lsof', ['-Fpn', '+D', root]", why: 'NO-/proc FALLBACK ONLY (macOS/BSD codex liveness), ONE per scan of the whole sessions tree.' },
+    { file: 'src/agentd/agentd.js', needle: "spawnSync('ps', ['-p', String(pid), '-o', 'lstart=']", why: 'NO-/proc FALLBACK ONLY (pidStartTime) — /proc/<pid>/stat field 22 is the rung above it. Asked when a pipe session is adopted, not per poll.' },
+    { file: 'src/agentd/agentd.js', needle: "execFileSync('ps', ['-p', String(pid), '-o', 'command=']", why: 'NO-/proc FALLBACK ONLY (acquireSingleton), and ONCE per daemon start — /proc/<pid>/cmdline is the rung above it.' },
+    { file: 'src/plugins.js', needle: "execFileSync('pgrep', ['-x', 'tailscaled']", why: 'ONE per tailscale status read (a plugin card), never per session; the loop under it reads /proc cmdlines, not more spawns.' },
+    { file: 'src/server/boot-restore.js', needle: "execFileSync('fuser', [path.join(SOCKETS_DIR, sockFile)]", why: 'BOOT ONLY (restoreSessions, once per surviving socket, before this server serves anybody) — "is this dtach socket still owned" has no /proc rung that does not re-implement fuser. Out of scope on purpose: the incident is create/kill/poll, and a boot pays this once.' },
+    { file: 'src/server/boot-restore.js', needle: "execFileSync('fuser', [socketPath]", why: 'BOOT ONLY (same sweep, the per-socket branch).' },
+    { file: 'src/server/boot-restore.js', needle: "execFileSync('pgrep', ['-f', socketPath], { encoding: 'utf-8', timeout: 2000 });", why: 'BOOT ONLY — the second rung of the same liveness question when `fuser` is absent.' },
+    { file: 'src/server/boot-restore.js', needle: "for (const p of execFileSync('pgrep', ['-f', socketPath]", why: 'BOOT ONLY, and only for a socket already judged a DUPLICATE husk that must be retired — a handful per boot at most.' },
+    { file: 'src/sysinfo.js', needle: "execFile('ps', ['aux', '--sort=-rss']", why: 'ONE per sysinfo read (topProcs), never per item; PS_MAX_BUFFER governs its size.' },
+    { file: 'src/sysinfo.js', needle: "execFile('ps', ['aux']", why: 'ONE per sysinfo read — the fallback for a `ps` with no --sort.' },
+    { file: 'src/sysinfo.js', needle: "execFile('ps', ['axo', PS_COLUMNS]", why: 'ONE per process-list read (listProcs), the System panel table.' },
+    { file: 'src/transcript-service.js', needle: "execFileSync('fuser', [fp]", why: 'ONE per human-triggered `rescue` — the two-writer refusal. Not on any poll.' },
+  ];
+  if (!gitOk) {
+    ok(true, `(a) PID-QUESTION CENSUS SKIPPED — \`git -C <repo> ls-files\` could not answer here: ${gitWhy45}`);
+  } else {
+    const pidWalked = [], pidStray = [], pidHit = new Set();
+    for (const f of tracked) {
+      for (const s of spawnSites(read(f), { pidOnly: true })) {
+        pidWalked.push(`${f}:${s.n}`);
+        const a = PID_ALLOWED.find((x) => x.file === f && s.line.includes(x.needle));
+        if (a) pidHit.add(a.needle); else pidStray.push(`${f}:${s.n}: ${s.line.trim().slice(0, 110)}`);
+      }
+    }
+    console.log(`  · (a) pid-question census walked ${tracked.length} tracked files, ${pidWalked.length} sites: ${pidWalked.join(', ')}`);
+    ok(tracked.length > 100 && pidWalked.length >= 10,
+      `(a) scope is non-vacuous (${tracked.length} files, ${pidWalked.length} process-table spawns)`);
+    // SCOPE SELF-PROOF: an assert that cannot name the files it exists for is
+    // a census of nothing. These four are the incident's own modules.
+    for (const must of ['server.js', 'src/session-store.js', 'src/cli-identity.js', 'src/server/boot-restore.js']) {
+      ok(tracked.includes(must), `(a) scope really covers ${must}`);
+    }
+    ok(!pidStray.length, `(a) every process-table spawn is allowlisted WITH a reason (${pidStray.slice(0, 4).join(' | ') || 'clean'})`);
+    const pidDead = PID_ALLOWED.filter((a) => !pidHit.has(a.needle)).map((a) => `${a.file}:${a.needle}`);
+    ok(!pidDead.length, `(a) no dead allowlist rows (${pidDead.join(' | ') || 'all live'})`);
+    // THE FIX ITSELF, asserted where it was made: server.js asks the reader.
+    const srv = read('server.js');
+    const srvCode = srv.split('\n').filter((l) => !isSpawnComment(l)).join('\n');
+    ok(!/pgrep/.test(srvCode), '(a) no `pgrep` survives in server.js code (refreshWebuiPids was the last one)');
+    ok(/readChildPids\(meta\.childPid\)/.test(srvCode) && /require\('\.\/src\/cli-identity'\)/.test(srvCode),
+      '(a) refreshWebuiPids asks THE process reader for the wrapper\'s children');
+    // …and `scripts/` really is out of the product's path, which is the only
+    // thing that makes excluding it from the scope honest.
+    const productRequiresScripts = tracked.filter((f) => /require\(['"][^'"]*\/scripts\//.test(read(f)));
+    ok(!productRequiresScripts.length, `(a) no in-scope file requires anything from scripts/ (${productRequiresScripts.join(', ') || 'clean'})`);
   }
-  console.log(`  · discovery spawn census walked ${walked.length} call sites: ${walked.join(', ')}`);
-  ok(walked.length >= ALLOWED.length, `census scope is non-vacuous (${walked.length} spawn call sites found)`);
-  ok(!stray.length, `every spawn on the discovery path is allowlisted WITH a reason (${stray.slice(0, 4).join(' | ') || 'clean'})`);
-  const deadRows = ALLOWED.filter((a) => !hitNeedles.has(a.needle)).map((a) => `${a.file}:${a.needle}`);
-  ok(!deadRows.length, `no dead allowlist rows (${deadRows.join(' | ') || 'all live'})`);
-  // NEGATIVE CONTROLS: the two retired per-item shapes must be CAUGHT by this
-  // exact scanner, and a commented-out one must NOT be — an allowlist that
-  // cannot go red, or that reddens on prose, is not enforcement.
+
+  // ── (b) THE SWEEP-MODULE CENSUS ────────────────────────────────────────────
+  // The facts a poll / create / kill asks for, and therefore the modules whose
+  // EVERY spawn needs a reason. Resolved by definition lookup: a fact that
+  // moved keeps its enforcement, a fact that grew a twin or vanished goes red.
+  const SWEEP_FACTS = ['discoverClaudeSessions', 'refreshWebuiPids', 'readChildPids', 'readPpid',
+    'findTmuxTargetAsync', 'getTmuxPaneMapAsync', 'listOpenCodexRolloutPaths'];
+  const defOwner = (name, pool) => {
+    const def = new RegExp(`^(?:async\\s+)?function\\s+${name}\\s*\\(|^\\s*(?:const|let)\\s+${name}\\s*=`, 'm');
+    return pool.filter((f) => def.test(read(f)));
+  };
+  // Where git could not answer, fall back to the modules this repo has always
+  // held these facts in — SAID, not silently.
+  const defPool = gitOk ? tracked
+    : ['server.js', 'src/session-store.js', 'src/cli-identity.js', 'src/discovery-facts.js'];
+  const sweepFiles = new Set();
+  const ambiguous = [];
+  for (const name of SWEEP_FACTS) {
+    const owners = defOwner(name, defPool);
+    if (owners.length !== 1) ambiguous.push(`${name} → ${JSON.stringify(owners)}`);
+    for (const o of owners) sweepFiles.add(o);
+  }
+  ok(!ambiguous.length,
+    `(b) every sweep fact resolves to exactly ONE defining module (${ambiguous.join(' | ') || 'clean'})`);
+  const SWEEP_ALLOWED = [
+    { file: 'src/session-store.js', needle: 'execFile(cmd, args,', why: 'THE async exec primitive itself, the body of execFileP. It starts nothing on its own — this census is about its CALLERS.' },
+    { file: 'src/session-store.js', needle: "execFileP('tmux', ['list-panes'", why: 'ONE PER SWEEP, and only where a `tmux` binary is on PATH (statted, never `which`); the map is cached for TMUX_MAP_TTL_MS so a create/kill burst shares it. This is the one child process a sweep may start.' },
+    { file: 'src/session-store.js', needle: "execFileP('ps', ['-p', String(pid), '-o', 'comm=']", why: 'NO-/proc FALLBACK ONLY (isProcessClaudeAsync) — see (a).' },
+    { file: 'src/cli-identity.js', needle: "execFileSync('ps', ['-p', String(pid), '-o', 'args=']", why: 'NO-/proc FALLBACK ONLY (procArgv) — see (a).' },
+    { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-p', String(pid), '-o', 'uid=,args=']", why: 'NO-/proc FALLBACK ONLY (readPsIdentity) — see (a).' },
+    { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-eo', 'pid=,ppid=']", why: 'NO-/proc FALLBACK ONLY, ONE per sweep for the whole table — see (a).' },
+    { file: 'src/discovery-facts.js', needle: "spawnSync('lsof', ['-Fpn', '+D', root]", why: 'NO-/proc FALLBACK ONLY (macOS/BSD codex liveness), ONE per scan — see (a).' },
+    { file: 'server.js', needle: "execFileSync('git', ['-C', repoDir, 'pull', '--ff-only']", why: 'BOOT ONLY, ONCE (the auto-update pull, before anything is served).' },
+    { file: 'server.js', needle: "execFileSync('npm', ['install'", why: 'BOOT ONLY, ONCE, and only when the pull actually moved.' },
+    { file: 'server.js', needle: "execFileSync('npm', ['run', 'build']", why: 'BOOT ONLY, ONCE, same branch.' },
+    { file: 'server.js', needle: "execFileSync('/usr/bin/which', [name]", why: 'BOOT ONLY, ONCE PER COMMAND NAME (resolveCmd, three of them) — node-pty needs absolute paths. Never on a session path.' },
+  ];
+  const swWalked = [], swStray = [], swHit = new Set();
+  for (const f of [...sweepFiles].sort()) {
+    const text = read(f);
+    ok(text.length > 0, `(b) census can read ${f}`);
+    for (const s of spawnSites(text, { pidOnly: false })) {
+      swWalked.push(`${f}:${s.n}`);
+      const a = SWEEP_ALLOWED.find((x) => x.file === f && s.line.includes(x.needle));
+      if (a) swHit.add(a.needle); else swStray.push(`${f}:${s.n}: ${s.line.trim().slice(0, 110)}`);
+    }
+  }
+  console.log(`  · (b) sweep-module census walked ${[...sweepFiles].sort().join(', ')} — ${swWalked.length} sites: ${swWalked.join(', ')}`);
+  ok(sweepFiles.size >= 4 && swWalked.length >= SWEEP_ALLOWED.length,
+    `(b) scope is non-vacuous (${sweepFiles.size} modules, ${swWalked.length} spawn sites)`);
+  ok(sweepFiles.has('server.js'),
+    '(b) server.js is IN SCOPE because it defines refreshWebuiPids — the reader round 1 could not see');
+  ok(!swStray.length, `(b) every spawn in a sweep module is allowlisted WITH a reason (${swStray.slice(0, 4).join(' | ') || 'clean'})`);
+  const swDead = SWEEP_ALLOWED.filter((a) => !swHit.has(a.needle)).map((a) => `${a.file}:${a.needle}`);
+  ok(!swDead.length, `(b) no dead allowlist rows (${swDead.join(' | ') || 'all live'})`);
+
+  // ── NEGATIVE CONTROLS, over the SAME scanner, without touching the tree ────
+  // ① the two retired per-item shapes, verbatim, must be caught by (a);
+  // ② the exact mutation that proved round 1 blind — a per-session
+  //    `ps -p … -o ppid=` inside refreshWebuiPids — must be caught in
+  //    server.js's real text with the line spliced in;
+  // ③ a per-session `git` spawn, which (a) cannot see by construction, must be
+  //    caught by (b) — the reason (b) exists;
+  // ④ the same lines behind a `//` are prose, not offenders.
   const retired = [
     "    const out = await execFileP('pgrep', ['-P', String(childPid)], { timeout: 2000 });",
     "  const out = await execFileP('ps', ['-p', String(pid), '-o', 'ppid='], { timeout: 2000 });",
+    "          const ch = execFileSync('pgrep', ['-P', String(meta.childPid)], { encoding: 'utf-8', timeout: 2000 }).trim();",
   ];
-  const ncStray = retired.filter((line) => !isSpawnComment(line) && SPAWN_CALL.test(spawnScan(line))
-    && !ALLOWED.some((x) => x.file === 'src/session-store.js' && line.includes(x.needle)));
-  ok(ncStray.length === 2, `NEGATIVE CONTROL: the retired per-lock \`ps -o ppid=\` and per-session \`pgrep -P\` are both caught (${ncStray.length}/2)`);
+  const caughtByA = retired.filter((line) => spawnSites(line, { pidOnly: true }).length === 1);
+  ok(caughtByA.length === 3,
+    `NEGATIVE CONTROL ①②: the retired per-lock \`ps -o ppid=\`, the retired per-session \`pgrep -P\` and the shipped server.js spelling are all caught by (a) (${caughtByA.length}/3)`);
+  // Both splices are measured as a DELTA against the tree as it stands, so the
+  // control describes what IT added and nothing else — on a tree somebody has
+  // already broken, an absolute count would go red for a reason that is not
+  // this control's subject and would say the wrong thing about why.
+  const ANCHOR45 = 'for (const p of readChildPids(meta.childPid)) webuiPids.add(p);';
+  const srvText = read('server.js');
+  ok(srvText.includes(ANCHOR45), 'NEGATIVE CONTROL setup: the splice anchor exists in server.js (a control that cannot be built proves nothing)');
+  const strayCount = (text, pidOnly, allow) => spawnSites(text, { pidOnly })
+    .filter((s) => !allow.some((x) => x.file === 'server.js' && s.line.includes(x.needle))).length;
+  const splice = (line) => srvText.replace(ANCHOR45, `${ANCHOR45}\n        ${line}`);
+  const psMut = splice("try { execFileSync('ps', ['-p', String(meta.pid), '-o', 'ppid=']); } catch {}");
+  const dA = strayCount(psMut, true, PID_ALLOWED) - strayCount(srvText, true, PID_ALLOWED);
+  const dB = strayCount(psMut, false, SWEEP_ALLOWED) - strayCount(srvText, false, SWEEP_ALLOWED);
+  ok(dA === 1 && dB === 1,
+    `NEGATIVE CONTROL ②: the exact mutation that left round 1's census GREEN is now a stray in BOTH halves (a:+${dA}, b:+${dB})`);
+  const gitMut = splice("try { execFileSync('git', ['-C', meta.cwd, 'status']); } catch {}");
+  const gA = strayCount(gitMut, true, PID_ALLOWED) - strayCount(srvText, true, PID_ALLOWED);
+  const gB = strayCount(gitMut, false, SWEEP_ALLOWED) - strayCount(srvText, false, SWEEP_ALLOWED);
+  ok(gA === 0 && gB === 1,
+    `NEGATIVE CONTROL ③: a per-session \`git\` spawn is invisible to (a) (+${gA}) and a stray in (b) (+${gB}) — the reason both halves exist`);
   ok(retired.every((l) => isSpawnComment('  // ' + l.trim())),
-    'NEGATIVE CONTROL: the same lines behind a `//` are prose, not offenders');
+    'NEGATIVE CONTROL ④: the same lines behind a `//` are prose, not offenders');
 }
 
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);

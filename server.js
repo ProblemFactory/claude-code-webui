@@ -17,6 +17,7 @@ const { createMessageManager, feedLive, feedPeerCard } = require('./src/normaliz
 const { Telemetry } = require('./src/telemetry');
 const { SyncStore } = require('./src/sync-store');
 const { cwdToProjectDir, SessionMessages, findSessionJsonlPath, dedupWebuiSockets } = require('./src/session-store');
+const { readChildPids } = require('./src/cli-identity');   // THE process reader — /proc first, ONE `ps` table where there is none, never a fork per item
 const { CodexSessionMessages } = require('./src/codex-session-store');
 const { normalizeCodexSource, CODEX_SESSIONS_DIR } = require('./src/adapters/codex');
 const { createAdapterRegistry } = require('./src/adapters');
@@ -376,24 +377,22 @@ const { CHAT_WRAPPER, agentdDialDevices, agentdDials,
   getExitProxy: () => { try { return exitProxy; } catch { return null; } },
 });
 // ── Cached webuiPids (PIDs managed by webui dtach sessions) ──
-// Built from pty-wrapper metadata files (childPid), no pgrep/process-tree traversal needed.
+// childPid from the pty-wrapper meta file + that wrapper's children from /proc
+// (readChildPids) — NEVER a fork per session: this runs IN-BAND on every kill
+// and 3 s after every create, and the `pgrep -P` it replaces cost 9.16 s of
+// blocked loop at 61 sessions / 1.5 GB RSS. Fork essay: src/cli-identity.js.
 const webuiPids = new Set();
 
 function refreshWebuiPids() {
   webuiPids.clear();
   for (const [id, s] of activeSessions) {
-    // Read childPid from pty-wrapper's metadata file
     try {
       const metaPath = path.join(BUFFERS_DIR, id + '.json');
       const meta = JSON.parse(fs.readFileSync(metaPath, 'utf-8'));
       if (meta.childPid) {
         webuiPids.add(meta.childPid);
         s._childPid = meta.childPid;
-        // Also add direct children of childPid (claude forks from node-pty spawn)
-        try {
-          const ch = execFileSync('pgrep', ['-P', String(meta.childPid)], { encoding: 'utf-8', timeout: 2000 }).trim();
-          for (const line of ch.split('\n')) { const p = parseInt(line.trim()); if (p) webuiPids.add(p); }
-        } catch {}
+        for (const p of readChildPids(meta.childPid)) webuiPids.add(p);  // claude forks from the node-pty spawn
       }
       if (meta.pid) { webuiPids.add(meta.pid); }
     } catch {}
