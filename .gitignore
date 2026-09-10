@@ -95,3 +95,12 @@ src/server/session-stdout.__*_control.js
 # strand one — and a dirty tree is what the release gate REFUSES on, so they can
 # never be allowed to become tree state.
 src/lib/.chat-view.*prefix-*.js
+
+# scripts/test-discovery-spawn.mjs writes a PRE-FIX COPY of src/session-store.js
+# (`git show master:…`) beside the real one as its NEGATIVE CONTROL — they must
+# be SIBLINGS or that module's relative requires do not resolve. It is unlinked
+# on exit and swept by PID LIVENESS at start (a concurrent run of the same
+# suite in this worktree must keep its own copy), but a SIGKILL can strand one
+# — and a dirty tree is what the release gate REFUSES on, so it can never be
+# allowed to become tree state.
+src/.session-store.spawnfix-*.js

@@ -877,5 +877,71 @@ for (const [edge] of EXCEPTIONS) {
     'POSITIVE CONTROL: listing that category is the whole fix (one array entry)');
 }
 
+// 45. THE DISCOVERY SPAWN CENSUS (2026-09-09, userW's pod: 27 of 27 session
+//     creates and kills followed by an 11-17 s event-loop block). The
+//     /api/sessions sweep runs on a 4.5 s cache with clients polling at 5 s,
+//     and again after every create and kill, so a spawn inside it is paid
+//     several times a minute — and a spawn is paid by the PARENT: fork(2)
+//     copies the caller's page tables on the calling thread (measured on this
+//     box: 1.8 ms at 45 MB RSS, 18.8 ms at 543 MB, 67-73 ms at 1.5 GB), and
+//     `Promise.all` lines N of them up inside ONE tick. The rule is therefore
+//     not "few spawns" but "NO SPAWN PER ITEM": parents and children come from
+//     /proc through THE process reader (src/cli-identity.js), and the only
+//     survivors are one-per-sweep or no-/proc fallbacks — each named here WITH
+//     its reason.
+//
+//     It lives in the build (scripts/test-discovery-spawn.mjs measures the
+//     CONSEQUENCE over a 50-lock fixture; this measures the SHAPE) because the
+//     regression is one new line in a hot loop. A dead row fails too: a reason
+//     nobody can point at a call site is a reason nobody re-derived.
+{
+  const SPAWN_FILES = ['src/session-store.js', 'src/discovery-facts.js', 'src/cli-identity.js'];
+  // Every way this repo STARTS A CHILD PROCESS, in JS. `exec` is the awkward
+  // one: `re.exec(str)` is a regex match, not a fork, and these three files
+  // hold four of them — so the bare form is taken only when it is NOT a method
+  // call, plus the dotted spellings of child_process itself. A DECLARATION is
+  // not a call (`function execFileP(cmd, args…)`), so it is blanked first.
+  const SPAWN_CALL = /\b(?:execFileSync|execFileP|execFile|execSync|spawnSync|spawn|execImpl)\s*\(|(?<![.\w$])exec\s*\(|\b(?:cp|childProcess|child_process|proc)\.exec\s*\(/;
+  const spawnScan = (l) => String(l).replace(/\bfunction\s+\w+\s*\(/g, 'function DECLARED(');
+  const ALLOWED = [
+    { file: 'src/session-store.js', needle: 'execFile(cmd, args,', why: 'THE async exec primitive itself, the body of execFileP. It starts nothing on its own — this census is about its CALLERS, which are the two rows below.' },
+    { file: 'src/session-store.js', needle: "execFileP('tmux', ['list-panes'", why: 'ONE PER SWEEP, and only where a `tmux` binary is on PATH (statted, never `which`); the map is cached for TMUX_MAP_TTL_MS so a create/kill burst shares it. This is the one child process a sweep may start.' },
+    { file: 'src/session-store.js', needle: "execFileP('ps', ['-p', String(pid), '-o', 'comm=']", why: 'NO-/proc FALLBACK ONLY (isProcessClaudeAsync): reached from isLockClaude when the lock carries no numeric procStart AND there is no procfs to ask — i.e. macOS. On a procfs machine the rung above it is `isCliProcess`, pure file reads.' },
+    { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-p', String(pid), '-o', 'uid=,args=']", why: 'NO-/proc FALLBACK ONLY (readPsIdentity, per-pid memo) — the {uid, argv} value read the signalling callers share. Not on the discovery sweep path at all.' },
+    { file: 'src/cli-identity.js', needle: "execFileSync('ps', ['-p', String(pid), '-o', 'args=']", why: 'NO-/proc FALLBACK ONLY (procArgv, rung 2 of the identity rule).' },
+    { file: 'src/cli-identity.js', needle: "execImpl('ps', ['-eo', 'pid=,ppid=']", why: 'NO-/proc FALLBACK ONLY, and ONE PER SWEEP for the WHOLE table (parentIndex, memoised PROC_TABLE_TTL_MS) — this is the shape that replaced one `ps` per pid. Where /proc exists it is never reached.' },
+    { file: 'src/discovery-facts.js', needle: "spawnSync('lsof', ['-Fpn', '+D', root]", why: 'NO-/proc FALLBACK ONLY (macOS/BSD codex liveness), ONE per scan of the whole sessions tree; the Linux rung above it walks /proc with zero forks.' },
+  ];
+  const isSpawnComment = (l) => /^\s*(\/\/|\*|\/\*|#)/.test(l);
+  const walked = [], stray = [], hitNeedles = new Set();
+  for (const f of SPAWN_FILES) {
+    const text = read(f);
+    ok(text.length > 0, `spawn census can read ${f}`);
+    text.split('\n').forEach((line, i) => {
+      if (isSpawnComment(line) || !SPAWN_CALL.test(spawnScan(line))) return;
+      walked.push(`${f}:${i + 1}`);
+      const a = ALLOWED.find((x) => x.file === f && line.includes(x.needle));
+      if (a) hitNeedles.add(a.needle); else stray.push(`${f}:${i + 1}: ${line.trim().slice(0, 100)}`);
+    });
+  }
+  console.log(`  · discovery spawn census walked ${walked.length} call sites: ${walked.join(', ')}`);
+  ok(walked.length >= ALLOWED.length, `census scope is non-vacuous (${walked.length} spawn call sites found)`);
+  ok(!stray.length, `every spawn on the discovery path is allowlisted WITH a reason (${stray.slice(0, 4).join(' | ') || 'clean'})`);
+  const deadRows = ALLOWED.filter((a) => !hitNeedles.has(a.needle)).map((a) => `${a.file}:${a.needle}`);
+  ok(!deadRows.length, `no dead allowlist rows (${deadRows.join(' | ') || 'all live'})`);
+  // NEGATIVE CONTROLS: the two retired per-item shapes must be CAUGHT by this
+  // exact scanner, and a commented-out one must NOT be — an allowlist that
+  // cannot go red, or that reddens on prose, is not enforcement.
+  const retired = [
+    "    const out = await execFileP('pgrep', ['-P', String(childPid)], { timeout: 2000 });",
+    "  const out = await execFileP('ps', ['-p', String(pid), '-o', 'ppid='], { timeout: 2000 });",
+  ];
+  const ncStray = retired.filter((line) => !isSpawnComment(line) && SPAWN_CALL.test(spawnScan(line))
+    && !ALLOWED.some((x) => x.file === 'src/session-store.js' && line.includes(x.needle)));
+  ok(ncStray.length === 2, `NEGATIVE CONTROL: the retired per-lock \`ps -o ppid=\` and per-session \`pgrep -P\` are both caught (${ncStray.length}/2)`);
+  ok(retired.every((l) => isSpawnComment('  // ' + l.trim())),
+    'NEGATIVE CONTROL: the same lines behind a `//` are prose, not offenders');
+}
+
 console.log(fail ? `\n${fail} FAILED (${pass} passed)` : `\nALL PASS (${pass})`);
 process.exit(fail ? 1 : 0);

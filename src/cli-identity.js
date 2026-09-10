@@ -197,6 +197,155 @@ function procUid(pid, opts) {
   return ps && Number.isFinite(ps.uid) ? ps.uid : null;
 }
 
+/** ── THE PROCESS TREE, READ WITHOUT FORKING (2026-09-09) ──────────────────
+ *
+ *  "Who is pid N's parent?" and "which pids did N fork?" are the last two
+ *  process-table questions the discovery sweep was asking with a CHILD PROCESS
+ *  per item — `ps -p <pid> -o ppid=` for every claude lock file (the tmux pane
+ *  lookup) and `pgrep -P <childPid>` for every live session. They live here
+ *  with the identity rule for one reason: they are the same kind of fact, read
+ *  from the same place, and the answer must not depend on which caller asks.
+ *
+ *  THE COST IS THE FORK, NOT THE WAIT. `execFile` is asynchronous about the
+ *  WAIT; fork(2)/posix_spawn still copies the CALLING process's page tables on
+ *  the calling thread, so the parent is BLOCKED for the copy before any child
+ *  runs. Measured in a plain node process on the dev box (2026-09-09), one
+ *  `spawn('true')`: 1.8 ms at 45 MB RSS, 18.8 ms at 543 MB, 67-73 ms at 1.5 GB.
+ *  A server is a 1.5 GB process, and `Promise.all` over N spawns serialises N
+ *  of those forks into ONE tick — which is why a 61-lock pod answered every
+ *  session create and every kill with an 11-17 s event-loop block, and why the
+ *  2.242.0 sync→async fix (which fixed only the wait) did not end the class.
+ *
+ *  SO: /proc FIRST, ALWAYS. `/proc/<pid>/stat` field 4 is the ppid and
+ *  `/proc/<pid>/task/<tid>/children` lists what that thread forked (Linux
+ *  ≥ 3.5) — pure reads of a virtual filesystem, no fork, no page tables. The
+ *  no-/proc rung (macOS/BSD, where "full support" is a README promise) is ONE
+ *  `ps -eo pid=,ppid=` FOR THE WHOLE SWEEP, memoised — never one exec per pid,
+ *  which is the shape being retired.
+ *
+ *  A VALUE READ, NEVER AN EXISTENCE PROBE (the §17 standing-sweep rule, same
+ *  as `readPsIdentity` above): an answer nobody could give is `null` / `[]` =
+ *  "no evidence", which every caller here reads as "no tmux pane" / "no
+ *  children we can see", never as "the process is gone". `kill -0` remains the
+ *  only thing allowed to decide existence.
+ *
+ *  `procRoot` is injectable so the no-/proc rungs can be DRIVEN on Linux — the
+ *  r5 lesson from `vs_argv`: a rung no test can reach is prose. */
+const PROC_ROOT = '/proc';
+/** How long ONE parent/children table stands. Deliberately shorter than the
+ *  /api/sessions cache (4.5 s), so consecutive sweeps re-read rather than
+ *  reason about a stale table, while the N reads WITHIN one sweep share it. */
+const PROC_TABLE_TTL_MS = 2000;
+/** A missing /proc is re-checked; a present one is remembered for good. */
+const PROCFS_RECHECK_MS = 60000;
+const _procfsSeen = new Map(); // procRoot -> { at, present }
+let _parentIndex = null;       // { at, root, byChild, byParent }
+
+/** Does this machine have a procfs? YES is a platform fact and is remembered
+ *  permanently; NO is re-checked, because one failed stat (EMFILE, a mount
+ *  still coming up) must never become a permanent downgrade to forking. */
+function hasProcfs(procRoot = PROC_ROOT, now = Date.now) {
+  const hit = _procfsSeen.get(procRoot);
+  if (hit && (hit.present || now() - hit.at < PROCFS_RECHECK_MS)) return hit.present;
+  let present = false;
+  try { present = fs.statSync(`${procRoot}/self`).isDirectory(); } catch { present = false; }
+  _procfsSeen.set(procRoot, { at: now(), present });
+  return present;
+}
+
+/** /proc/<pid>/stat field 4 (ppid), or null when it cannot be read.
+ *  comm may contain spaces AND parens, so the fields are counted from the LAST
+ *  ')' — the same rule session-store's `procStartTicks` uses for field 22.
+ *  rest[0] is the state (field 3), so the ppid is rest[1]. */
+function ppidFromStat(procRoot, pid) {
+  try {
+    const stat = fs.readFileSync(`${procRoot}/${pid}/stat`, 'utf8');
+    const rest = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+    const v = Number(rest[1]);
+    return Number.isInteger(v) && v >= 0 ? v : null;
+  } catch { return null; }
+}
+
+/** The ONE parent/children table per sweep — built by walking /proc (zero
+ *  fork) or, where there is no /proc, by ONE `ps -eo pid=,ppid=`. Memoised for
+ *  PROC_TABLE_TTL_MS: the callers ask about many pids back to back. */
+function parentIndex({ procRoot = PROC_ROOT, execImpl = execFileSync, now = Date.now } = {}) {
+  const t = now();
+  if (_parentIndex && _parentIndex.root === procRoot && t - _parentIndex.at < PROC_TABLE_TTL_MS) return _parentIndex;
+  const byChild = new Map(), byParent = new Map();
+  const add = (pid, ppid) => {
+    byChild.set(pid, ppid);
+    if (!byParent.has(ppid)) byParent.set(ppid, []);
+    byParent.get(ppid).push(pid);
+  };
+  if (hasProcfs(procRoot, now)) {
+    let ents = [];
+    try { ents = fs.readdirSync(procRoot); } catch { ents = []; }
+    for (const name of ents) {
+      if (!/^\d+$/.test(name)) continue;
+      const pp = ppidFromStat(procRoot, name);
+      if (pp != null) add(Number(name), pp);
+    }
+  } else {
+    try {
+      const out = execImpl('ps', ['-eo', 'pid=,ppid='], {
+        encoding: 'utf8', timeout: 5000, maxBuffer: 8 * 1024 * 1024, stdio: ['ignore', 'pipe', 'ignore'],
+      });
+      for (const line of String(out || '').split('\n')) {
+        const m = /^\s*(\d+)\s+(\d+)\s*$/.exec(line);
+        if (m) add(Number(m[1]), Number(m[2]));
+      }
+    } catch { /* an unanswerable `ps` leaves an EMPTY index — no evidence, never a claim */ }
+  }
+  _parentIndex = { at: t, root: procRoot, byChild, byParent };
+  return _parentIndex;
+}
+
+/** The parent pid of a live pid, or null when nothing here can say. */
+function readPpid(pid, opts = {}) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return null;
+  const procRoot = opts.procRoot || PROC_ROOT;
+  const direct = ppidFromStat(procRoot, n);
+  if (direct != null) return direct;
+  // With a procfs present, /proc answers for EVERY live pid — a miss means the
+  // process exited or is hidden, and a `ps` table would say the same thing at
+  // the price of a fork. The table rung belongs to machines with no /proc.
+  if (hasProcfs(procRoot, opts.now || Date.now)) return null;
+  const v = parentIndex({ ...opts, procRoot }).byChild.get(n);
+  return v === undefined ? null : v;
+}
+
+/** The pids a live pid forked (direct children only, the `pgrep -P` answer).
+ *  EVERY THREAD IS ASKED: children are recorded against the thread that forked
+ *  them, and a multi-threaded parent may fork off any of them, so the union of
+ *  `task/<tid>/children` is the whole answer while `task/<pid>/children` alone
+ *  is only the main thread's. A kernel built without CONFIG_PROC_CHILDREN
+ *  answers nothing at all — that is the ONE table's other job. */
+function readChildPids(pid, opts = {}) {
+  const n = Number(pid);
+  if (!Number.isInteger(n) || n <= 0) return [];
+  const procRoot = opts.procRoot || PROC_ROOT;
+  if (hasProcfs(procRoot, opts.now || Date.now)) {
+    let tasks = [];
+    try { tasks = fs.readdirSync(`${procRoot}/${n}/task`); } catch { return []; }
+    const out = new Set();
+    let answered = false;
+    for (const t of tasks) {
+      let txt = null;
+      try { txt = fs.readFileSync(`${procRoot}/${n}/task/${t}/children`, 'utf8'); } catch { continue; }
+      answered = true;
+      for (const w of txt.split(/\s+/)) { const c = Number(w); if (Number.isInteger(c) && c > 0) out.add(c); }
+    }
+    if (answered) return [...out];
+  }
+  return [...(parentIndex({ ...opts, procRoot }).byParent.get(n) || [])];
+}
+
+/** Drop the memoised tables — for a test that wants to measure "one exec per
+ *  sweep" twice in a row, and for nothing else in production. */
+function resetProcTables() { _parentIndex = null; _procfsSeen.clear(); }
+
 /** `readlink /proc/<pid>/exe` with the kernel's ` (deleted)` marker stripped.
  *  '' when there is no /proc, no permission, or no such process. */
 function procExe(pid) {
@@ -407,4 +556,8 @@ function pidAliveShellFn() {
 }`;
 }
 
-module.exports = { isCliProcess, cliIdentityShellFns, pidAliveShellFn, procArgv, procExe, readPsIdentity, procCmdline, procUid, PS_IDENTITY_TTL_MS, INTERPRETERS, MAX_INTERP_FLAGS };
+module.exports = {
+  isCliProcess, cliIdentityShellFns, pidAliveShellFn, procArgv, procExe, readPsIdentity, procCmdline, procUid,
+  hasProcfs, readPpid, readChildPids, resetProcTables,
+  PS_IDENTITY_TTL_MS, PROC_TABLE_TTL_MS, PROCFS_RECHECK_MS, INTERPRETERS, MAX_INTERP_FLAGS,
+};

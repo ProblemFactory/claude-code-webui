@@ -31,12 +31,20 @@ fs.writeFileSync(path.join(projB, SID3 + '.jsonl'), rec(SID3, 'beta conversation
 // A live lock claiming SID1. THE FIXTURE MUST BE A REAL BINARY NAMED `claude`
 // (B-3185 r3): this suite's whole point is that the DEVICE snapshot and the
 // LOCAL sweep answer identically, and the two ask "is this pid claude?" through
-// different rungs — the local sweep reads `ps -o comm=` (session-store
-// `isProcessClaudeAsync`, reached ONLY from `isLockClaude`'s no-procStart
-// fallback, which is why this lock fixture carries no numeric `procStart`)
+// different rungs — the local sweep takes `isLockClaude`'s no-procStart
+// fallback (which is why this lock fixture carries no numeric `procStart`)
 // while the device path runs the shared executable predicate (discovery-facts
 // pidLooksClaude → src/cli-identity.js isCliProcess: argv[0] / interpreter
 // operand / /proc/exe).
+//   WHICH RUNG THAT FALLBACK TAKES CHANGED ON 2026-09-09, and the parity claim
+// did not: on a machine WITH a procfs it now asks `isCliProcess` too (pure file
+// reads, zero forks — a per-lock `ps` on the /api/sessions sweep is the 11-17 s
+// event-loop block userW's pod took after every create and kill), and only
+// where there is no /proc at all does it reach the `ps -o comm=` twin
+// `isProcessClaudeAsync`. So on THIS box the two paths now agree by
+// construction, which would make the parity assert below vacuous as a twin
+// gate — §1b therefore drives the surviving `comm` rung DIRECTLY on the same
+// live fixture and demands the same verdict.
 //   THE NAME IN THAT SENTENCE WAS STALE FOR SIX COMMITS (r5, review defect 2):
 // it named the SYNC twin B-3185 r4 DELETED (that name is deliberately not
 // spelled anywhere above — the guard below asserts no module defines it and
@@ -95,6 +103,23 @@ const child = spawn(fakeClaude, ['-c', 'read x'], { detached: false, stdio: ['pi
 fs.mkdirSync(path.join(home, '.claude', 'sessions'), { recursive: true });
 fs.writeFileSync(path.join(home, '.claude', 'sessions', child.pid + '.json'),
   JSON.stringify({ pid: child.pid, sessionId: SID1, cwd: '/work/alpha', startedAt: new Date().toISOString() }));
+
+// ── §1b THE `comm` TWIN'S OWN PARITY GATE (2026-09-09). Until this date the
+// sweep's answer for a lock with no `procStart` WAS `ps -o comm=`, so the
+// sweep-vs-device parity assert below doubled as this twin's gate. It no
+// longer does — on a procfs machine `isLockClaude` asks `isCliProcess` first
+// (a per-lock fork on the /api/sessions sweep was the 11-17 s event-loop block
+// userW's pod took after every create and kill), so the two paths would agree
+// here by construction and the twin would drift unwatched. Drive it directly,
+// on the SAME live fixture, and demand the same verdict.
+{
+  const store = require(REPO + '/src/session-store.js');
+  const ident = require(REPO + '/src/cli-identity.js');
+  const viaComm = await store.isProcessClaudeAsync(child.pid);
+  const viaExe = ident.isCliProcess(child.pid, 'claude');
+  ok(viaComm === true && viaExe === true,
+    `the \`comm\` twin and THE identity agree on the live fixture (comm=${viaComm}, exe=${viaExe}) — the no-/proc rung is still watched`);
+}
 
 // the route module with a controllable flag + a stub hosts.device(null)
 const sessionsMod = require(REPO + '/src/routes/sessions.js');

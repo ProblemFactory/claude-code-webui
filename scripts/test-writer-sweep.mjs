@@ -1778,10 +1778,12 @@ if (fs.existsSync('/proc/self')) {
       why: 'START-TIME READ (the no-/proc rung of the pid-identity stamp): it makes a recycled pid DISTINGUISHABLE from the original. An unanswerable `ps` returns \'\' = "no stamp", which is compared as a non-match and therefore never credits a stranger with being ours.' },
     { file: 'src/agentd/agentd.js', needle: `execFileSync('ps', ['-p', String(pid), '-o', 'command=']`,
       why: 'ARGV READ inside the single-instance lock check, and existence is decided on the NEXT line by `process.kill(pid, 0)`. The empty answer is deliberately treated as "could be ours" (it BLOCKS a second daemon) — the conservative direction, the opposite of a false all-clear.' },
-    { file: 'src/session-store.js', needle: `execFileSync('ps', ['-p', String(pid), '-o', 'ppid=']`,
-      why: 'PARENT READ (tmux pane lookup, sync twin): the answer names a pane or does not. It signals nothing and decides no liveness.' },
-    { file: 'src/session-store.js', needle: `execFileP('ps', ['-p', String(pid), '-o', 'ppid=']`,
-      why: 'PARENT READ (the async twin of the line above, on the discovery sweep path).' },
+    // The two PARENT READs that used to sit here (`execFileSync`/`execFileP`
+    // with `-o ppid=`, the tmux pane lookup and its sync twin) are GONE
+    // (2026-09-09): a per-lock fork on the /api/sessions sweep is the 11-17 s
+    // event-loop block, so the parent now comes from /proc through
+    // src/cli-identity.js `readPpid` and the sync twin — which had no callers
+    // at all — was deleted with it.
     { file: 'src/session-store.js', needle: `execFileP('ps', ['-p', String(pid), '-o', 'comm=']`,
       why: 'NAME READ — `isProcessClaudeAsync`, the documented B-3185 r4 twin: its ONE caller is isLockClaude, it decides whether a CARD READS RUNNING, and it is on no kill path (the /api/kill-pid gate asks src/cli-identity.js instead). Kept because the path that reaches it is macOS-per-lock, where the shared predicate is synchronous — a per-lock blocking fork is the 2.242.0 stall.' },
     { file: 'scripts/vibespace-agentd-install.sh', needle: `OLDCMD=$(ps -p "$OLDPID" -o command=`,

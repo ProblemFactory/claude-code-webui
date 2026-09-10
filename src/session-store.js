@@ -6,8 +6,11 @@
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
-const { execFileSync, execFile } = require('child_process');
+const { execFile } = require('child_process');
 const { extractTailIds, nameFromUserRecord } = require('./discovery-facts');
+// THE process reader (B-3185): identity, and since 2026-09-09 the two
+// process-tree facts this sweep used to buy with one child process per item.
+const { isCliProcess, hasProcfs, readPpid, readChildPids } = require('./cli-identity.js');
 const { readJsonlBounded } = require('./adapters/codex');
 // A test suite's synthetic transcript is never a conversation (see the essay
 // in src/fixture-guard.js — one declaration, shared with the usage walk).
@@ -52,26 +55,11 @@ function recoverCwdFromProjDir(projDir) {
   return current;
 }
 
-function getTmuxPaneMap() {
-  const map = new Map();
-  try {
-    const out = execFileSync('tmux', ['list-panes', '-a', '-F', '#{pane_pid}||#{session_name}:#{window_index}.#{pane_index}'], { encoding: 'utf-8', timeout: 3000, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
-    for (const line of out.split('\n')) {
-      const [pid, target] = line.split('||');
-      if (pid && target) map.set(parseInt(pid), target);
-    }
-  } catch {}
-  return map;
-}
-
-function findTmuxTarget(pid, paneMap) {
-  if (paneMap.has(pid)) return paneMap.get(pid);
-  try {
-    const ppid = parseInt(execFileSync('ps', ['-p', String(pid), '-o', 'ppid='], { encoding: 'utf-8', timeout: 2000 }).trim());
-    if (paneMap.has(ppid)) return paneMap.get(ppid);
-  } catch {}
-  return null;
-}
+// The SYNC tmux twins (`getTmuxPaneMap` / `findTmuxTarget`) are GONE
+// (2026-09-09). They had NO callers — the kb line "sync variants remain for
+// boot paths" described boot-restore's OWN execFileSync calls, not these — and
+// they carried the retired per-pid `ps -o ppid=` fork this change exists to
+// remove. Dead code that spells a forbidden shape is how the shape comes back.
 
 // The SYNC `isProcessClaude` is GONE (B-3185 r4). Its one caller was
 // /api/kill-pid's local branch — a SIGTERM gate — and a kill decision belongs
@@ -85,7 +73,17 @@ function findTmuxTarget(pid, paneMap) {
 // live sessions × sequential pgrep + tmux + per-lock ps; each sync fork is
 // 100-300ms under load and pgrep's 2s timeout × N bounded the worst sweeps at
 // tens of seconds — the 8-33s "whole instance freezes while I work" class).
-// Same commands, async + parallelizable; sync variants stay for boot paths.
+//
+// ASYNC WAS ONLY HALF OF IT (2026-09-09, userW's pod). `execFile` moves the
+// WAIT off the loop; the FORK still happens on the calling thread and still
+// copies the parent's page tables (measured: 1.8ms at 45MB RSS, 18.8ms at
+// 543MB, 67-73ms at 1.5GB), and `Promise.all` over N of them lines N forks up
+// inside ONE tick. On a pod with 61 locks and a 1.6GB server that is the
+// 11-17s block seen after EVERY session create and EVERY kill, 27 times in 7
+// days. So the sweep now spawns NOTHING per session: parents and children come
+// from /proc through THE process reader (src/cli-identity.js) and the ONE
+// remaining exec — `tmux list-panes` — is skipped entirely when no tmux binary
+// is on PATH and cached for the discovery cache's own TTL when it is.
 function execFileP(cmd, args, opts = {}) {
   return new Promise((resolve) => {
     try { execFile(cmd, args, { encoding: 'utf-8', ...opts }, (err, stdout) => resolve(err ? null : String(stdout || ''))); }
@@ -93,22 +91,58 @@ function execFileP(cmd, args, opts = {}) {
   });
 }
 
+/** How long ONE tmux pane map stands. The /api/sessions cache is 4.5s and a
+ *  create/kill forces an extra sweep, so this makes the burst share one map
+ *  while a genuinely new pane still appears within a poll. */
+const TMUX_MAP_TTL_MS = 4000;
+/** A PATH lookup is a platform fact that can change (a user installs tmux). */
+const TMUX_PATH_TTL_MS = 60000;
+let _paneMapMemo = null;   // { at, map }
+let _tmuxPathMemo = null;  // { at, path }
+
+/** Where `tmux` is on PATH, or null — by STATTING the PATH entries, never by
+ *  spawning `which`/`command -v`. userW's pod has no tmux at all, so every
+ *  sweep paid for a doomed spawn AND then paid a `ps` per lock because the
+ *  empty pane map still went to the per-lock lookup below. */
+function tmuxOnPath() {
+  const now = Date.now();
+  if (_tmuxPathMemo && now - _tmuxPathMemo.at < TMUX_PATH_TTL_MS) return _tmuxPathMemo.path;
+  let found = null;
+  for (const dir of String(process.env.PATH || '').split(path.delimiter)) {
+    if (!dir) continue;
+    try {
+      const p = path.join(dir, 'tmux');
+      const st = fs.statSync(p);
+      if (st.isFile() && (st.mode & 0o111)) { found = p; break; }
+    } catch { /* not here */ }
+  }
+  _tmuxPathMemo = { at: now, path: found };
+  return found;
+}
+
 async function getTmuxPaneMapAsync() {
+  const now = Date.now();
+  if (_paneMapMemo && now - _paneMapMemo.at < TMUX_MAP_TTL_MS) return _paneMapMemo.map;
   const map = new Map();
+  if (!tmuxOnPath()) { _paneMapMemo = { at: now, map }; return map; } // no binary ⇒ no spawn
   const out = await execFileP('tmux', ['list-panes', '-a', '-F', '#{pane_pid}||#{session_name}:#{window_index}.#{pane_index}'], { timeout: 3000 });
   for (const line of String(out || '').trim().split('\n')) {
     const [pid, target] = line.split('||');
     if (pid && target) map.set(parseInt(pid), target);
   }
+  _paneMapMemo = { at: Date.now(), map };
   return map;
 }
 
+/** Which tmux pane owns this pid, or null. An EMPTY pane map means there are
+ *  no panes to match — answer without touching the process table at all (this
+ *  is the shape on every machine without tmux, i.e. every fleet pod), and
+ *  otherwise read the parent from /proc rather than forking a `ps` per lock. */
 async function findTmuxTargetAsync(pid, paneMap) {
+  if (!paneMap || paneMap.size === 0) return null;
   if (paneMap.has(pid)) return paneMap.get(pid);
-  const out = await execFileP('ps', ['-p', String(pid), '-o', 'ppid='], { timeout: 2000 });
-  const ppid = parseInt(String(out || '').trim());
-  if (paneMap.has(ppid)) return paneMap.get(ppid);
-  return null;
+  const ppid = readPpid(pid);
+  return ppid != null && paneMap.has(ppid) ? paneMap.get(ppid) : null;
 }
 
 // THE LAST `comm` IDENTITY, AND ITS REAL BLAST RADIUS (B-3185 r4 — r3 recorded
@@ -132,6 +166,12 @@ async function findTmuxTargetAsync(pid, paneMap) {
 // is the 2.242.0 event-loop stall this whole async family exists to avoid — and
 // on Linux `procStart` answers first with a pure file read. scripts/
 // test-local-discovery-device.mjs compares the two rungs on a live fixture.
+//   2026-09-09 NARROWED IT FURTHER: it is now reachable ONLY where there is no
+// procfs at all. A Linux lock with no usable `procStart` (an older writer, or a
+// pid that raced its own exit between `isPidAlive` and the stat — routine on a
+// 61-lock pod) used to land HERE and buy a fork per lock; `isLockClaude` asks
+// `isCliProcess` first on any procfs machine, which is pure file reads and is
+// the DAEMON snapshot's own rule.
 async function isProcessClaudeAsync(pid) {
   const out = await execFileP('ps', ['-p', String(pid), '-o', 'comm='], { timeout: 2000 });
   const cmd = String(out || '').trim();
@@ -167,8 +207,16 @@ async function isLockClaude(lock) {
   if (want) {
     const have = procStartTicks(pid);
     if (have != null) return have === want; // pure file read, no fork
-    // /proc unreadable (non-Linux, or raced exit) → fall through to ps
+    // /proc unreadable (non-Linux, or raced exit) → fall through
   }
+  // NO USABLE procStart. Where there IS a procfs, ask THE identity
+  // (src/cli-identity.js) — the same predicate the DEVICE snapshot's lock scan
+  // uses (discovery-facts `pidLooksClaude`), and on Linux it is pure /proc
+  // reads: zero forks per lock. This closes the one remaining per-lock fork on
+  // a procfs machine (a lock written without a numeric procStart, or a pid
+  // that exited between `isPidAlive` and the stat — routine on a 61-lock pod)
+  // and makes the local sweep and the daemon sweep ONE rule.
+  if (hasProcfs()) return isCliProcess(pid, 'claude');
   return isProcessClaudeAsync(pid);
 }
 
@@ -1043,7 +1091,6 @@ class SessionMessages {
 // discovery snapshot when agentd.localDiscovery is on (facts pre-verified
 // device-side), null ⇒ the local scan. Returns plain entries (the route adds
 // sessionKey/realCwd). ──
-const _childPidCache = new Map(); // childPid -> {pids, at} — see pgrep note below
 async function discoverClaudeSessions({ activeSessions, webuiPids = new Set(), devSnap = null } = {}) {
   const projectsDir = path.join(os.homedir(), '.claude', 'projects');
   // snapshot jsonls grouped by projDir for the walk below
@@ -1057,27 +1104,19 @@ async function discoverClaudeSessions({ activeSessions, webuiPids = new Set(), d
 
   // Step 1: Scan lock files + tmux panes -> build map of RUNNING sessions
   // Build webuiPid -> claudeSessionId map for precise JSONL matching
+  // THE `pgrep -P <childPid>` PER LIVE SESSION IS GONE (2026-09-09), and so is
+  // the 15s cache that existed only to blunt it: the direct children of a pid
+  // are `/proc/<pid>/task/*/children`, which is a file read. The cache was also
+  // a correctness cost — a wrapper that forked a new claude within the window
+  // stayed unmapped — so removing the fork removes the staleness with it.
   const webuiPidToSessionId = new Map();
-  const needPgrep = []; // [{childPid, claudeSessionId}] — cache misses
   for (const [id, s] of activeSessions) {
     if (s.claudeSessionId && s._childPid) {
-      // Map childPid + its direct children (claude forks from node-pty spawn)
+      // the childPid + its direct children (claude forks from the node-pty spawn)
       webuiPidToSessionId.set(s._childPid, s.claudeSessionId);
-      // the wrapper's child pids rarely change, cache them 15s (audit round-2)
-      const hit = _childPidCache.get(s._childPid);
-      if (hit && Date.now() - hit.at < 15000) {
-        for (const p of hit.pids) webuiPidToSessionId.set(p, s.claudeSessionId);
-      } else needPgrep.push({ childPid: s._childPid, claudeSessionId: s.claudeSessionId });
+      for (const p of readChildPids(s._childPid)) webuiPidToSessionId.set(p, s.claudeSessionId);
     }
   }
-  await Promise.all(needPgrep.map(async ({ childPid, claudeSessionId }) => {
-    const out = await execFileP('pgrep', ['-P', String(childPid)], { timeout: 2000 });
-    const pids = [];
-    for (const line of String(out || '').trim().split('\n')) { const p = parseInt(line.trim()); if (p) pids.push(p); }
-    _childPidCache.set(childPid, { pids, at: Date.now() });
-    if (_childPidCache.size > 512) _childPidCache.delete(_childPidCache.keys().next().value);
-    for (const p of pids) webuiPidToSessionId.set(p, claudeSessionId);
-  }));
 
   const paneMap = await getTmuxPaneMapAsync();
   const runningByProjDir = new Map(); // projDirName -> [{lock, tmuxTarget, assigned, claudeSessionId}]
@@ -1268,9 +1307,8 @@ module.exports = {
   isPidAlive,
   cwdToProjectDir,
   recoverCwdFromProjDir,
-  getTmuxPaneMap,
-  findTmuxTarget,
   getTmuxPaneMapAsync,
+  tmuxOnPath,
   findTmuxTargetAsync,
   isProcessClaudeAsync,
   isLockClaude,
