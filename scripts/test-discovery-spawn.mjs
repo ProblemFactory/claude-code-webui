@@ -24,7 +24,7 @@
 // The census PRINTS what it counted, the fixture is a scratch HOME (the real
 // ~/.claude is never read), and each half has `master`'s own copy of the module
 // under test as its NEGATIVE CONTROL — the sweep's dropped in beside the real
-// one, refreshWebuiPids' sliced out of `git show master:server.js`.
+// one, refreshWebuiPids' sliced out of `git show ${PRE_FIX_REF}:server.js`.
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
@@ -32,6 +32,13 @@ import { spawn, spawnSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { scratch, scratchHome } from './scratch.mjs';
 import { gitEnvFrom } from './git-env.mjs';
+
+// THE PRE-FIX BYTES ARE PINNED TO A SHA, NEVER TO `master` (the 2.369.85 lesson,
+// paid again on this suite's first push: the negative controls read
+// `git show master:<file>`, and a branch name is pre-fix only until the fix
+// merges into it — the gate went RED the moment 2.369.88 was cut). 9516bd8d =
+// 2.369.87, the last master without this fix; override for archaeology.
+const PRE_FIX_REF = process.env.VIBESPACE_DISCOVERY_PREFIX_REF || '9516bd8d';
 
 const require = createRequire(import.meta.url);
 const REPO = path.resolve(new URL('..', import.meta.url).pathname);
@@ -279,10 +286,10 @@ const hasTmux = !!require(path.join(REPO, 'src/session-store.js')).tmuxOnPath();
 // ── §4 NEGATIVE CONTROL: `master`'s own session-store, beside the real one.
 //    Without it, "0 spawns" could just mean the fixture never reaches the code.
 {
-  const git = spawnSync('git', ['show', 'master:src/session-store.js'],
+  const git = spawnSync('git', ['show', `${PRE_FIX_REF}:src/session-store.js`],
     { cwd: REPO, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, env: gitEnvFrom(process.env) });
   if (git.status !== 0 || !git.stdout) {
-    ok(true, `NEGATIVE CONTROL SKIPPED — \`git show master:src/session-store.js\` is unavailable here: ${(git.stderr || git.error?.message || 'no output').trim().slice(0, 160)}`);
+    ok(true, `NEGATIVE CONTROL SKIPPED — \`git show ${PRE_FIX_REF}:src/session-store.js\` is unavailable here: ${(git.stderr || git.error?.message || 'no output').trim().slice(0, 160)}`);
   } else {
     const pre = git.stdout;
     // the control must really BE the retired shape, or it controls nothing
@@ -477,10 +484,10 @@ const hasTmux = !!require(path.join(REPO, 'src/session-store.js')).tmuxOnPath();
   // NEGATIVE CONTROL: master's own copy of the SAME function, same fixture, one
   // variable. Without it, "0 spawns" could mean the arm never reached the loop.
   {
-    const git = spawnSync('git', ['show', 'master:server.js'],
+    const git = spawnSync('git', ['show', `${PRE_FIX_REF}:server.js`],
       { cwd: REPO, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, env: gitEnvFrom(process.env) });
     if (git.status !== 0 || !git.stdout) {
-      ok(true, `NEGATIVE CONTROL SKIPPED — \`git show master:server.js\` is unavailable here: ${(git.stderr || git.error?.message || 'no output').trim().slice(0, 160)}`);
+      ok(true, `NEGATIVE CONTROL SKIPPED — \`git show ${PRE_FIX_REF}:server.js\` is unavailable here: ${(git.stderr || git.error?.message || 'no output').trim().slice(0, 160)}`);
     } else {
       const preSrc = sliceFn(git.stdout, 'refreshWebuiPids');
       ok(!!preSrc && /execFileSync\('pgrep', \['-P'/.test(preSrc),
@@ -615,10 +622,10 @@ const hasTmux = !!require(path.join(REPO, 'src/session-store.js')).tmuxOnPath();
 
   // NEGATIVE CONTROL: master's own bytes, same fixture, one variable.
   {
-    const git = spawnSync('git', ['show', 'master:src/ws-handler.js'],
+    const git = spawnSync('git', ['show', `${PRE_FIX_REF}:src/ws-handler.js`],
       { cwd: REPO, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, env: gitEnvFrom(process.env) });
     if (git.status !== 0 || !git.stdout) {
-      ok(true, `NEGATIVE CONTROL SKIPPED — \`git show master:src/ws-handler.js\` is unavailable here: ${(git.stderr || git.error?.message || 'no output').trim().slice(0, 160)}`);
+      ok(true, `NEGATIVE CONTROL SKIPPED — \`git show ${PRE_FIX_REF}:src/ws-handler.js\` is unavailable here: ${(git.stderr || git.error?.message || 'no output').trim().slice(0, 160)}`);
     } else {
       const preSrc = sliceKillBody(git.stdout);
       ok(!!preSrc && /execFileAsync\('pgrep', \['-f', session\.socketPath\]/.test(preSrc),
