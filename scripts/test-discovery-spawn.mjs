@@ -557,10 +557,18 @@ const hasTmux = !!require(path.join(REPO, 'src/session-store.js')).tmuxOnPath();
     const k = spawn('/bin/sh', ['-c', 'sleep 300', NEEDLE], { stdio: 'ignore' });
     killKids.push(k); kids.push(k);
   }
-  await new Promise((r) => setTimeout(r, 500));
-  const wantPids = killKids.map((k) => k.pid).sort((a, b) => a - b);
-  ok(ident.pidsMatchingCmdline && (await ident.pidsMatchingCmdline(NEEDLE)).length === 3,
-    `POSITIVE CONTROL: the fixture really carries the needle in ${wantPids.length} live command lines (${JSON.stringify(wantPids)})`);
+  // WAIT FOR THE CONDITION, NOT FOR A CLOCK: this box hosts ~160 checkouts and
+  // a detached heavy tier, so a fixed settle is a gate that goes red for a
+  // reason that is not its subject. Poll until the three execs have landed.
+  const settleDeadline = Date.now() + 15000;
+  let wantPids = [];
+  for (;;) {
+    wantPids = (await ident.pidsMatchingCmdline(NEEDLE)).sort((a, b) => a - b);
+    if (wantPids.length === 3 || Date.now() > settleDeadline) break;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  ok(wantPids.length === 3,
+    `POSITIVE CONTROL: the fixture really carries the needle in 3 live command lines (${JSON.stringify(wantPids)}) — without them every count below would be a zero from doing no work`);
 
   // The session's OWN attach pty is excluded by both copies — give it one of
   // the three so the exclusion is exercised rather than assumed.
