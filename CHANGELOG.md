@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.369.89 — a chat file path ends at Chinese punctuation (owner screenshot: `…/designs/（浏览器` became the link)
+
+- The path linkifier stopped only at ASCII punctuation, so a fullwidth "（" (and ，。：；！？“”「」【】《》…—) glued onto the link and the click opened nothing. The rule now lives in ONE PURE module, `src/path-linkify.js` (imports nothing; the renderer delegates `pathRe`/`cleanPath` to it): CJK **punctuation** terminates a path, CJK **letters** and fullwidth digits/letters stay linkable (`/home/u/文档/报告.md` still links), ASCII behaviour (`:line:col`, trailing `)`/`.`) unchanged, and `cleanPath` strips CJK trailing punctuation from URLs too.
+- test-path-linkify (14): the owner's exact case, CJK filenames, curly/corner/lenticular brackets, the pre-fix rule as a negative control (it reproduces the swallow), and wiring pins (the renderer carries no local copy; URLs and `/p/<id>` pages are linkified BEFORE paths).
+
 ## 2.369.88 — session discovery stops forking a child per session (inc-mtunmv3d-pmd6, fleet userW: "重启筛选之后白屏")
 
 - **The incident.** After "Restart now to apply (Terminate + Resume)" the chat window stayed blank for ~30 s, and on that pod EVERY session create and EVERY kill — chat or plain terminal — was followed by an 11–17 s event-loop freeze of the whole instance (7-day log: 27 of 27). Forensics on the pod: 61 lock files, tmux not installed, server 1.6 GB / 107 threads.

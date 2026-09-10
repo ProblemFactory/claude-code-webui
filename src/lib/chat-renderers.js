@@ -14,6 +14,7 @@ import { isAgentMemoryPath, backendFeatureCaps, initHealthIssues, initHealthLabe
 import { createBackendIconHtml, getBackendMeta } from './agent-meta.js';
 import { t } from './i18n.js';
 import { searchQueryOf } from '../search-card.js'; // shared with the server (CJS pulled into the bundle, like task-color-seq.js)
+import { pathRe as sharedPathRe, cleanPath as sharedCleanPath } from '../path-linkify.js'; // PURE: where a path ENDS (CJK punctuation too, 2026-09-10)
 import { mcpParts } from './chat-run-summary.js';
 // PURE builder (CJS pulled into the bundle, like ssh-key-format.js) — the
 // codex multi-agent collab rows (B-7473). Escaper/translator/icons are
@@ -1538,7 +1539,7 @@ class ChatRenderers {
   }
 
   /** Strip trailing punctuation from matched paths/URLs */
-  cleanPath(p) { return p.replace(/[`'".,;:!?)}\]]+$/, ''); }
+  cleanPath(p) { return sharedCleanPath(p); }
 
   /**
    * Linkify URLs in a text segment. Input is ALWAYS already HTML-escaped in both
@@ -1563,7 +1564,7 @@ class ChatRenderers {
    */
   linkifyPathsTagSafe(html, esc) {
     const e = esc ? escHtml : s => s;
-    const pathRe = /(?<![="'\w/])((?:~|\.\.?)?\/[^\0<>?\s!`&*()'":;\\][^\0<>?\s!`&*()'"\\:;]*(?:\/[^\0<>?\s!`&*()'"\\:;]+)+(?::\d+(?::\d+)?)?)/g;
+    const pathRe = sharedPathRe(); // src/path-linkify.js — the ONE definition of where a path ends
     return html.replace(/(<[^>]*>)|([^<]+)/g, (m, tag, txt) => {
       if (tag || !txt) return m;
       return txt.replace(pathRe, (raw) => {

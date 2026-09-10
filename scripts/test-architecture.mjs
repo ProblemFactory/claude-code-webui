@@ -46,6 +46,7 @@ const resolveRel = (from, spec) => {
 // ── Tier membership (path-based; NEW files inherit their directory's tier) ──
 const PURE = new Set(['src/plugin-manifest.js', 'src/account-pool-auto.js', 'src/model-family.js', 'src/task-color-seq.js', 'src/ssh-key-format.js', 'src/session-schema.js', 'src/otel-truth.js', 'src/msg-acl.js', 'src/backend-caps.js',
   'src/search-card.js', // web-search card renderer + title query + twin key — shared server (codex normalizer) + browser (chat-renderers)
+  'src/path-linkify.js', // where a chat file path ENDS (CJK punctuation) — shared browser (chat-renderers) + node tests; imports nothing
   'src/collab-row.js', // codex multi-agent collab row labels/HTML — esc/t/icons injected, so the XSS rule is unit-provable
   // login-session lifetime (2026-09-07): the claude harness descriptor reads the
   // credential file, this decides what the numbers MEAN; pool decisions + accounts
